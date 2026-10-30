@@ -1,6 +1,6 @@
 {
     ".url": {
-        "com.dustinky.qwenpaw.main": {
+        "qwenpaw.main": {
             "title": "QwenPaw",
             "icon": "images/icon_{0}.png",
             "type": "iframe",
@@ -8,12 +8,12 @@
             "port": "19091",
             "allUsers": true
         },
-        "com.dustinky.qwenpaw.console": {
+        "qwenpaw.console": {
             "title": "QwenPaw控制台",
             "icon": "images/console_{0}.png",
             "type": "iframe",
             "protocol": "http",
-            "url": "/cgi/ThirdParty/com.dustinky.qwenpaw/index.cgi/",
+            "url": "/cgi/ThirdParty/qwenpaw/index.cgi/",
             "allUsers": true
         }
     }

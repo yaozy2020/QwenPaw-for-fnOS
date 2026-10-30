@@ -709,7 +709,10 @@
         </div>
         <div class="info-row">
           <span class="info-label">服务端口</span>
-          <span class="info-val" id="valPort">19091</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="info-val" id="valPort">19091</span>
+            <button class="btn-outline btn-sm" onclick="changeServicePort()" style="padding: 2px 8px; font-size: 11px;">修改端口</button>
+          </div>
         </div>
       </div>
       <div style="display: flex; gap: 8px; margin-top: 8px;">
@@ -885,7 +888,7 @@
       if (path.includes("index.cgi")) {
         return path.substring(0, path.indexOf("index.cgi")) + "api.cgi";
       }
-      return "/cgi/ThirdParty/com.dustinky.qwenpaw/api.cgi";
+      return "/cgi/ThirdParty/qwenpaw/api.cgi";
     })();
 
     let refreshTimer = null;
@@ -1074,12 +1077,48 @@
         if (valVersion && data.version) { valVersion.innerText = data.version; currentRunningVersion = data.version; updateUpgradeButtonText(); }
         if (valAuth) valAuth.innerText = data.authEnabled ? "已启用密码保护" : "免密模式";
 
+        const portEl = document.getElementById("valPort");
+        const activePort = data.port || "19091";
+        if (portEl) portEl.innerText = activePort;
+
         const host = window.location.hostname || "127.0.0.1";
         const btnConsole = document.getElementById("btnWebConsole");
-        if (btnConsole) btnConsole.href = `http://${host}:19091`;
+        if (btnConsole) btnConsole.href = `http://${host}:${activePort}`;
 
       } catch (e) {
         console.error("fetchStatus err:", e);
+      }
+    }
+
+    
+    // 修改 Web 服务端口
+    async function changeServicePort() {
+      const currentPort = document.getElementById("valPort")?.innerText || "19091";
+      const input = prompt("请输入新的 QwenPaw Web 访问端口 (范围: 1024~65535):", currentPort);
+      if (!input || input.trim() === currentPort) return;
+      
+      const newPort = parseInt(input.trim(), 10);
+      if (isNaN(newPort) || newPort < 1024 || newPort > 65535) {
+        showToast("端口无效！必须为 1024~65535 之间的纯数字");
+        return;
+      }
+
+      const ok = await showModal({
+        title: "修改服务端口确认",
+        message: `确定要将 QwenPaw Web 端口修改为 ${newPort} 吗？\n\n保存后服务将自动重启以应用新端口。`,
+        type: "warn",
+        confirmText: "确认修改并重启"
+      });
+      if (!ok) return;
+
+      try {
+        showToast(`正在保存新端口 ${newPort}...`);
+        const res = await fetch(`${API_BASE}?action=change_port&port=${newPort}`, { method: "POST" });
+        const data = await res.json();
+        showToast(data.message || `端口已变更为 ${newPort}，正在重启...`);
+        setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
+      } catch (e) {
+        showToast("修改端口失败: " + e.message);
       }
     }
 

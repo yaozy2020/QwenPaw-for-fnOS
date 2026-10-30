@@ -11,7 +11,7 @@
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
-OUTPUT="$PROJ_DIR/com.dustinky.qwenpaw_v${VERSION}.fpk"
+OUTPUT="$PROJ_DIR/qwenpaw_v${VERSION}.fpk"
 CODE_DIR="$PROJ_DIR/app/qwenpaw/code"
 
 # 颜色
@@ -48,7 +48,7 @@ else
   cd "$PROJ_DIR/ui-fndesign" || exit 1
 
   # fnOS QwenPaw 控制台 base path
-  export VITE_BASE_PATH="${VITE_BASE_PATH:-/cgi/ThirdParty/com.dustinky.qwenpaw/index.cgi/}"
+  export VITE_BASE_PATH="${VITE_BASE_PATH:-/cgi/ThirdParty/qwenpaw/index.cgi/}"
   echo "  VITE_BASE_PATH=$VITE_BASE_PATH"
 
   if [ -x "$HOME/.bun/bin/bun" ]; then

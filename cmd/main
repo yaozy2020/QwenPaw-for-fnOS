@@ -14,7 +14,14 @@ export QWENPAW_LOG_LEVEL="${LOG_LEVEL}"
 export QWENPAW_AUTH_ENABLED=true
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
 
-CMD="source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port ${TRIM_SERVICE_PORT:-19091}"
+
+PORT_FILE="${TRIM_PKGVAR}/service_port"
+if [ -r "${PORT_FILE}" ]; then
+    PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
+fi
+PORT="${PORT:-${TRIM_SERVICE_PORT:-19091}}"
+
+CMD="source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port ${PORT}"
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}

@@ -4,12 +4,12 @@
         "shares":
         [
             {
-                "name": "com.dustinky.qwenpaw",
+                "name": "qwenpaw",
                 "permission":
                 {
                     "rw":
                     [
-                        "com.dustinky.qwenpaw"
+                        "qwenpaw"
                     ]
                 }
             }

@@ -12,10 +12,10 @@
 # 　许可证: MIT
 
 # 【注意】修改你自己的静态文件根目录，以本应用为例：
-BASE_PATH="/var/apps/com.dustinky.qwenpaw/target/www"
+BASE_PATH="/var/apps/qwenpaw/target/www"
 
 # 1. 从 REQUEST_URI 里拿到 index.cgi 后面的路径
-#    例如：/cgi/ThirdParty/com.dustinky.qwenpaw/index.cgi/index.html?foo=bar   
+#    例如：/cgi/ThirdParty/qwenpaw/index.cgi/index.html?foo=bar   
 #    先去掉 ? 后面的 query string
 URI_NO_QUERY="${REQUEST_URI%%\?*}"
 
@@ -26,7 +26,7 @@ REL_PATH="/"
 case "$URI_NO_QUERY" in
     *index.cgi*)
         # 去掉前面所有直到 index.cgi 为止的内容，保留后面的
-        # /cgi/ThirdParty/com.dustinky.qwenpaw/index.cgi/index.html -> /index.html
+        # /cgi/ThirdParty/qwenpaw/index.cgi/index.html -> /index.html
         REL_PATH="${URI_NO_QUERY#*index.cgi}"
         ;;
 esac
