@@ -19,19 +19,29 @@ chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
 chmod -R 755 "${TRIM_PKGVAR}" 2>/dev/null || true
 chmod -R 755 "${TRIM_PKGETC}" 2>/dev/null || true
 
-# 自动平滑继承老版本 com.dustinky.qwenpaw 的所有数据
+# 自动平滑继承老版本 com.dustinky.qwenpaw 的所有数据与账号密码凭据
 OLD_SHARE="/vol2/@appshare/com.dustinky.qwenpaw/.qwenpaw"
 NEW_SHARE="${QWENPAW_WORKING_DIR}"
+OLD_SECRET="/vol2/@appshare/com.dustinky.qwenpaw/.qwenpaw.secret"
+NEW_SECRET="$(dirname "${QWENPAW_WORKING_DIR}")/.qwenpaw.secret"
 
 if [ -d "${OLD_SHARE}" ] && [ ! -d "${NEW_SHARE}" ]; then
-    log_msg "检测到老版本数据目录，开始自动无损继承..."
+    log_msg "检测到老版本数据目录，开始自动无损继承工作区记忆..."
     mkdir -p "$(dirname "${NEW_SHARE}")"
     if cp -a "${OLD_SHARE}" "${NEW_SHARE}" 2>/dev/null; then
         chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${NEW_SHARE}" 2>/dev/null || true
         chmod -R 755 "${NEW_SHARE}" 2>/dev/null || true
-        log_msg "老版本记忆、工作区与配置已100%成功继承至新应用！"
-    else
-        log_msg "老版本数据迁移跳过或已复制部分文件，继续执行安装流程"
+        log_msg "老版本记忆、工作区与配置已100%成功继承！"
+    fi
+fi
+
+if [ -d "${OLD_SECRET}" ]; then
+    log_msg "检测到老版本密钥凭据目录，开始自动无损继承账号与密码..."
+    mkdir -p "${NEW_SECRET}"
+    if cp -a "${OLD_SECRET}/." "${NEW_SECRET}/" 2>/dev/null; then
+        chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${NEW_SECRET}" 2>/dev/null || true
+        chmod -R 700 "${NEW_SECRET}" 2>/dev/null || true
+        log_msg "老版本账号密码、MasterKey 与环境变量已100%成功继承！"
     fi
 fi
 
