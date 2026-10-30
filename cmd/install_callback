@@ -1,7 +1,6 @@
 #!/bin/bash
 
 PYTHON_BIN="/var/apps/python312/target/bin/python3"
-CODE_DIR="${TRIM_APPDEST}/qwenpaw/code"
 WORKING_DIR="${TRIM_PKGHOME}"
 VENV_DIR="${WORKING_DIR}/venv"
 
@@ -71,14 +70,22 @@ log_msg "正在升级虚拟环境 pip..."
 python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"
 
-cd "${CODE_DIR}"
-
-log_msg "正在安装 QwenPaw (源码模式)..."
+log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎 (Launcher 模式)..."
 PIP_LOG=$(mktemp)
-if ! pip3 install -e . $PIP_OPTS > "${PIP_LOG}" 2>&1; then
+TARGET_PKG="qwenpaw"
+if [ "${wizard_channel:-stable}" = "beta" ]; then
+    TARGET_PKG="--pre qwenpaw"
+fi
+
+log_msg "安装目标包: ${TARGET_PKG}，使用选项: ${PIP_OPTS}"
+if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
     cat "${PIP_LOG}" >> "${LOG_FILE}"
     ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
     rm -f "${PIP_LOG}"
+    handle_error
+fi
+cat "${PIP_LOG}" >> "${LOG_FILE}"
+rm -f "${PIP_LOG}" 
     handle_error
 fi
 cat "${PIP_LOG}" >> "${LOG_FILE}"
