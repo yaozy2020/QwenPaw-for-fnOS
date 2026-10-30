@@ -1,48 +1,55 @@
 #!/bin/bash
+# 飞牛应用覆盖升级回调：Launcher 模式升级内核与依赖
+set -e
 
 PYTHON_BIN="/var/apps/python312/target/bin/python3"
-CODE_DIR="${TRIM_APPDEST}/qwenpaw/code"
-WORKING_DIR="${TRIM_PKGHOME}"
+WORKING_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
 VENV_DIR="${WORKING_DIR}/venv"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+PKGETC="${TRIM_PKGETC:-/var/apps/qwenpaw/etc}"
 
 export HOME="${WORKING_DIR}"
 export QWENPAW_WORKING_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
-LOG_FILE="${TRIM_PKGVAR}/qwenpaw-upgrade.log"
+[ -z "${TRIM_DATA_SHARE_PATHS}" ] && export QWENPAW_WORKING_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
+LOG_FILE="${PKGVAR}/qwenpaw-upgrade.log"
 
 log_msg() {
+    mkdir -p "${PKGVAR}" 2>/dev/null || true
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOG_FILE}"
 }
 
-log_msg "开始升级 QwenPaw..."
+log_msg "开始升级 QwenPaw (Launcher 模式)..."
 
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}"
-chmod -R 755 "${TRIM_PKGETC}"
-chmod -R 755 "${TRIM_PKGVAR}"
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${PKGETC}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${PKGVAR}" 2>/dev/null || true
+chmod -R 755 "${PKGETC}" 2>/dev/null || true
+chmod -R 755 "${PKGVAR}" 2>/dev/null || true
 
-PID_FILE="${TRIM_PKGVAR}/qwenpaw.pid"
+PID_FILE="${PKGVAR}/qwenpaw.pid"
 if [ -f "${PID_FILE}" ]; then
-    log_msg "正在停止 QwenPaw 进程..."
+    log_msg "正在停止 QwenPaw 旧进程..."
     pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-    if kill -0 "${pid}" 2>/dev/null; then
-        kill -TERM "${pid}"
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        kill -TERM "${pid}" 2>/dev/null || true
         count=0
         while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
             sleep 1
             count=$((count + 1))
         done
-        kill -KILL "${pid}" 2>/dev/null
+        kill -KILL "${pid}" 2>/dev/null || true
     fi
     rm -f "${PID_FILE}"
 fi
 
-rm -rf "${VENV_DIR}"
-"${PYTHON_BIN}" -m venv "${VENV_DIR}"
-chmod -R 755 "${VENV_DIR}"
+# 确保虚拟环境存在并就绪
+if [ ! -d "${VENV_DIR}" ]; then
+    log_msg "重新构建虚拟环境 ${VENV_DIR}..."
+    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+    chmod -R 755 "${VENV_DIR}" 2>/dev/null || true
+fi
 
 log_msg "正在激活虚拟环境..."
 source "${VENV_DIR}/bin/activate"
-log_msg "虚拟环境激活成功"
 
 PYPI_MIRROR="${wizard_pypi_mirror:-tsinghua}"
 PIP_OPTS=""
@@ -55,23 +62,27 @@ elif [ "$PYPI_MIRROR" = "ustc" ]; then
     PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
 fi
 
-cd "${CODE_DIR}"
-
-log_msg "正在安装 QwenPaw (源码模式)..."
+log_msg "正在通过 PyPI 镜像源升级 QwenPaw 核心引擎..."
 PIP_LOG=$(mktemp)
-if ! pip3 install -e . $PIP_OPTS > "${PIP_LOG}" 2>&1; then
+TARGET_PKG="qwenpaw"
+if [ "${wizard_channel:-stable}" = "beta" ]; then
+    TARGET_PKG="--pre qwenpaw"
+fi
+
+if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
     cat "${PIP_LOG}" >> "${LOG_FILE}"
     ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
     rm -f "${PIP_LOG}"
-    handle_error
+    log_msg "ERROR: pip 升级安装失败: ${ERROR_MSG}"
+    exit 1
 fi
 cat "${PIP_LOG}" >> "${LOG_FILE}"
 rm -f "${PIP_LOG}"
 
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}"
-chmod -R 755 "${WORKING_DIR}"
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${PKGVAR}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${PKGETC}" 2>/dev/null || true
+chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
 
-log_msg "QwenPaw 升级成功！"
+log_msg "QwenPaw 升级完成！"
 exit 0
