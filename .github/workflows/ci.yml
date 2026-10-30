@@ -8,10 +8,7 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      # 国内网络直连 npmjs 极慢，构建期统一走镜像（不改仓库配置）
-      NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,38 +19,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.30.3
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
       - name: Preflight (version SSOT + repo hygiene)
         run: |
-          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py scripts/sync-upstream.sh
+          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
           bash scripts/preflight.sh
 
       - name: Verify AUDIT_REPORT.md is up-to-date
         run: python3 scripts/gen-audit.py --check
 
-      - name: Sync upstream (验证钉住的 tag 仍可解析)
+      - name: Shell syntax gate (cmd/ + cgi + build.sh)
         run: |
-          bash scripts/sync-upstream.sh
-          test -f app/qwenpaw/code/src/qwenpaw/__init__.py
-          test -f app/qwenpaw/code/console/package-lock.json
-          test -f app/qwenpaw/code/packages/qwenpawmail-mcp/src/qwenpawmail_mcp/__init__.py
+          for f in cmd/* app/ui/*.cgi build.sh; do
+            bash -n "$f" || { echo "::error::语法错误: $f"; exit 1; }
+          done
 
-      - name: Build panel (验证 ui-fndesign 可编译)
-        working-directory: ui-fndesign
-        run: |
-          pnpm install --frozen-lockfile --ignore-scripts
-          pnpm run build
-
-      - name: Verify panel output landed in app/www
+      - name: Console artifact sanity (零构建架构，控制台为提交产物)
         run: |
           test -f app/www/index.html
-          grep -q '/cgi/ThirdParty/com.dustinky.qwenpaw/index.cgi/' app/www/index.html
+          grep -q "QwenPaw 控制台" app/www/index.html
+          grep -q "api.cgi" app/www/index.html
+          test -f app/ui/index.cgi
+          test -f app/ui/api.cgi

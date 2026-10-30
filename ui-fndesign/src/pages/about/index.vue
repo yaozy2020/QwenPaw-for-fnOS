@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, watch, ref, onMounted } from 'vue'
 import { useTheme } from '@/composables/useTheme'
-// @ts-expect-error qrcode 模块缺少类型声明，但功能正常
-import QRCode from 'qrcode'
 import bilibiliLogo from '/bilibili.jpg'
 import douyinLogo from '/douyin.jpg'
 
@@ -52,10 +50,13 @@ const drawRoundRect = (ctx: CanvasRenderingContext2D, x: number, y: number, widt
 }
 
 const generateQrCodeWithLogo = async (url: string, logoSrc: string, dark: boolean): Promise<string> => {
+  // qrcode 体积不小且仅本页用，按需加载缩入口 chunk（对齐 DSH 首屏优化实践）
+  // @ts-expect-error qrcode 模块缺少类型声明，但功能正常
+  const { default: QRCode } = await import('qrcode')
   const qrSize = 600
   const logoSize = qrSize * 0.25
   const borderRadius = 40
-  
+
   const qrDataUrl = await QRCode.toDataURL(url, {
     width: qrSize,
     margin: 0,

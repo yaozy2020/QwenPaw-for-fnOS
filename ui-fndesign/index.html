@@ -1,12 +1,32 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
   <meta charset="UTF-8" />
   <link rel="icon" type="image/png" href="/favicon.png" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- 主题内联初始化：挂载前先落 dark 类，消除深色模式白闪（与 useTheme 的 DesktopConfig-1000 键一致） -->
+  <script>
+    (function () {
+      try {
+        var dark = false
+        var saved = localStorage.getItem('DesktopConfig-1000')
+        if (saved) {
+          var t = (JSON.parse(saved).userPreference || {}).theme
+          dark = t === 20 || (t !== 10 && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        } else if (window.matchMedia) {
+          dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        }
+        if (dark) {
+          document.documentElement.classList.add('dark')
+          document.documentElement.style.background = '#0c111c'
+        }
+      } catch (e) { /* 主题探测失败按浅色走 */ }
+    })()
+  </script>
+  <!-- 外链字体非阻塞：NAS 离线/弱网时不拖死首屏渲染 -->
   <link rel="preconnect" href="https://fonts.bunny.net">
-  <link href="https://fonts.bunny.net/css?family=public-sans:400,500,600,700" rel="stylesheet" />
+  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=public-sans:400,500,600,700" media="print" onload="this.media='all'">
   <title>QwenPaw Manager</title>
   <meta name="description" content="Manage your QwenPaw easily on fnOS.">
 </head>

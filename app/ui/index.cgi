@@ -89,8 +89,51 @@ case "$ext" in
         ;;
 esac
 
+# 3.5 Accept-Encoding 协商（RFC 9110）：客户端可解压时优先发预压缩的 .br / .gz
+#     规则与 DSH 2026-10 实践一致：显式条目优先于 *（gzip;q=0, * 仍是拒绝），
+#     q 值判断（q=0 拒绝），大小写不敏感（上方已统一小写）
+AE="$(printf '%s' "${HTTP_ACCEPT_ENCODING:-}" | tr -d ' ' | tr 'A-Z' 'a-z' | tr ',' '\n')"
+
+# q_of <token>：该编码的 q 值；无显式条目输出空（由调用方决定是否回看 *）
+q_of() {
+    printf '%s\n' "$AE" | awk -F';' -v t="$1" '
+        $1 == t {
+            q = "1"
+            if (NF > 1) { split($2, kv, "="); if (kv[1] == "q" && kv[2] != "") q = kv[2] }
+            print q
+            exit
+        }'
+}
+
+# q_positive <q>：q 值是否 > 0
+q_positive() {
+    [ -n "$1" ] || return 1
+    awk -v q="$1" 'BEGIN{exit !((q+0)>0)}'
+}
+
+# accepts <token>：显式条目说了算；没有显式条目才回看 *（q=0 拒绝）
+accepts() {
+    q="$(q_of "$1")"
+    if [ -n "$q" ]; then q_positive "$q"; return $?; fi
+    q_positive "$(q_of '*')"
+}
+
+SEND_FILE="$TARGET_FILE"
+CONTENT_ENCODING=""
+if [ -f "${TARGET_FILE}.br" ] && accepts br; then
+    SEND_FILE="${TARGET_FILE}.br"
+    CONTENT_ENCODING="br"
+elif [ -f "${TARGET_FILE}.gz" ] && accepts gzip; then
+    SEND_FILE="${TARGET_FILE}.gz"
+    CONTENT_ENCODING="gzip"
+fi
+
 # 4. 输出头 + 文件内容
 echo "Content-Type: $mime"
+echo "Vary: Accept-Encoding"
+if [ -n "$CONTENT_ENCODING" ]; then
+    echo "Content-Encoding: $CONTENT_ENCODING"
+fi
 if [ "$ext" = "html" ] || [ "$ext" = "htm" ]; then
     echo "Cache-Control: no-cache, no-store, must-revalidate, max-age=0"
     echo "Pragma: no-cache"
@@ -98,4 +141,4 @@ if [ "$ext" = "html" ] || [ "$ext" = "htm" ]; then
 fi
 echo ""
 
-cat "$TARGET_FILE"
+cat "$SEND_FILE"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useToast } from '@nuxt/ui/composables'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 
 interface QwenPawInfo {
@@ -136,6 +137,7 @@ const startUpgrade = async (mirror?: string) => {
       return
     }
     upgradePollTimer = window.setInterval(async () => {
+      if (document.hidden) return
       await pollUpgradeStatus()
     }, 2000)
   } catch (e: unknown) {
@@ -263,6 +265,7 @@ const refreshStatus = async () => {
 onMounted(() => {
   refreshStatus()
   runtimeTimer = window.setInterval(() => {
+    if (document.hidden) return
     now.value = Date.now()
   }, 1000)
 })

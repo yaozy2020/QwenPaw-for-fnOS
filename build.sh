@@ -47,6 +47,21 @@ if [ ! -f "$STAGE/app/www/index.html" ] || [ ! -f "$STAGE/cmd/install_callback" 
   exit 1
 fi
 
+# [2b/4] 生成控制台预压缩兄弟文件（app/ui/index.cgi 按 Accept-Encoding 协商发送，
+#        51KB 的控制台经 brotli 后约 13KB；生成失败仅回退未压缩，不致命）
+CONSOLE_HTML="$STAGE/app/www/index.html"
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE_BIN" ] && [ -x /var/apps/nodejs_v24/target/bin/node ]; then
+  NODE_BIN=/var/apps/nodejs_v24/target/bin/node
+fi
+if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ]; then
+  "$NODE_BIN" -e 'const {readFileSync,writeFileSync}=require("fs"),{gzipSync,brotliCompressSync,constants}=require("zlib");const f=process.argv[1],b=readFileSync(f);writeFileSync(f+".gz",gzipSync(b,{level:9}));writeFileSync(f+".br",brotliCompressSync(b,{params:{[constants.BROTLI_PARAM_QUALITY]:11}}))' "$CONSOLE_HTML" \
+    && echo "    预压缩: index.html.gz/.br 已生成" \
+    || echo -e "${YELLOW}    警告: 预压缩生成失败，运行时回退未压缩${NC}"
+elif command -v gzip >/dev/null 2>&1; then
+  gzip -9 -c "$CONSOLE_HTML" > "$CONSOLE_HTML.gz" && echo "    预压缩: 无 node，仅生成 index.html.gz"
+fi
+
 # [3/4] fnpack 快速封装
 echo "[3/4] fnpack 极速构建 ..."
 cd "$STAGE" || exit 1

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useToast } from '@nuxt/ui/composables'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 interface LogItem {

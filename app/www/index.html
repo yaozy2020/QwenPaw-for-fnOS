@@ -1030,6 +1030,7 @@
 
     // 服务状态监控 (全空值保护，稳健守护)
     async function fetchStatus() {
+      if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
       try {
         const res = await fetch(`${API_BASE}?action=status&_t=${Date.now()}`);
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -1337,6 +1338,7 @@
     }
 
     async function pollUpgradeLogs() {
+      if (document.hidden) return; // 后台标签页暂停轮询
       try {
         const [logsRes, statusRes] = await Promise.all([
           fetch(`${API_BASE}?action=upgrade_logs&_t=${Date.now()}`),
@@ -1392,6 +1394,7 @@
 
     // 运行日志管理
     async function fetchLogs() {
+      if (document.hidden) return; // 后台标签页暂停轮询
       try {
         const res = await fetch(`${API_BASE}?action=logs&lines=80&_t=${Date.now()}`);
         if (!res.ok) return;

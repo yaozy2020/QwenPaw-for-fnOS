@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useToast } from '@nuxt/ui/composables'
 import { ref, computed, onMounted } from 'vue'
 
 const APP_NAME = 'com.dustinky.qwenpaw'
