@@ -12,4 +12,6 @@ app/qwenpaw/code/
 QwenPaw/
 
 # 面板构建产物（由 build.sh 生成，源码在 ui-fndesign/）
-app/www/
+app/www/*.png
+app/www/*.jpg
+app/www/public/

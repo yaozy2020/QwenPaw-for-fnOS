@@ -91,6 +91,11 @@ esac
 
 # 4. 输出头 + 文件内容
 echo "Content-Type: $mime"
+if [ "$ext" = "html" ] || [ "$ext" = "htm" ]; then
+    echo "Cache-Control: no-cache, no-store, must-revalidate, max-age=0"
+    echo "Pragma: no-cache"
+    echo "Expires: 0"
+fi
 echo ""
 
 cat "$TARGET_FILE"

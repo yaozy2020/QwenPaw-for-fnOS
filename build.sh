@@ -145,6 +145,12 @@ tar -cf - -C "$PROJ_DIR" \
   --exclude='app/qwenpaw/code/README_ru.md' \
   --exclude='app/qwenpaw/code/README_vi.md' \
   --exclude='app/qwenpaw/code/README_zh.md' \
+  --exclude='*.gz' \
+  --exclude='*.br' \
+  --exclude='*.map' \
+  --exclude='app/qwenpaw/code/plugins/apps' \
+  --exclude='app/qwenpaw/code/plugins/bundle' \
+  --exclude='app/qwenpaw/code/src/qwenpaw/agents/context/visual_compression/assets/*.ts' \
   . | tar -xf - -C "$STAGE"
 
 if [ ! -d "$STAGE/app/qwenpaw/code/src/qwenpaw" ]; then
