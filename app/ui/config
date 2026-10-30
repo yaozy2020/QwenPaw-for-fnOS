@@ -6,15 +6,21 @@
             "type": "iframe",
             "protocol": "http",
             "url": "/cgi/ThirdParty/qwenpaw/index.cgi/",
-            "allUsers": true
+            "allUsers": false,
+            "control": {
+                "accessPerm": "editable"
+            }
         },
         "qwenpaw.main": {
             "title": "QwenPaw",
             "icon": "images/icon_{0}.png",
             "type": "iframe",
             "protocol": "http",
-            "port": "19091",
-            "allUsers": true
+            "port": "${wizard_port}",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "editable"
+            }
         }
     }
 }
