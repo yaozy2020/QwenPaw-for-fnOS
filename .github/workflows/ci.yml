@@ -8,7 +8,10 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      # 国内网络直连 npmjs 极慢，构建期统一走镜像（不改仓库配置）
+      NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,22 +22,38 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
-          bun-version: latest
+          version: 10.30.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
 
       - name: Preflight (version SSOT + repo hygiene)
         run: |
-          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
+          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py scripts/sync-upstream.sh
           bash scripts/preflight.sh
 
       - name: Verify AUDIT_REPORT.md is up-to-date
-        run: |
-          python3 scripts/gen-audit.py --check
+        run: python3 scripts/gen-audit.py --check
 
-      - name: Build frontend (verify ui-fndesign compiles)
+      - name: Sync upstream (验证钉住的 tag 仍可解析)
+        run: |
+          bash scripts/sync-upstream.sh
+          test -f app/qwenpaw/code/src/qwenpaw/__init__.py
+          test -f app/qwenpaw/code/console/package-lock.json
+          test -f app/qwenpaw/code/packages/qwenpawmail-mcp/src/qwenpawmail_mcp/__init__.py
+
+      - name: Build panel (验证 ui-fndesign 可编译)
         working-directory: ui-fndesign
         run: |
-          bun install --ignore-scripts
-          bun run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
+
+      - name: Verify panel output landed in app/www
+        run: |
+          test -f app/www/index.html
+          grep -q '/cgi/ThirdParty/com.dustinky.qwenpaw/index.cgi/' app/www/index.html
