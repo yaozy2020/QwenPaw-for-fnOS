@@ -6,6 +6,8 @@ VENV_DIR="${WORKING_DIR}/venv"
 
 export HOME="${WORKING_DIR}"
 export QWENPAW_WORKING_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
+# 内核 2.3.0b2+ 依赖托管锁的覆盖变量（pwd home 在 fnOS 不可用），init 阶段同样需要
+export QWENPAW_DEPENDENCY_STATE_DIR="${QWENPAW_WORKING_DIR}/dependency-environments"
 LOG_FILE="${TRIM_PKGVAR}/qwenpaw-install.log"
 
 log_msg() {
@@ -78,6 +80,19 @@ if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [
 fi
 
 log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
+
+# 运行环境与内核均健在 → 外壳升级/重装不重装内核（版本双轨制），仅刷新版本钉
+# （MARKER 在 TRIM_PKGHOME 下会随 fpk 升级被清掉，因此以 venv 实际状态为准）
+if [ -x "${VENV_DIR}/bin/python3" ] && "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+    CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
+    log_msg "检测到运行环境与内核（${CUR_VER:-?}）均健在，跳过内核重装（双轨制：内核升级请走控制台版本管理）"
+    if [ -n "${CUR_VER}" ]; then
+        echo "${CUR_VER}" > "${TRIM_PKGVAR}/qwenpaw-version"
+        log_msg "已刷新内核版本钉: ${CUR_VER}"
+    fi
+    log_msg "QwenPaw 外壳升级完成（内核未变更）！"
+    exit 0
+fi
 
 log_msg "正在创建虚拟环境..."
 "${PYTHON_BIN}" -m venv "${VENV_DIR}"

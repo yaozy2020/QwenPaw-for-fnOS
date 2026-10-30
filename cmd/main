@@ -19,6 +19,9 @@ export QWENPAW_WORKING_DIR="${SHARE_DIR}"
 export QWENPAW_LOG_LEVEL="${LOG_LEVEL}"
 export QWENPAW_AUTH_ENABLED=true
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
+# 内核 2.3.0b2+ 的插件依赖托管锁按 pwd home 推导（fnOS 应用用户 home 不可写会启动崩溃），
+# 上游提供的覆盖变量优先级高于 pwd home，统一指向数据区（持久、可写）
+export QWENPAW_DEPENDENCY_STATE_DIR="${SHARE_DIR}/dependency-environments"
 
 # 端口获取机制 (对齐 DSH，默认优雅端口 18088，且避开老应用占用的 19091)
 PORT_FILE="${VAR_DIR}/service_port"

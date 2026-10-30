@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "应用说明、README 安装引导与升级向导文案对齐实际功能;升级向导明确外壳升级不涉及内核,PyPI 镜像仅运行环境重建时使用"
+changelog                  = "修复内核 2.3.0b2+ 启动崩溃: 注入 QWENPAW_DEPENDENCY_STATE_DIR 指向数据区(上游锁路径按 pwd home 推导在 fnOS 不可写); install_callback 检测 venv 健在即跳过内核重装; 应用说明与文案对齐实际功能"
