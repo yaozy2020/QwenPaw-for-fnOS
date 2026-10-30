@@ -17,23 +17,6 @@
         ]
     },
     {
-        "stepTitle": "QwenPaw 安装注意事项",
-        "items": [
-            {
-                "type": "tips",
-                "helpText": "1. 安装完成后，可在控制台页面中按需安装 <b>Ollama 驱动</b> 和 <b>Playwright</b> 等可选组件。"
-            },
-            {
-                "type": "tips",
-                "helpText": "2. 如果选择安装 Ollama 驱动，请先在飞牛应用商店中安装 <b>Ollama</b> 应用。"
-            },
-            {
-                "type": "tips",
-                "helpText": "3. 更多使用问题请加入 QQ 群 <a href='https://qun.qq.com/universal-share/share?ac=1&authKey=eh3ZjF03sS5h3xycHBkJxllqsbpz0QJTTRMVjySNNDp4W3jtafZtnrRe9t%2BrHfmZ&busi_data=eyJncm91cENvZGUiOiIxMDkxMzQ4MTkyIiwidG9rZW4iOiJUM043MmdJbytIWTlndCtkaWgyV2pUQTgyeXh1YzVMR21SZGxEUjJuVHRjVW1WYTE3d3B1ODI4c28rSjdUQy9LIiwidWluIjoiODE1MjIzNTgifQ%3D%3D&data=zc5hDTqOp2xm6e7x-U_2Yl0KARi6A5uyvzlnyU6cfjAFK7qn4S8Zz5D9kvvSd9BlUXV7gKXlmPyfVQV2PA_IiQ&svctype=4&tempid=h5_group_info' target='_blank'>1091348192</a> 进行交流。"
-            }
-        ]
-    },
-    {
         "stepTitle": "安装源设置",
         "items": [
             {

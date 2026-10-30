@@ -112,7 +112,6 @@ com.dustinky.qwenpaw/
 
 ## 交流与反馈
 
-- **QQ 群**：[1091348192](https://qm.qq.com/q/b7M0Myqihc)
 - **GitHub Issues**：[提交反馈](https://github.com/dustink66/com.dustinky.qwenpaw/issues)
 
 ## 相关链接

@@ -1,7 +1,7 @@
 appname                    = com.dustinky.qwenpaw
 version                    = 2.3.0-1
 display_name               = QwenPaw
-desc                       = `<p>QwenPaw 是一款个人助理型产品（国产小龙虾），部署在你自己的环境中。</p><h3>核心功能</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作（独立配置、记忆和技能，互相通信完成复杂任务），定时执行任务，能力由 Skills 决定且可无限扩展，支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，多层安全防护机制。使用 Ollama 需先在飞牛应用商店安装 Ollama 应用，连接时 API Key 不可为空。更多问题可加入 QQ 群 <a href="https://qm.qq.com/q/b7M0Myqihc" target="_blank">1091348192</a> 进行交流。</p>`
+desc                       = `<p>QwenPaw 是一款个人助理型产品（国产小龙虾），部署在你自己的环境中。</p><h3>核心功能</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作（独立配置、记忆和技能，互相通信完成复杂任务），定时执行任务，能力由 Skills 决定且可无限扩展，支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，多层安全防护机制。支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = all
 source                     = thirdparty
 maintainer                 = AgentScope团队
