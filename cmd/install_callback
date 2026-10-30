@@ -51,6 +51,26 @@ if [ -f "${MARKER}" ]; then
     exit 0
 fi
 
+
+# 1. 提取并持久化安装向导中设置的端口，同步至飞牛系统元数据
+INIT_PORT="${service_port:-${wizard_service_port:-19091}}"
+if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
+    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+    echo "${INIT_PORT}" > "${TRIM_PKGVAR}/service_port"
+    
+    for ui_cfg in "${TRIM_APPDEST}/ui/config" "/var/apps/qwenpaw/ui/config"; do
+        if [ -w "${ui_cfg}" ]; then
+            sed -i 's/"port": *"[0-9]*"/"port": "'"${INIT_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
+        fi
+    done
+    for mf in "${TRIM_APPDEST}/manifest" "/var/apps/qwenpaw/manifest"; do
+        if [ -w "${mf}" ]; then
+            sed -i 's/^service_port *= *[0-9]*/service_port               = '"${INIT_PORT}"'/g' "${mf}" 2>/dev/null || true
+        fi
+    done
+    log_msg "安装端口已设定并同步为: ${INIT_PORT}"
+fi
+
 log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
 
 log_msg "正在创建虚拟环境..."

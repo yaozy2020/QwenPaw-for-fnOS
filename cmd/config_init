@@ -1,3 +1,14 @@
 #!/bin/bash
+# 飞牛运行设置初始化：回显当前生效的端口与日志级别配置
+PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+PORT_FILE="${PKGVAR}/service_port"
 
+current_port="19091"
+if [ -f "${PORT_FILE}" ]; then
+    p=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
+    [ -n "$p" ] && current_port="$p"
+fi
+
+# 飞牛向导初始化语法：直接导出或打印 JSON/变量
+echo "service_port=${current_port}"
 exit 0
