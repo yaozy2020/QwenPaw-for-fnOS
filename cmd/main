@@ -20,9 +20,17 @@ export QWENPAW_LOG_LEVEL="${LOG_LEVEL}"
 export QWENPAW_AUTH_ENABLED=true
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
 
-# 端口获取机制（严格对齐 DSH：优先读取飞牛注入的 wizard_port 向导环境变量）
+# 端口获取机制 (对齐 DSH，默认优雅端口 18088，且避开老应用占用的 19091)
 PORT_FILE="${VAR_DIR}/service_port"
 PORT="${wizard_port:-}"
+if [ -z "${PORT}" ] && [ -r "${PORT_FILE}" ]; then
+    PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
+fi
+# 核心自愈：若读到老冲突端口 19091，自动平滑升级为 18088
+if [ -z "${PORT}" ] || [ "${PORT}" = "19091" ]; then
+    PORT="18088"
+    echo "18088" > "${PORT_FILE}" 2>/dev/null || true
+fi
 if [ -z "${PORT}" ] && [ -r "${PORT_FILE}" ]; then
     PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
 fi

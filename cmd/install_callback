@@ -52,7 +52,8 @@ fi
 
 
 # 1. 提取并持久化安装向导中设置的端口，同步至飞牛系统元数据
-INIT_PORT="${service_port:-${wizard_service_port:-19091}}"
+INIT_PORT="${wizard_port:-${service_port:-${wizard_service_port:-18088}}}"
+if [ "${INIT_PORT}" = "19091" ]; then INIT_PORT="18088"; fi
 if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
     echo "${INIT_PORT}" > "${TRIM_PKGVAR}/service_port"
