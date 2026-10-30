@@ -4,16 +4,16 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "即将升级 QwenPaw 到新版本。升级过程中会保留您的工作目录和配置文件。"
+                "helpText": "本次升级<strong>仅更新飞牛外壳</strong>（控制台与生命周期脚本），<strong>不会改变</strong>已安装的 QwenPaw 内核版本。内核的升级或降级请在 QwenPaw 控制台的「版本管理」中显式操作。"
             },
             {
                 "type": "tips",
-                "helpText": "建议在升级前备份重要数据。"
+                "helpText": "下方镜像源仅在运行环境损坏需要重建 venv 时才会用到，正常升级不涉及 PyPI 下载。"
             },
             {
                 "type": "select",
                 "field": "wizard_pypi_mirror",
-                "label": "PyPI 安装源",
+                "label": "PyPI 安装源（仅运行环境重建时使用）",
                 "initValue": "tsinghua",
                 "options": [
                     {

@@ -1,130 +1,142 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.0.2-blue)](https://github.com/dustink66/com.dustinky.qwenpaw/releases)
+[![Version](https://img.shields.io/badge/version-1.0.3-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
-[![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%200.9.21-orange)](https://www.fnnas.com/)
+[![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
-将 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) 一键部署到飞牛 NAS 的应用包。
+将 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) 一键部署到飞牛 NAS 的**轻量外壳包（Launcher）**。
 
-## 简介
+本项目不是 QwenPaw 本体，也不打包本体源码：外壳只负责部署与运维，内核按需从 PyPI 在线安装，二者**版本双轨、互不牵连**。与旧的 `com.dustinky.qwenpaw` 包可以并存，首装自动无损继承旧包的工作区、记忆与管理员凭据。
 
-QwenPaw 是一款部署在你自己的 NAS 上的个人 AI 助理。它不只是聊天机器人 — 你可以通过微信、QQ、钉钉、飞书、Discord、Telegram 等多通道与它交互，配置定时任务让它自动执行工作，通过 Skills 无限扩展它的能力。所有数据完全存储在本地，无需依赖任何第三方云服务。
+## 外壳特性
 
-由 [AgentScope](https://github.com/agentscope-ai) 团队基于 AgentScope、AgentScope Runtime 与 ReMe 构建，支持本地大模型完全离线运行。
+- **极简运维控制台** — 单文件零构建（无前端依赖），白天/暗夜双主题：服务启停与重启、运行状态、日志查看与清理、配置备份下载
+- **内核版本管理** — 控制台内自选版本升级或降级（带降级风险提示），内核经 PyPI 在线安装
+- **版本双轨制** — 外壳（fpk）升级**不改变**已安装的内核版本；内核版本由"版本钉"记录，运行环境重建时精确恢复
+- **安装源三选一** — 清华 / 阿里云 / 中科大镜像，规避官方源网络问题
+- **端口自定义** — 默认 `18088`，向导与控制台均可修改；旧默认端口 `19091` 冲突时自动升迁自愈
+- **老数据无损继承** — 自动迁移旧包的工作区记忆与 `.qwenpaw.secret` 管理员凭据，路径自动对齐
+- **预压缩传输** — 控制台静态资源按 `Accept-Encoding` 协商发送 brotli/gzip，52KB 控制台实际传输约 11KB
 
-## 核心功能
+关于 QwenPaw 本体：多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等）、多智能体协作、定时任务、Skills 无限扩展，支持 Ollama 等本地大模型完全离线运行，数据全部留在本地。由 [AgentScope](https://github.com/agentscope-ai) 团队开发。
 
-- **多通道对话** — 支持微信、QQ、钉钉、飞书、Discord、Telegram、iMessage 等，一处部署，全平台接入
-- **多智能体协作** — 独立配置多个 Agent，各自拥有独立的记忆和技能，可互相通信协作完成复杂任务
-- **定时任务** — 设置 Cron 定时任务，让 QwenPaw 在指定时间自动执行工作
-- **Skills 扩展** — 能力由 Skills 决定，支持无限扩展，社区持续贡献新技能
-- **本地优先** — 支持 Ollama 等本地大模型，完全离线也能工作，数据不外泄
-- **多层安全防护** — 内置沙箱执行、会话隔离、权限控制等安全机制
-
-## 快速开始
+## 安装引导
 
 ### 前置要求
 
-- 飞牛 NAS 系统 **≥ 0.9.21**
-- 如需使用内置 Ollama 驱动，请先在飞牛应用商店安装 **Ollama** 应用
+- 飞牛 NAS 系统 **≥ 1.0.0**
+- 依赖应用 **nodejs_v24** 与 **python312** 由系统在安装时自动拉起，无需手动安装
+- 如需使用 Ollama 本地模型，请先在飞牛应用商店安装 **Ollama** 应用
 
-### 安装
+### 安装步骤
 
-1. 从 [Releases](https://github.com/dustink66/com.dustinky.qwenpaw/releases) 下载最新 `.fpk` 安装包
-2. 在飞牛应用商店中选择「手动安装」，上传 `.fpk` 文件
-3. 安装过程中选择日志级别（默认 `info`，调试可选 `debug`）
-4. 等待安装完成（进度条在 55% 左右可能停留较长时间，属于正常现象）
+1. 从 [Releases](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases) 下载最新 `.fpk` 安装包
+2. 飞牛应用商店 →「手动安装」→ 上传 `.fpk` 文件
+3. 按向导完成四步配置：
 
-安装完成后，QwenPaw 将在 **端口 19091** 上启动 Web 管理界面。
+| 向导步骤 | 配置项 | 说明 |
+|:--|:--|:--|
+| 安装源设置 | PyPI 安装源 | 内核从该镜像在线下载，国内推荐**清华源** |
+| | 首发安装通道 | Stable（生产推荐）/ Beta（抢先体验） |
+| Web 端口设置 | 服务端口 | 默认 `18088`，可改；填 `19091` 会自动迁到 `18088` |
+| 日志级别 | info/debug/warning/error | 常规使用选 `info` |
 
-### 配置说明
+4. 等待安装完成——内核 wheel（约 40MB）及其依赖需要从 PyPI 下载，**进度在 55% 附近停留较久属正常现象**
 
-| 配置项 | 说明 | 可选值 |
-|--------|------|--------|
-| 日志级别 | 控制日志输出详细程度 | `info` / `debug` / `warning` / `error` |
+安装完成后，QwenPaw 内核在服务端口（默认 **18088**）启动；飞牛桌面会出现**两个图标**：QwenPaw（本体 Web 端）与 QwenPaw 控制台（运维面板）。
 
-### 依赖说明
+### 从旧包（com.dustinky.qwenpaw）迁移
 
-安装包会自动处理以下依赖：
+新版使用独立包名 `qwenpaw`，可与旧包并存。首装时自动完成：
 
-- **Python 3.12** — Python 运行环境
-- **Node.js v24** — 前端构建和运行时环境
-- **Ollama**（可选）— 如需使用本地模型，请手动安装
+- 工作区、记忆、配置文件整体继承，其中写死的旧包名路径自动替换为新路径
+- `.qwenpaw.secret` 管理员账号密码与 MasterKey 继承，无需重新注册
+
+## 升级与版本管理
+
+| 操作 | 入口 | 对内核的影响 |
+|:--|:--|:--|
+| **外壳升级**（控制台/脚本/图标优化等） | 应用商店手动安装新版 `.fpk` | **无**——内核版本保持不变（版本双轨制） |
+| **内核升级/降级** | 控制台「版本管理」 | 显式选择目标版本或 latest/beta，成功后自动重启服务 |
+
+> 内核降级有风险提示：旧版本可能无法识别新版本的配置字段与记忆结构，请谨慎操作。
+> 升级内核建议先用控制台的「配置备份」下载数据备份。
+
+## 卸载
+
+卸载向导可选**保留应用数据**（重装后无缝恢复记忆与配置，推荐）或**彻底删除**（清空所有记忆、工作区与运行时环境）。
 
 ## 项目结构
 
 ```
-com.dustinky.qwenpaw/
+QwenPaw-for-fnOS/
 ├── app/
-│   ├── qwenpaw/code/        # QwenPaw 源码（从上游同步）
-│   ├── ui/                   # API 网关和 Web UI 资源
-│   └── www/                  # 前端静态资源
-├── cmd/
-│   ├── main                  # 主程序入口（启动/停止/状态管理）
-│   ├── install_callback      # 安装后回调（创建 venv、安装依赖）
-│   ├── upgrade_callback      # 升级后回调
-│   ├── uninstall_callback    # 卸载回调
-│   └── config_callback       # 配置变更回调
-├── config/
-│   └── resource              # 数据共享目录权限配置
-├── wizard/
-│   └── config                # 安装向导配置
-├── manifest                  # 应用清单（名称、版本、描述等）
-├── ICON.png / ICON_256.png   # 应用图标
-└── LICENSE                   # Apache-2.0 许可证
+│   ├── ui/                   # 运维控制台后端（api.cgi/index.cgi）与桌面图标
+│   └── www/index.html        # 极简控制台（单文件零构建，提交即产物）
+├── cmd/                      # 生命周期回调（install/upgrade/uninstall/config/main）
+├── config/                   # 权限与资源配置
+├── wizard/                   # 安装/升级/卸载/配置向导
+├── scripts/                  # preflight、版本同步、AUDIT 生成等工程脚本
+├── ui-fndesign/              # 旧版 Vue 控制台（遗留，未参与打包）
+├── manifest                  # 应用清单（版本 SSOT）
+├── build.sh                  # 零构建打包脚本（预压缩 + fnpack）
+└── ICON.PNG / ICON_256.PNG   # 应用图标
 ```
 
 ## 版本历史
 
-### v1.1.10（当前版本）
+### v1.0.3（当前）
 
-- 优化控制台功能和 UI
-- Node.js 依赖版本升级到 v24
-- 新增 Agent 子代理（spawn_subagent）功能
-- 新增打开目录标签页，可直接引用本地项目
-- 新增腾讯元宝 Bot 渠道
-- 新增飞书消息话题回复
-- 新增 OpenRouter 应用归因
-- 新增动态上传限制配置
-- 修复桌面端内置 CLI、Windows Git 控制台等问题
-- 修复控制台聊天输入、代码展示等多项问题
-- 修复 OneBot WebSocket 断连重启
-- 修复技能更新稳定性
-- 宠物自动安装依赖等多项优化
+- 应用说明、README 安装引导、升级向导文案对齐实际功能
+- 明确升级向导中 PyPI 镜像仅在运行环境重建时使用
+
+### v1.0.2
+
+- 修复外壳升级隐式变更内核版本的问题（v1.0.1 装包后内核被自动升级至 2.3.0b2、因上游启动锁 bug 失败的根因修复）
+- 新增内核版本钉，`upgrade_callback` 遵守版本双轨制
+
+### v1.0.1
+
+- 控制台性能优化：预压缩协商传输（brotli/gzip）、轮询后台暂停
+- 图标扁平化（去内层蓝盘，对齐 DSH 风格）并量化，包体 246K → 143K
+- CI/Release 工作流对齐零构建架构
+
+### v1.0.0
+
+- 独立发版：确立外壳/内核版本双轨制
+- DSH 风格极简控制台（双模态、版本自选、降级保护）
+- 自定义端口与老包数据无损继承
 
 ## 常见问题
 
 ### 安装进度卡在 55%？
 
-这是正常现象。安装过程中需要创建 Python 虚拟环境并从 PyPI 安装 QwenPaw 及其依赖，此阶段耗时较长，请耐心等待。
+正常现象。此时正在从 PyPI 镜像下载内核 wheel（约 40MB）及依赖并创建虚拟环境，视网络情况可能持续数分钟。
+
+### 外壳升级会把 QwenPaw 内核也升级吗？
+
+不会。外壳与内核版本双轨，外壳升级只更新控制台与生命周期脚本，内核版本原样保留（由版本钉保证）。内核升级请走控制台「版本管理」。
+
+### 端口 19091 被占用或想换端口？
+
+向导与控制台均可修改服务端口；安装时填入 `19091` 会自动改用 `18088`（冲突自愈）。运行中修改端口请在控制台「端口设置」操作。
 
 ### 使用 Ollama 时 API Key 怎么填？
 
-连接 Ollama 时 API Key 字段不能为空，可以填写任意非空字符串（如 `ollama`）。
-
-### 如何更新？
-
-在飞牛应用商店中找到 QwenPaw，点击更新即可。更新过程中可选择保留现有运行环境以加快升级速度。
-
-### 如何访问管理界面？
-
-安装完成后，在飞牛桌面点击 QwenPaw 图标，或在浏览器中访问 `http://<NAS_IP>:19091`。
+连接 Ollama 时 API Key 字段不能为空，填写任意非空字符串（如 `ollama`）即可。
 
 ## 交流与反馈
 
-- **GitHub Issues**：[提交反馈](https://github.com/dustink66/com.dustinky.qwenpaw/issues)
+- **GitHub Issues**：[提交反馈](https://github.com/yaozy2020/QwenPaw-for-fnOS/issues)
 
 ## 相关链接
 
 | 项目 | 地址 |
-|------|------|
-| QwenPaw 项目主页 | [agentscope-ai/QwenPaw](https://github.com/agentscope-ai/QwenPaw) |
+|:--|:--|
+| QwenPaw 本体 | [agentscope-ai/QwenPaw](https://github.com/agentscope-ai/QwenPaw) |
 | AgentScope 团队 | [agentscope-ai](https://github.com/agentscope-ai) |
-| 飞牛 NAS 官网 | [fnnas.com](https://www.fnnas.com/) |
-| 作者主页 | [dustinky.com](https://www.dustinky.com) |
+| 飞牛 NAS | [fnnas.com](https://www.fnnas.com/) |
 
 ## 许可证
 
-本项目基于 [Apache-2.0](LICENSE) 许可证开源。
-
-QwenPaw 原项目同样采用 Apache-2.0 许可证。
+本项目基于 [Apache-2.0](LICENSE) 许可证开源；QwenPaw 原项目同样采用 Apache-2.0 许可证。

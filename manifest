@@ -1,7 +1,7 @@
 appname                    = qwenpaw
-version                    = 1.0.2
+version                    = 1.0.3
 display_name               = QwenPaw
-desc                       = `<p>QwenPaw 是一款个人助理型产品（国产小龙虾），部署在你自己的环境中。</p><h3>核心功能</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作（独立配置、记忆和技能，互相通信完成复杂任务），定时执行任务，能力由 Skills 决定且可无限扩展，支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，多层安全防护机制。支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
+desc                       = `<p>QwenPaw for fnOS —— 将个人 AI 助理 QwenPaw 一键部署到飞牛 NAS 的轻量外壳包。</p><h3>外壳特性</h3><p>极简运维控制台（服务启停、日志、内核版本管理、端口修改），内核经 PyPI 镜像在线安装，外壳与内核版本双轨制（外壳升级不影响内核），支持与旧版 com.dustinky.qwenpaw 数据无损继承，控制台资源预压缩传输。</p><h3>QwenPaw 内核</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作，定时任务，能力由 Skills 决定且可无限扩展；支持 Ollama 本地大模型完全离线运行，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = all
 source                     = thirdparty
 maintainer                 = AgentScope团队
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "修复外壳升级隐式变更内核版本问题: upgrade_callback 遵守版本双轨制, 新增内核版本钉(v1.0.1 装包后内核被自动升级至 2.3.0b2 因上游锁 bug 启动失败的根因修复)"
+changelog                  = "应用说明、README 安装引导与升级向导文案对齐实际功能;升级向导明确外壳升级不涉及内核,PyPI 镜像仅运行环境重建时使用"
