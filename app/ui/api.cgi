@@ -241,6 +241,34 @@ restart_service() {
     fi
 }
 
+get_version_list() {
+    echo "Content-Type: application/json"
+    echo ""
+    python3 -c "
+import urllib.request, json
+try:
+    req = urllib.request.Request('https://pypi.org/pypi/qwenpaw/json', headers={'User-Agent': 'QwenPaw'})
+    with urllib.request.urlopen(req, timeout=5) as res:
+        data = json.loads(res.read().decode())
+        releases = list(data.get('releases', {}).keys())
+        latest_stable = data.get('info', {}).get('version')
+        recent = releases[-14:]
+        items = []
+        for v in reversed(recent):
+            is_beta = any(x in v.lower() for x in ['a', 'b', 'rc', 'dev', 'pre'])
+            items.append({'version': v, 'is_beta': is_beta, 'is_stable': v == latest_stable})
+        print(json.dumps({'success': True, 'latest_stable': latest_stable, 'versions': items}))
+except Exception as e:
+    fallback = [
+        {'version': '2.3.0b1', 'is_beta': True, 'is_stable': False},
+        {'version': '2.2.2.post1', 'is_beta': False, 'is_stable': True},
+        {'version': '2.2.2b6', 'is_beta': True, 'is_stable': False},
+        {'version': '2.2.2', 'is_beta': False, 'is_stable': False}
+    ]
+    print(json.dumps({'success': True, 'latest_stable': '2.2.2.post1', 'versions': fallback, 'fallback': True}))
+" 2>/dev/null
+}
+
 get_upgrade_status() {
     local upgrading=false
     local upgrade_pid=""
@@ -295,7 +323,19 @@ upgrade_service() {
 
     > "${UPGRADE_LOG_FILE}"
 
-    local upgrade_cmd="source ${VENV_DIR}/bin/activate && PYTHONUNBUFFERED=1 pip install --upgrade qwenpaw ${mirror_url} 2>&1"
+        local target_ver=""
+    if echo "$QUERY_STRING$REQUEST_URI" | grep -q "version="; then
+        target_ver=$(echo "$QUERY_STRING$REQUEST_URI" | sed 's/.*version=\([^&]*\).*/\1/')
+    fi
+
+    local pkg_spec="qwenpaw"
+    if [ "$target_ver" = "beta" ] || [ "$target_ver" = "pre" ]; then
+        pkg_spec="--pre qwenpaw"
+    elif [ -n "$target_ver" ] && [ "$target_ver" != "latest" ]; then
+        pkg_spec="qwenpaw==${target_ver}"
+    fi
+
+    local upgrade_cmd="source ${VENV_DIR}/bin/activate && PYTHONUNBUFFERED=1 pip install --upgrade ${pkg_spec} ${mirror_url} 2>&1"
 
     nohup bash -c "
         echo '=== QwenPaw 升级开始 ===' >> ${UPGRADE_LOG_FILE}
@@ -483,6 +523,8 @@ if [ -n "$QUERY_STRING" ]; then
         action="upgrade_logs"
     elif echo "$QUERY_STRING" | grep -q "action=upgrade"; then
         action="upgrade"
+    elif echo "$QUERY_STRING" | grep -q "action=version_list"; then
+        action="version_list"
     elif echo "$QUERY_STRING" | grep -q "action=logs"; then
         action="logs"
     elif echo "$QUERY_STRING" | grep -q "action=clear_logs"; then
@@ -511,6 +553,8 @@ if [ -z "$action" ] && [ -n "$REQUEST_URI" ]; then
         action="upgrade_logs"
     elif echo "$REQUEST_URI" | grep -q "action=upgrade"; then
         action="upgrade"
+    elif echo "$REQUEST_URI" | grep -q "action=version_list"; then
+        action="version_list"
     elif echo "$REQUEST_URI" | grep -q "action=logs"; then
         action="logs"
     elif echo "$REQUEST_URI" | grep -q "action=clear_logs"; then
@@ -539,6 +583,9 @@ case "$action" in
         ;;
     upgrade)
         upgrade_service
+        ;;
+    version_list)
+        get_version_list
         ;;
     upgrade_status)
         get_upgrade_status
