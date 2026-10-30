@@ -32,6 +32,12 @@ if [ -d "${OLD_SHARE}" ] && [ ! -d "${NEW_SHARE}/workspaces" ]; then
     cp -r "${OLD_SHARE}/." "${NEW_SHARE}/" 2>/dev/null || true
     chmod -R 755 "${NEW_SHARE}" 2>/dev/null || true
     log_msg "老版本记忆、工作区与配置已成功继承！"
+    # 核心路径自愈：将老配置中写死的老包名绝对路径替换为新包名路径，防止 Internal Server Error
+    log_msg "正在自动对齐所有工作区与配置文件的绝对路径..."
+    sed -i "s/com\.dustinky\.qwenpaw/qwenpaw/g" "${NEW_SHARE}/config.json" 2>/dev/null || true
+    find "${NEW_SHARE}/workspaces" -name "*.json" -exec sed -i "s/com\.dustinky\.qwenpaw/qwenpaw/g" {} + 2>/dev/null || true
+    echo '{"language": "zh"}' > "${NEW_SHARE}/settings.json" 2>/dev/null || true
+    log_msg "所有工作区路径已对齐，系统语言已锁定中文！" 
 fi
 
 # 2. 核心账号密码凭据继承 (解决注册账号问题)
