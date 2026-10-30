@@ -39,20 +39,20 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "设置 QwenPaw 的 Web 访问端口。默认端口为 19091，如有冲突可自行修改为其他可用端口 (如 18090)。"
+                "helpText": "设置 QwenPaw 的 Web 访问端口。默认端口为 18088，如有冲突可自行修改为其他可用端口 (如 18090)。"
             },
             {
                 "type": "text",
                 "field": "wizard_port",
                 "label": "服务端口",
-                "initValue": "19091",
+                "initValue": "18088",
                 "rules": [
                     {
                         "required": true,
                         "message": "请输入服务端口"
                     }
                 ],
-                "helpText": "QwenPaw Web 服务的监听端口 (默认 19091)。"
+                "helpText": "QwenPaw Web 服务的监听端口 (默认 18088)。"
             }
         ]
     }
