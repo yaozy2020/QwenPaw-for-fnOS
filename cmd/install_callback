@@ -124,6 +124,13 @@ fi
 cat "${PIP_LOG}" >> "${LOG_FILE}"
 rm -f "${PIP_LOG}"
 
+# 记录内核版本钉：fpk 升级若重建 venv，按此版本恢复，不追踪最新
+CUR_VER="$(python3 -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
+if [ -n "${CUR_VER}" ]; then
+    echo "${CUR_VER}" > "${TRIM_PKGVAR}/qwenpaw-version"
+    log_msg "已记录内核版本钉: ${CUR_VER}"
+fi
+
 log_msg "正在初始化 QwenPaw..."
 echo "Yes" | python3 -m qwenpaw init --defaults
 

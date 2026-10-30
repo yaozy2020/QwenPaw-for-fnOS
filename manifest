@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.0.1
+version                    = 1.0.2
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw 是一款个人助理型产品（国产小龙虾），部署在你自己的环境中。</p><h3>核心功能</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作（独立配置、记忆和技能，互相通信完成复杂任务），定时执行任务，能力由 Skills 决定且可无限扩展，支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，多层安全防护机制。支持本地运行大模型完全离线工作，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = all
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "控制台性能优化: 预压缩协商传输(brotli/gzip), 轮询后台暂停, 图标扁平化, workflow对齐零构建架构"
+changelog                  = "修复外壳升级隐式变更内核版本问题: upgrade_callback 遵守版本双轨制, 新增内核版本钉(v1.0.1 装包后内核被自动升级至 2.3.0b2 因上游锁 bug 启动失败的根因修复)"

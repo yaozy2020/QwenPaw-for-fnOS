@@ -422,6 +422,7 @@ upgrade_service() {
         if [ \$rc -eq 0 ]; then
             echo '=== 升级成功 ===' >> ${UPGRADE_LOG_FILE}
             rm -f ${STATUS_CACHE_FILE}
+            ${VENV_DIR}/bin/pip show qwenpaw 2>/dev/null | awk '/^Version:/{print $2}' > /var/apps/qwenpaw/var/qwenpaw-version
             echo '正在重启 QwenPaw...' >> ${UPGRADE_LOG_FILE}
             if [ -f ${PID_FILE} ]; then
                 old_pid=\$(head -n 1 ${PID_FILE} | tr -d '[:space:]')
