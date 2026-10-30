@@ -86,15 +86,16 @@
             },
             {
                 "type": "text",
-                "field": "service_port",
-                "label": "Web 服务端口",
+                "field": "wizard_port",
+                "label": "服务端口",
                 "initValue": "19091",
                 "rules": [
                     {
                         "required": true,
                         "message": "请输入服务端口"
                     }
-                ]
+                ],
+                "helpText": "QwenPaw Web 服务的监听端口 (默认 19091)。"
             }
         ]
     },

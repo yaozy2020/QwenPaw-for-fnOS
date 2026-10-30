@@ -12,7 +12,6 @@ desktop_uidir              = ui
 os_min_version                    = 1.0.0
 desktop_applaunchname      = qwenpaw.console
 checkport                  = false
-service_port               = 19091
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
 changelog                  = "QwenPaw for fnOS 独立发版 1.0.0: 确立版本双轨制, DSH极简控制台, 动态版本切换与降级保护, 自定义端口与老数据无损继承"

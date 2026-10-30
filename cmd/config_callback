@@ -1,5 +1,5 @@
 #!/bin/bash
-# 飞牛运行设置修改回调脚本：同步端口配置并重启服务
+# 飞牛运行设置修改回调脚本：对齐 DSH 变量规范
 set -e
 
 PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
@@ -15,33 +15,25 @@ log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
 }
 
-# 1. 提取用户在“运行设置”中输入的端口
-NEW_PORT="${service_port:-${wizard_service_port:-}}"
+# 1. 严格使用飞牛标准注入的 wizard_port 变量
+NEW_PORT="${wizard_port:-}"
 
 if [ -n "${NEW_PORT}" ] && echo "${NEW_PORT}" | grep -qE '^[0-9]+$' && [ "${NEW_PORT}" -ge 1024 ] && [ "${NEW_PORT}" -le 65535 ]; then
     log_msg "检测到修改 Web 服务端口为: ${NEW_PORT}"
     
-    # 持久化到 service_port 文件
+    # 持久化备份
     echo "${NEW_PORT}" > "${PORT_FILE}"
     
-    # 核心：同步修改 ui/config，让飞牛“常规”界面卡片 100% 同步显示新端口
+    # 核心：动态同步改写飞牛系统的 ui/config，彻底解决常规卡片端口不一致问题！
     for ui_cfg in "${APPDEST}/ui/config" "/var/apps/qwenpaw/ui/config"; do
         if [ -w "${ui_cfg}" ]; then
             sed -i 's/"port": *"[0-9]*"/"port": "'"${NEW_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
             log_msg "已同步更新 ${ui_cfg} 端口为 ${NEW_PORT}"
         fi
     done
-
-    # 核心：同步修改 manifest 中的 service_port
-    for mf in "${APPDEST}/manifest" "/var/apps/qwenpaw/manifest"; do
-        if [ -w "${mf}" ]; then
-            sed -i 's/^service_port *= *[0-9]*/service_port               = '"${NEW_PORT}"'/g' "${mf}" 2>/dev/null || true
-            log_msg "已同步更新 ${mf} service_port 为 ${NEW_PORT}"
-        fi
-    done
 fi
 
-# 2. 安全优雅重启 QwenPaw 服务
+# 2. 优雅重启 QwenPaw 服务
 log_msg "正在应用新配置并重启 QwenPaw 服务..."
 
 if [ -f "${PID_FILE}" ]; then
@@ -58,13 +50,12 @@ if [ -f "${PID_FILE}" ]; then
     rm -f "${PID_FILE}"
 fi
 
-# 重新启动服务
-MAIN_SCRIPT="$(cd "$(dirname "$0")" && pwd)/main"
+MAIN_SCRIPT="${APPDEST}/cmd/main"
 [ ! -f "${MAIN_SCRIPT}" ] && MAIN_SCRIPT="/var/apps/qwenpaw/cmd/main"
 
 if [ -x "${MAIN_SCRIPT}" ]; then
-    bash "${MAIN_SCRIPT}" start >> "${LOG_FILE}" 2>&1 &
-    log_msg "QwenPaw 服务已由 main 脚本重新拉起"
+    wizard_port="${NEW_PORT}" bash "${MAIN_SCRIPT}" start >> "${LOG_FILE}" 2>&1 &
+    log_msg "QwenPaw 服务已使用新端口 ${NEW_PORT} 重新拉起"
 fi
 
 exit 0
