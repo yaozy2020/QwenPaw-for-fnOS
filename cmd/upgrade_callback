@@ -1,0 +1,77 @@
+#!/bin/bash
+
+PYTHON_BIN="/var/apps/python312/target/bin/python3"
+CODE_DIR="${TRIM_APPDEST}/qwenpaw/code"
+WORKING_DIR="${TRIM_PKGHOME}"
+VENV_DIR="${WORKING_DIR}/venv"
+
+export HOME="${WORKING_DIR}"
+export QWENPAW_WORKING_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
+LOG_FILE="${TRIM_PKGVAR}/qwenpaw-upgrade.log"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOG_FILE}"
+}
+
+log_msg "开始升级 QwenPaw..."
+
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}"
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}"
+chmod -R 755 "${TRIM_PKGETC}"
+chmod -R 755 "${TRIM_PKGVAR}"
+
+PID_FILE="${TRIM_PKGVAR}/qwenpaw.pid"
+if [ -f "${PID_FILE}" ]; then
+    log_msg "正在停止 QwenPaw 进程..."
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if kill -0 "${pid}" 2>/dev/null; then
+        kill -TERM "${pid}"
+        count=0
+        while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "${pid}" 2>/dev/null
+    fi
+    rm -f "${PID_FILE}"
+fi
+
+rm -rf "${VENV_DIR}"
+"${PYTHON_BIN}" -m venv "${VENV_DIR}"
+chmod -R 755 "${VENV_DIR}"
+
+log_msg "正在激活虚拟环境..."
+source "${VENV_DIR}/bin/activate"
+log_msg "虚拟环境激活成功"
+
+PYPI_MIRROR="${wizard_pypi_mirror:-tsinghua}"
+PIP_OPTS=""
+
+if [ "$PYPI_MIRROR" = "tsinghua" ]; then
+    PIP_OPTS="-i https://pypi.tuna.tsinghua.edu.cn/simple"
+elif [ "$PYPI_MIRROR" = "aliyun" ]; then
+    PIP_OPTS="-i https://mirrors.aliyun.com/pypi/simple/"
+elif [ "$PYPI_MIRROR" = "ustc" ]; then
+    PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
+fi
+
+cd "${CODE_DIR}"
+
+log_msg "正在安装 QwenPaw (源码模式)..."
+PIP_LOG=$(mktemp)
+if ! pip3 install -e . $PIP_OPTS > "${PIP_LOG}" 2>&1; then
+    cat "${PIP_LOG}" >> "${LOG_FILE}"
+    ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
+    rm -f "${PIP_LOG}"
+    handle_error
+fi
+cat "${PIP_LOG}" >> "${LOG_FILE}"
+rm -f "${PIP_LOG}"
+
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}"
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}"
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}"
+chmod -R 755 "${WORKING_DIR}"
+
+log_msg "QwenPaw 升级成功！"
+exit 0

@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.1.13)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Preflight + AUDIT
+        run: |
+          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
+          bash scripts/preflight.sh
+
+      - name: Build frontend
+        working-directory: ui-fndesign
+        run: |
+          bun install --ignore-scripts
+          bun run build
+
+      - name: Sync frontend to app/www/
+        run: |
+          rm -rf app/www
+          mkdir -p app/www
+          cp -a ui-fndesign/dist/. app/www/
+
+      - name: Build fpk via fnpackup Docker
+        env:
+          FNPAYLOAD: ${{ github.workspace }}/fnpayload
+        run: |
+          mkdir -p "$FNPAYLOAD"
+          tar -cf - --exclude='./fnpayload' --exclude='./.git' --exclude='./ui-fndesign/node_modules' . | tar -xf - -C "$FNPAYLOAD"
+          # 在 fnpackup 容器内执行 build.sh（跳过前端构建，直接用已构建好的 app/www/）
+          docker run --rm \
+            -e SKIP_FRONTEND=1 \
+            -v "$FNPAYLOAD:/app" \
+            snltty/fnpackup:v1.1.4 \
+            /bin/bash -c "cd /app && bash build.sh"
+          fpk=$(ls "$FNPAYLOAD"/com.dustinky.qwenpaw_*.fpk | head -n1)
+          if [ -z "$fpk" ]; then
+            echo "::error::fpk build failed"
+            exit 1
+          fi
+          cp "$fpk" "${{ github.workspace }}/"
+          cp "${fpk}.sha256" "${{ github.workspace }}/" 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: QwenPaw FPK ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            ${{ github.workspace }}/com.dustinky.qwenpaw_*.fpk
+            ${{ github.workspace }}/com.dustinky.qwenpaw_*.fpk.sha256

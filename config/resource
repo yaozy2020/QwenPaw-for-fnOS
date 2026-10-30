@@ -1,0 +1,18 @@
+{
+    "data-share":
+    {
+        "shares":
+        [
+            {
+                "name": "com.dustinky.qwenpaw",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "com.dustinky.qwenpaw"
+                    ]
+                }
+            }
+        ]
+    }
+}

@@ -1,0 +1,45 @@
+[
+    {
+        "stepTitle": "卸载 QwenPaw",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "即将卸载 QwenPaw，这将删除应用的可执行文件和运行时数据。"
+            },
+            {
+                "type": "tips",
+                "helpText": "• <b>应用文件</b>: 将被彻底删除<br/>• <b>运行时数据</b>: 将被彻底删除"
+            },
+            {
+                "type": "switch",
+                "field": "wizard_keep_config",
+                "label": "保留配置文件",
+                "initValue": "true",
+                "helpText": "如果勾选，将保留配置、会话记录和已安装的 Skills，方便下次重装时恢复。"
+            },
+            {
+                "type": "tips",
+                "helpText": "<strong style='color: red;'>警告：如果不勾选保留配置，所有数据都将丢失且不可恢复！</strong>"
+            },
+            {
+                "type": "switch",
+                "field": "wizard_keep_runtime",
+                "label": "保留运行环境",
+                "initValue": "true",
+                "helpText": "如果勾选，将保留运行环境（包含 venv 等），下次安装可复用。"
+            },
+            {
+                "type": "switch",
+                "field": "wizard_confirm_uninstall",
+                "label": "我已了解风险，确认卸载",
+                "initValue": "true",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请确认卸载操作"
+                    }
+                ]
+            }
+        ]
+    }
+]

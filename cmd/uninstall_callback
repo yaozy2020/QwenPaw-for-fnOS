@@ -1,0 +1,66 @@
+#!/bin/bash
+
+LOG_FILE="${TRIM_PKGVAR}/qwenpaw-uninstall.log"
+CONFIG_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOG_FILE}" 2>/dev/null || true
+}
+
+log_msg "开始卸载 QwenPaw..."
+
+PID_FILE="${TRIM_PKGVAR}/qwenpaw.pid"
+if [ -f "${PID_FILE}" ]; then
+    log_msg "正在停止 QwenPaw 进程..."
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        kill -TERM "${pid}" 2>/dev/null || true
+        count=0
+        while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        kill -KILL "${pid}" 2>/dev/null || true
+    fi
+    rm -f "${PID_FILE}" 2>/dev/null || true
+    log_msg "QwenPaw 进程已停止"
+fi
+
+KEEP_RUNTIME="${wizard_keep_runtime:-false}"
+if [ "$KEEP_RUNTIME" != "true" ]; then
+    if [ -d "${TRIM_PKGHOME}" ]; then
+        log_msg "正在删除运行环境: ${TRIM_PKGHOME}"
+        rm -rf "${TRIM_PKGHOME}" 2>/dev/null || true
+        log_msg "运行环境已删除"
+    fi
+else
+    log_msg "保留运行环境"
+    if [ -d "${TRIM_PKGHOME}" ]; then
+        touch "${TRIM_PKGHOME}/.qwenpaw_keep_runtime" 2>/dev/null || true
+    fi
+fi
+
+if [ -d "${TRIM_PKGVAR}" ]; then
+    log_msg "正在删除运行时数据: ${TRIM_PKGVAR}"
+    rm -rf "${TRIM_PKGVAR}" 2>/dev/null || true
+    log_msg "运行时数据已删除"
+fi
+
+KEEP_CONFIG="${wizard_keep_config:-true}"
+if [ "$KEEP_CONFIG" != "true" ]; then
+    if [ -d "${CONFIG_DIR}" ]; then
+        log_msg "正在删除配置文件: ${CONFIG_DIR}"
+        rm -rf "${CONFIG_DIR}" 2>/dev/null || true
+        log_msg "配置文件已删除"
+    fi
+    if [ -d "${TRIM_PKGETC}" ]; then
+        log_msg "正在删除应用配置: ${TRIM_PKGETC}"
+        rm -rf "${TRIM_PKGETC}" 2>/dev/null || true
+        log_msg "应用配置已删除"
+    fi
+    log_msg "QwenPaw 已完全卸载 (包括配置文件)"
+else
+    log_msg "QwenPaw 已卸载 (保留配置文件)"
+fi
+
+exit 0

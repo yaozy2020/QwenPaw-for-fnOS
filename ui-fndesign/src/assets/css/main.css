@@ -1,0 +1,64 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+@theme static {
+  --font-sans: 'Public Sans', sans-serif;
+
+  --color-fnui-50: #e6f0ff;
+  --color-fnui-100: #cce0ff;
+  --color-fnui-200: #99c2ff;
+  --color-fnui-300: #66a3ff;
+  --color-fnui-400: #3385ff;
+  --color-fnui-500: #0066ff;
+  --color-fnui-600: #0052cc;
+  --color-fnui-700: #003d99;
+  --color-fnui-800: #002966;
+  --color-fnui-900: #001433;
+  --color-fnui-950: #000a1a;
+}
+
+:root {
+  --ui-bg: #F2F3F4;
+  --ui-bg-muted: #F2F3F4;
+  --ui-bg-elevated: #FFFFFF;
+  --ui-bg-accented: #FFFFFF;
+  --ui-bg-inverted: #0C0C0D;
+  --ui-bg-content: #FFFFFF;
+  --ui-bg-card: #F6F6F6;
+}
+
+.dark {
+  --ui-bg: #0C0C0D;
+  --ui-bg-muted: #0C0C0D;
+  --ui-bg-elevated: #1D1D1E;
+  --ui-bg-accented: #1D1D1E;
+  --ui-bg-inverted: #FFFFFF;
+  --ui-bg-content: #1D1D1E;
+  --ui-bg-card: #262627;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

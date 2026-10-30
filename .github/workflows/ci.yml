@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Preflight (version SSOT + repo hygiene)
+        run: |
+          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
+          bash scripts/preflight.sh
+
+      - name: Verify AUDIT_REPORT.md is up-to-date
+        run: |
+          python3 scripts/gen-audit.py --check
+
+      - name: Build frontend (verify ui-fndesign compiles)
+        working-directory: ui-fndesign
+        run: |
+          bun install --ignore-scripts
+          bun run build

@@ -1,0 +1,37 @@
+[
+    {
+        "stepTitle": "QwenPaw 配置",
+        "items": [
+            {
+                "type": "select",
+                "field": "wizard_log_level",
+                "label": "日志级别",
+                "initValue": "info",
+                "options": [
+                    {
+                        "label": "Info - 常规信息",
+                        "value": "info"
+                    },
+                    {
+                        "label": "Debug - 调试信息",
+                        "value": "debug"
+                    },
+                    {
+                        "label": "Warning - 警告信息",
+                        "value": "warning"
+                    },
+                    {
+                        "label": "Error - 错误信息",
+                        "value": "error"
+                    }
+                ],
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请选择日志级别"
+                    }
+                ]
+            }
+        ]
+    }
+]
