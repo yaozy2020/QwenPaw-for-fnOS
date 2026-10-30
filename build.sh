@@ -5,7 +5,7 @@
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
-OUTPUT="$PROJ_DIR/qwenpaw_v${VERSION}.fpk"
+OUTPUT="/vol2/1000/下载/qwenpaw_v${VERSION}.fpk"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

@@ -12,25 +12,27 @@ log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOG_FILE}"
 }
 
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}"
-chmod -R 755 "${WORKING_DIR}"
-chmod -R 755 "${TRIM_PKGVAR}"
-chmod -R 755 "${TRIM_PKGETC}"
-
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}" 2>/dev/null || true
+chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+chmod -R 755 "${TRIM_PKGVAR}" 2>/dev/null || true
+chmod -R 755 "${TRIM_PKGETC}" 2>/dev/null || true
 
 # 自动平滑继承老版本 com.dustinky.qwenpaw 的所有数据
 OLD_SHARE="/vol2/@appshare/com.dustinky.qwenpaw/.qwenpaw"
 NEW_SHARE="${QWENPAW_WORKING_DIR}"
 
 if [ -d "${OLD_SHARE}" ] && [ ! -d "${NEW_SHARE}" ]; then
-    log_msg "检测到老版本数据目录，开始自动无损迁移..."
+    log_msg "检测到老版本数据目录，开始自动无损继承..."
     mkdir -p "$(dirname "${NEW_SHARE}")"
-    cp -a "${OLD_SHARE}" "${NEW_SHARE}"
-    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${NEW_SHARE}"
-    chmod -R 755 "${NEW_SHARE}"
-    log_msg "老版本记忆、工作区与配置已100%成功继承至新应用！"
+    if cp -a "${OLD_SHARE}" "${NEW_SHARE}" 2>/dev/null; then
+        chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${NEW_SHARE}" 2>/dev/null || true
+        chmod -R 755 "${NEW_SHARE}" 2>/dev/null || true
+        log_msg "老版本记忆、工作区与配置已100%成功继承至新应用！"
+    else
+        log_msg "老版本数据迁移跳过或已复制部分文件，继续执行安装流程"
+    fi
 fi
 
 MARKER="${TRIM_PKGHOME}/.qwenpaw_keep_runtime"
@@ -39,14 +41,12 @@ if [ -f "${MARKER}" ]; then
     exit 0
 fi
 
-log_msg "开始安装 QwenPaw..."
+log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
 
 log_msg "正在创建虚拟环境..."
 "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 log_msg "虚拟环境 ${VENV_DIR} 创建成功"
-log_msg "正在设置虚拟环境权限..."
-chmod -R 755 "${VENV_DIR}"
-log_msg "虚拟环境 ${VENV_DIR} 权限设置成功"
+chmod -R 755 "${VENV_DIR}" 2>/dev/null || true
 
 log_msg "正在激活虚拟环境..."
 source "${VENV_DIR}/bin/activate"
@@ -70,7 +70,7 @@ log_msg "正在升级虚拟环境 pip..."
 python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"
 
-log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎 (Launcher 模式)..."
+log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎..."
 PIP_LOG=$(mktemp)
 TARGET_PKG="qwenpaw"
 if [ "${wizard_channel:-stable}" = "beta" ]; then
@@ -82,11 +82,8 @@ if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&
     cat "${PIP_LOG}" >> "${LOG_FILE}"
     ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
     rm -f "${PIP_LOG}"
-    handle_error
-fi
-cat "${PIP_LOG}" >> "${LOG_FILE}"
-rm -f "${PIP_LOG}" 
-    handle_error
+    log_msg "ERROR: pip 安装失败: ${ERROR_MSG}"
+    exit 1
 fi
 cat "${PIP_LOG}" >> "${LOG_FILE}"
 rm -f "${PIP_LOG}"
@@ -94,12 +91,12 @@ rm -f "${PIP_LOG}"
 log_msg "正在初始化 QwenPaw..."
 echo "Yes" | python3 -m qwenpaw init --defaults
 
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}"
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}"
-chmod -R 755 "${WORKING_DIR}"
-chmod -R 755 "${TRIM_PKGVAR}"
-chmod -R 755 "${TRIM_PKGETC}"
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
+chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}" 2>/dev/null || true
+chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+chmod -R 755 "${TRIM_PKGVAR}" 2>/dev/null || true
+chmod -R 755 "${TRIM_PKGETC}" 2>/dev/null || true
 
 log_msg "QwenPaw 安装成功！"
 exit 0
