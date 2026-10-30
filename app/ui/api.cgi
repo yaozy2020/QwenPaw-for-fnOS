@@ -273,13 +273,47 @@ change_port() {
         exit 0
     fi
 
+    # 1. 持久化到 service_port 文件
     echo "$new_port" > "${PORT_FILE}"
+
+    # 2. 同步修改飞牛系统元数据与桌面快捷方式配置 (保证桌面图标点击也对齐新端口)
+    local ui_cfg="/var/apps/qwenpaw/app/ui/config"
+    if [ -w "$ui_cfg" ]; then
+        sed -i 's/"port": *"[0-9]*"/"port": "'"${new_port}"'"/g' "$ui_cfg" 2>/dev/null || true
+    fi
+    local mf_cfg="/var/apps/qwenpaw/manifest"
+    if [ -w "$mf_cfg" ]; then
+        sed -i 's/^service_port *= *[0-9]*/service_port               = '"${new_port}"'/g' "$mf_cfg" 2>/dev/null || true
+    fi
+
+    # 3. 彻底杀死旧 PID，并直接拉起绑定新端口的进程
+    nohup bash -c "
+        sleep 1
+        if [ -f '${PID_FILE}' ]; then
+            old_pid=\$(head -n 1 '${PID_FILE}' | tr -d '[:space:]')
+            if [ -n \"\${old_pid}\" ] && kill -0 \"\${old_pid}\" 2>/dev/null; then
+                kill -TERM \"\${old_pid}\"
+                count=0
+                while kill -0 \"\${old_pid}\" 2>/dev/null && [ \$count -lt 10 ]; do
+                    sleep 1
+                    count=\$((count + 1))
+                done
+                kill -9 \"\${old_pid}\" 2>/dev/null || true
+            fi
+            rm -f '${PID_FILE}'
+        fi
+        export HOME=/var/apps/qwenpaw/home
+        export QWENPAW_WORKING_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw
+        export QWENPAW_AUTH_ENABLED=true
+        export PATH=/var/apps/nodejs_v24/target/bin:\$PATH
+        source ${VENV_DIR}/bin/activate
+        python3 -m qwenpaw app --host 0.0.0.0 --port ${new_port} >> ${LOG_FILE} 2>&1 &
+        echo \$! > ${PID_FILE}
+    " >/dev/null 2>&1 &
+
     echo "Content-Type: application/json"
     echo ""
-    echo "{\"success\":true,\"message\":\"端口已更改为 ${new_port}，正在重启服务生效...\",\"port\":\"${new_port}\"}"
-
-    # 异步重启服务使新端口生效
-    nohup bash -c "sleep 1; /var/apps/qwenpaw/target/cmd/main restart" >/dev/null 2>&1 &
+    echo "{\"success\":true,\"message\":\"端口已更改为 ${new_port}，旧服务已终止，正在绑定新端口拉起...\",\"port\":\"${new_port}\"}"
 }
 
 get_version_list() {

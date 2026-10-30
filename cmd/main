@@ -1,21 +1,27 @@
 #!/bin/bash
 
-LOG_FILE="${TRIM_PKGVAR}/qwenpaw.log"
-PID_FILE="${TRIM_PKGVAR}/qwenpaw.pid"
+# 变量绝对路径兜底，确保无论由系统调起还是 CGI 触发，路径 100% 稳定
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+LOG_FILE="${VAR_DIR}/qwenpaw.log"
+PID_FILE="${VAR_DIR}/qwenpaw.pid"
 
-WORKING_DIR="${TRIM_PKGHOME}"
+WORKING_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
 VENV_DIR="${WORKING_DIR}/venv"
+
+ETC_DIR="${TRIM_PKGETC:-/var/apps/qwenpaw/etc}"
+SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
+[ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
 
 LOG_LEVEL="${wizard_log_level:-info}"
 
-export HOME="${TRIM_PKGETC}"
-export QWENPAW_WORKING_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
+export HOME="${ETC_DIR}"
+export QWENPAW_WORKING_DIR="${SHARE_DIR}"
 export QWENPAW_LOG_LEVEL="${LOG_LEVEL}"
 export QWENPAW_AUTH_ENABLED=true
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
 
-
-PORT_FILE="${TRIM_PKGVAR}/service_port"
+PORT_FILE="${VAR_DIR}/service_port"
+PORT=""
 if [ -r "${PORT_FILE}" ]; then
     PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
 fi
