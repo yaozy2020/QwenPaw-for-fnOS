@@ -4,15 +4,11 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "QwenPaw 是一款个人助理型产品，支持多通道对话（钉钉、飞书、QQ、Discord、iMessage）、定时执行任务，能力由 Skills 决定且可无限扩展。"
+                "helpText": "<strong>QwenPaw for fnOS</strong> 是专为飞牛 NAS 打包维护的轻量级个人 AI 智能助理。<br/><br/>• <strong>原生极简架构</strong>：内置纯净 DSH 运维控制面板，支持白天/暗夜模式与动态端口管理。<br/>• <strong>多端智能交互</strong>：支持 QQ 机器人、多通道通信、多 Agent 协作与自动化运维工具链。<br/>• <strong>安全本地化</strong>：数据与模型凭据全在本地，绝无第三方云端托管。"
             },
             {
                 "type": "tips",
-                "helpText": "数据全在本地，不依赖第三方托管，由 AgentScope 团队基于 AgentScope、AgentScope Runtime 与 ReMe 构建。"
-            },
-            {
-                "type": "tips",
-                "helpText": "请阅读 <a target=\"_blank\" href=\"https://github.com/agentscope-ai/QwenPaw\">项目主页</a> 了解更多信息。"
+                "helpText": "项目开源主页：<a target=\"_blank\" href=\"https://github.com/yaozy2020/QwenPaw-for-fnOS\">github.com/yaozy2020/QwenPaw-for-fnOS</a>"
             }
         ]
     },
