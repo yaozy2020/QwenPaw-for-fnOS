@@ -74,7 +74,19 @@ fi
 # [3/4] fnpack 快速封装
 echo "[3/4] fnpack 极速构建 ..."
 cd "$STAGE" || exit 1
-/usr/local/bin/fnpack build -d . >/dev/null 2>&1
+
+# fnpack 可执行文件探测：本机在 /usr/local/bin，fnpackup 镜像内位置不定，
+# 按常见路径 + 全盘浅层查找兜底（找不到时显式报错，不再吞输出）
+FNPACK_BIN="$(command -v fnpack 2>/dev/null || true)"
+if [ -z "$FNPACK_BIN" ]; then
+  FNPACK_BIN="$(find /usr/local/bin /usr/bin /opt /app / -maxdepth 2 -type f \( -name 'fnpack' -o -name 'fnpackup' \) -perm -u+x 2>/dev/null | head -1)"
+fi
+if [ -z "$FNPACK_BIN" ]; then
+  echo -e "${RED}ERROR: 未找到 fnpack 可执行文件（command -v / 常见路径均无）${NC}"
+  exit 1
+fi
+echo "  fnpack: ${FNPACK_BIN}"
+"$FNPACK_BIN" build -d .
 
 FPK_IN_STAGE=$(ls "$STAGE"/*.fpk 2>/dev/null | head -1)
 if [ -z "$FPK_IN_STAGE" ] || [ ! -f "$FPK_IN_STAGE" ]; then
