@@ -1,27 +1,13 @@
 #!/bin/bash
 
 PYTHON_BIN="/var/apps/python312/target/bin/python3"
-WORKING_DIR="${TRIM_PKGHOME}"
-VENV_DIR="${WORKING_DIR}/venv"
 
+# 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为安装态语义
+. "$(dirname "$0")/lib.sh"
+LIB_LOG_FILE="${VAR_DIR}/qwenpaw-install.log"
 export HOME="${WORKING_DIR}"
-export QWENPAW_WORKING_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
-# 内核 2.3.0b2+ 依赖托管锁的覆盖变量（pwd home 在 fnOS 不可用），init 阶段同样需要
-export QWENPAW_DEPENDENCY_STATE_DIR="${QWENPAW_WORKING_DIR}/dependency-environments"
-LOG_FILE="${TRIM_PKGVAR}/qwenpaw-install.log"
 
-log_msg() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOG_FILE}"
-}
-
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}" 2>/dev/null || true
-chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
-chmod -R 755 "${TRIM_PKGVAR}" 2>/dev/null || true
-chmod -R 755 "${TRIM_PKGETC}" 2>/dev/null || true
-
-MARKER="${TRIM_PKGHOME}/.qwenpaw_keep_runtime"
+MARKER="${WORKING_DIR}/.qwenpaw_keep_runtime"
 if [ -f "${MARKER}" ]; then
     log_msg "检测到保留运行环境标记，跳过安装，仅修正权限"
     exit 0
@@ -56,7 +42,7 @@ if [ -x "${VENV_DIR}/bin/python3" ] && "${VENV_DIR}/bin/python3" -c "import impo
     CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
     log_msg "检测到运行环境与内核（${CUR_VER:-?}）均健在，跳过内核重装（双轨制：内核升级请走控制台版本管理）"
     if [ -n "${CUR_VER}" ]; then
-        echo "${CUR_VER}" > "${TRIM_PKGVAR}/qwenpaw-version"
+        echo "${CUR_VER}" > "${VAR_DIR}/qwenpaw-version"
         log_msg "已刷新内核版本钉: ${CUR_VER}"
     fi
     log_msg "QwenPaw 外壳升级完成（内核未变更）！"
@@ -91,7 +77,7 @@ python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"
 
 # 内核版本来源（修复路径）：版本钉优先，精确恢复用户选择的版本
-VERSION_PIN="$(tr -d '[:space:]' < "${TRIM_PKGVAR}/qwenpaw-version" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
+VERSION_PIN="$(tr -d '[:space:]' < "${VAR_DIR}/qwenpaw-version" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
 if [ -n "${VERSION_PIN}" ]; then
     TARGET_PKG="qwenpaw==${VERSION_PIN}"
     log_msg "检测到内核版本钉，按其精确恢复: ${TARGET_PKG}"
@@ -110,19 +96,19 @@ PIP_LOG=$(mktemp)
 
 log_msg "安装目标包: ${TARGET_PKG}，使用选项: ${PIP_OPTS}"
 if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
-    cat "${PIP_LOG}" >> "${LOG_FILE}"
+    cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
     ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
     rm -f "${PIP_LOG}"
     log_msg "ERROR: pip 安装失败: ${ERROR_MSG}"
     exit 1
 fi
-cat "${PIP_LOG}" >> "${LOG_FILE}"
+cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
 rm -f "${PIP_LOG}"
 
 # 记录内核版本钉：fpk 升级若重建 venv，按此版本恢复，不追踪最新
 CUR_VER="$(python3 -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
 if [ -n "${CUR_VER}" ]; then
-    echo "${CUR_VER}" > "${TRIM_PKGVAR}/qwenpaw-version"
+    echo "${CUR_VER}" > "${VAR_DIR}/qwenpaw-version"
     log_msg "已记录内核版本钉: ${CUR_VER}"
 fi
 

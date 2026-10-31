@@ -1,27 +1,10 @@
 #!/bin/bash
 
-# 变量绝对路径兜底，确保无论由系统调起还是 CGI 触发，路径 100% 稳定
-VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+# 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为运行态语义
+. "$(dirname "$0")/lib.sh"
 LOG_FILE="${VAR_DIR}/qwenpaw.log"
 PID_FILE="${VAR_DIR}/qwenpaw.pid"
-
-WORKING_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
-VENV_DIR="${WORKING_DIR}/venv"
-
-ETC_DIR="${TRIM_PKGETC:-/var/apps/qwenpaw/etc}"
-SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
-[ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
-
-LOG_LEVEL="${wizard_log_level:-info}"
-
 export HOME="${ETC_DIR}"
-export QWENPAW_WORKING_DIR="${SHARE_DIR}"
-export QWENPAW_LOG_LEVEL="${LOG_LEVEL}"
-export QWENPAW_AUTH_ENABLED=true
-export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
-# 内核 2.3.0b2+ 的插件依赖托管锁按 pwd home 推导（fnOS 应用用户 home 不可写会启动崩溃），
-# 上游提供的覆盖变量优先级高于 pwd home，统一指向数据区（持久、可写）
-export QWENPAW_DEPENDENCY_STATE_DIR="${SHARE_DIR}/dependency-environments"
 
 # 端口获取机制 (对齐 DSH，默认优雅端口 18088，且避开老应用占用的 19091)
 PORT_FILE="${VAR_DIR}/service_port"
@@ -55,7 +38,7 @@ start_process() {
     fi
 
     # 内核未安装时跳过启动（首次安装模式：内核由控制台「版本更新」安装）
-    if ! "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+    if ! kernel_installed; then
         log_msg "内核未安装，跳过启动（请在 QwenPaw 控制台「版本更新」中安装内核）"
         return 0
     fi
