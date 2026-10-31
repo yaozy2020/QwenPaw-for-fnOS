@@ -40,6 +40,7 @@ start_process() {
     # 内核未安装时跳过启动（首次安装模式：内核由控制台「版本更新」安装）
     if ! kernel_installed; then
         log_msg "内核未安装，跳过启动（请在 QwenPaw 控制台「版本更新」中安装内核）"
+        notify_user "QwenPaw 内核尚未安装，请打开控制台「版本更新」选择版本安装。"
         return 0
     fi
 

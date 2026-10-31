@@ -37,3 +37,10 @@ kernel_installed() {
     [ -x "${VENV_DIR}/bin/python3" ] && \
     "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1
 }
+
+# ── 用户可见错误通道（官方规范：生命周期脚本的失败信息写入 TRIM_TEMP_LOGFILE，
+#    会展示给用户；未注入时静默跳过）──
+notify_user() {
+    [ -n "${TRIM_TEMP_LOGFILE:-}" ] || return 0
+    echo "$*" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
+}

@@ -100,6 +100,7 @@ if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&
     ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
     rm -f "${PIP_LOG}"
     log_msg "ERROR: pip 安装失败: ${ERROR_MSG}"
+    notify_user "QwenPaw 内核安装失败: ${ERROR_MSG}。请在控制台「版本更新」中重试。"
     exit 1
 fi
 cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"

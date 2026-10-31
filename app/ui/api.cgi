@@ -1,12 +1,19 @@
 #!/bin/bash
 
-LOG_FILE="/var/apps/qwenpaw/var/qwenpaw.log"
-PID_FILE="/var/apps/qwenpaw/var/qwenpaw.pid"
-UPGRADE_LOG_FILE="/var/apps/qwenpaw/var/qwenpaw-upgrade.log"
-UPGRADE_PID_FILE="/var/apps/qwenpaw/var/qwenpaw-upgrade.pid"
-UPGRADE_LOCK_DIR="/var/apps/qwenpaw/var/qwenpaw-upgrade.lock"
-STATUS_CACHE_FILE="/var/apps/qwenpaw/var/qwenpaw-status.cache"
-PORT_FILE="/var/apps/qwenpaw/var/service_port"
+# 路径解析：TRIM_* 注入时优先（官方规范），否则回退 /var/apps 约定（官方 cgi 示例即硬编码）
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+HOME_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
+SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
+[ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
+VENV_DIR="${HOME_DIR}/venv"
+
+LOG_FILE="${VAR_DIR}/qwenpaw.log"
+PID_FILE="${VAR_DIR}/qwenpaw.pid"
+UPGRADE_LOG_FILE="${VAR_DIR}/qwenpaw-upgrade.log"
+UPGRADE_PID_FILE="${VAR_DIR}/qwenpaw-upgrade.pid"
+UPGRADE_LOCK_DIR="${VAR_DIR}/qwenpaw-upgrade.lock"
+STATUS_CACHE_FILE="${VAR_DIR}/qwenpaw-status.cache"
+PORT_FILE="${VAR_DIR}/service_port"
 
 get_service_port() {
     local p=""
@@ -18,9 +25,7 @@ get_service_port() {
 
 STATUS_CACHE_TTL=60
 
-AUTH_FILE="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw.secret/auth.json"
-
-VENV_DIR="/var/apps/qwenpaw/home/venv"
+AUTH_FILE="${SHARE_DIR}.secret/auth.json"
 
 mkdir -p "$(dirname "${LOG_FILE}")"
 
@@ -167,7 +172,7 @@ start_service() {
         fi
     fi
 
-    local cmd="export HOME=/var/apps/qwenpaw/home && export QWENPAW_WORKING_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw && export QWENPAW_DEPENDENCY_STATE_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
     nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
@@ -257,7 +262,7 @@ restart_service() {
         rm -f "${PID_FILE}"
     fi
 
-    local cmd="export HOME=/var/apps/qwenpaw/home && export QWENPAW_WORKING_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw && export QWENPAW_DEPENDENCY_STATE_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
     nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
@@ -331,9 +336,9 @@ change_port() {
             fi
             rm -f '${PID_FILE}'
         fi
-        export HOME=/var/apps/qwenpaw/home
-        export QWENPAW_WORKING_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw
-        export QWENPAW_DEPENDENCY_STATE_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw/dependency-environments
+        export HOME=${HOME_DIR}
+        export QWENPAW_WORKING_DIR=${SHARE_DIR}
+        export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments
         export QWENPAW_AUTH_ENABLED=true
         export PATH=/var/apps/nodejs_v24/target/bin:\$PATH
         source ${VENV_DIR}/bin/activate
@@ -452,7 +457,7 @@ upgrade_service() {
         if [ \$rc -eq 0 ]; then
             echo '=== 升级成功 ===' >> ${UPGRADE_LOG_FILE}
             rm -f ${STATUS_CACHE_FILE}
-            ${VENV_DIR}/bin/pip show qwenpaw 2>/dev/null | grep -a '^Version:' | cut -d' ' -f2 > /var/apps/qwenpaw/var/qwenpaw-version
+            ${VENV_DIR}/bin/pip show qwenpaw 2>/dev/null | grep -a '^Version:' | cut -d' ' -f2 > ${VAR_DIR}/qwenpaw-version
             echo '正在重启 QwenPaw...' >> ${UPGRADE_LOG_FILE}
             if [ -f ${PID_FILE} ]; then
                 old_pid=\$(head -n 1 ${PID_FILE} | tr -d '[:space:]')
@@ -469,9 +474,9 @@ upgrade_service() {
                 fi
                 rm -f ${PID_FILE}
             fi
-            export HOME=/var/apps/qwenpaw/home
-            export QWENPAW_WORKING_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw
-            export QWENPAW_DEPENDENCY_STATE_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw/dependency-environments
+            export HOME=${HOME_DIR}
+            export QWENPAW_WORKING_DIR=${SHARE_DIR}
+            export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments
             export QWENPAW_AUTH_ENABLED=true
             export PATH=/var/apps/nodejs_v24/target/bin:\$PATH
             source ${VENV_DIR}/bin/activate
@@ -569,7 +574,7 @@ check_tunnel_installed() {
 }
 
 backup_download() {
-    local working_base="/var/apps/qwenpaw/shares/qwenpaw"
+    local working_base="${SHARE_DIR%/.qwenpaw}"
     local working_dir="${working_base}/.qwenpaw"
     local secret_dir="${working_base}/.qwenpaw.secret"
     local backup_name="qwenpaw-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
