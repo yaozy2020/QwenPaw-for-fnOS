@@ -7,10 +7,14 @@
 //!   - 不用 Pdeathsig:内核必须在监督者重启(外壳升级)后存活,由 /proc 收养
 
 use std::{
-    os::unix::io::{FromRawFd, IntoRawFd},
-    path::{Path, PathBuf},
-    sync::Mutex,
-    time::{Duration, Instant},
+    os::unix::process::CommandExt,
+    path::Path,
+    process,
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Mutex,
+    },
+    time::{Duration, Instant, SystemTime},
 };
 
 use tokio::process::Command;
@@ -20,10 +24,24 @@ use crate::procfs;
 #[derive(Clone, Debug)]
 pub struct KernelConfig {
     pub venv_dir: String,
-    pub pid_file: PathBuf,
-    pub log_file: PathBuf,
-    pub port: u16,
+    pub pid_file: String,
+    pub log_file: String,
     pub share_dir: String,
+    pub etc_dir: String,
+}
+
+pub struct KernelManager {
+    cfg: KernelConfig,
+    port: AtomicU16,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    tracked: i32,
+    started_wall: Option<SystemTime>,
+    cache_pid: i32,
+    cache_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -31,37 +49,28 @@ pub struct KernelStatus {
     pub pid: i32,
     pub running: bool,
     pub adopted: bool,
-    pub started_at: Option<std::time::SystemTime>,
+    pub started_at: Option<SystemTime>,
     pub cpu_percent: f64,
     pub rss_kb: i64,
     pub port: u16,
 }
 
-pub struct KernelManager {
-    cfg: KernelConfig,
-    state: Mutex<State>,
-}
-
-#[derive(Default)]
-struct State {
-    tracked: i32,
-    started_wall: Option<std::time::SystemTime>,
-    cache_pid: i32,
-    cache_at: Option<Instant>,
-}
-
 impl KernelManager {
-    pub fn new(cfg: KernelConfig) -> Self {
-        Self { cfg, state: Mutex::new(State::default()) }
+    pub fn new(cfg: KernelConfig, port: u16) -> Self {
+        Self { cfg, port: AtomicU16::new(port), state: Mutex::new(State::default()) }
     }
 
     pub fn port(&self) -> u16 {
-        self.cfg.port
+        self.port.load(Ordering::Relaxed)
+    }
+
+    pub fn set_port(&self, port: u16) {
+        self.port.store(port, Ordering::Relaxed);
     }
 
     pub fn kernel_version(&self) -> String {
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
-        match std::process::Command::new(&bin)
+        match process::Command::new(&bin)
             .arg("-c")
             .arg("import importlib.metadata as m; print(m.version('qwenpaw'))")
             .output()
@@ -75,7 +84,8 @@ impl KernelManager {
         !self.kernel_version().is_empty()
     }
 
-    /// 以独立进程组启动内核(process_group(0) ≈ setsid)。
+    /// 同步启动内核(无 await;由 axum 处理器与安装完成回调直接调用)。
+    /// 以独立进程组启动(process_group(0) ≈ setsid)。
     pub fn spawn(&self) -> Result<i32, String> {
         {
             let st = self.state.lock().unwrap();
@@ -87,12 +97,20 @@ impl KernelManager {
         if !Path::new(&bin).exists() {
             return Err("kernel not installed".into());
         }
+        let port = self.port();
         let mut cmd = Command::new(&bin);
-        cmd.args(["-m", "qwenpaw", "app", "--host", "0.0.0.0", "--port", &self.cfg.port.to_string()])
+        cmd.args(["-m", "qwenpaw", "app", "--host", "0.0.0.0", "--port", &port.to_string()])
             .current_dir(&self.cfg.share_dir)
+            .env("HOME", &self.cfg.etc_dir)
+            .env("QWENPAW_WORKING_DIR", &self.cfg.share_dir)
+            .env("QWENPAW_AUTH_ENABLED", "true")
             .env(
                 "QWENPAW_DEPENDENCY_STATE_DIR",
                 format!("{}/dependency-environments", self.cfg.share_dir),
+            )
+            .env(
+                "PATH",
+                "/var/apps/nodejs_v24/target/bin:/usr/local/bin:/usr/bin:/bin",
             )
             .process_group(0) // 独立进程组:停止时组信号可连带浏览器/MCP 子进程
             .kill_on_drop(false);
@@ -101,10 +119,8 @@ impl KernelManager {
             .append(true)
             .open(&self.cfg.log_file)
             .map_err(|e| format!("open kernel log: {e}"))?;
-        let log_err = log
-            .try_clone()
-            .map_err(|e| format!("clone kernel log: {e}"))?;
-        use std::os::unix::io::IntoRawFd;
+        let log_err = log.try_clone().map_err(|e| format!("clone kernel log: {e}"))?;
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
         cmd.stdout(unsafe { std::fs::File::from_raw_fd(log.into_raw_fd()) });
         cmd.stderr(unsafe { std::fs::File::from_raw_fd(log_err.into_raw_fd()) });
         let mut child = cmd.spawn().map_err(|e| format!("spawn kernel: {e}"))?;
@@ -132,7 +148,7 @@ impl KernelManager {
             st.tracked
         };
         if target == 0 || !procfs::process_alive(target) {
-            target = procfs::rediscover_all(self.cfg.port, target)
+            target = procfs::rediscover_all(self.port(), target)
                 .into_iter()
                 .max()
                 .unwrap_or(0);
@@ -151,12 +167,12 @@ impl KernelManager {
             if !procfs::process_alive(target) {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            std::thread::sleep(Duration::from_secs(1));
         }
         // 2) 仍活:单 KILL
         if procfs::process_alive(target) {
             unsafe { libc::kill(target, libc::SIGKILL) };
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            std::thread::sleep(Duration::from_millis(500));
         }
         // 3) 组 KILL 清扫:无视 TERM 的子进程(chromium/MCP)在此兜底;
         //    已死成员 ESRCH 为空操作。组不可用时跳过(防误伤同组平台进程)。
@@ -183,7 +199,7 @@ impl KernelManager {
         let mut adopted = false;
         let mut pid = st.tracked;
         if !cache_valid {
-            let all = procfs::rediscover_all(self.cfg.port, st.tracked);
+            let all = procfs::rediscover_all(self.port(), st.tracked);
             let best = all.iter().copied().max().unwrap_or(0);
             if best > 0 && best != st.tracked {
                 adopted = true;
@@ -216,7 +232,7 @@ impl KernelManager {
             started_at: started_wall,
             cpu_percent: cpu,
             rss_kb: rss,
-            port: self.cfg.port,
+            port: self.port(),
         }
     }
 }

@@ -41,25 +41,38 @@ fn main() {
         })
     };
 
-    let kernel = Arc::new(KernelManager::new(kernel::KernelConfig {
-        venv_dir: cfg.kernel_venv.clone(),
-        pid_file: cfg.kernel_pid_file.clone().into(),
-        log_file: cfg.kernel_log.clone().into(),
-        port: cfg.kernel_port,
-        share_dir: cfg.share_dir.clone(),
-    }));
+    let kernel = Arc::new(KernelManager::new(
+        kernel::KernelConfig {
+            venv_dir: cfg.kernel_venv.clone(),
+            pid_file: cfg.kernel_pid_file.clone(),
+            log_file: cfg.kernel_log.clone(),
+            share_dir: cfg.share_dir.clone(),
+            etc_dir: cfg.etc_dir.clone(),
+        },
+        cfg.kernel_port,
+    ));
     let events = Events::new();
-    let install = InstallState::new({
-        let log = Arc::clone(&log);
-        Arc::new(move |snap: install::InstallSnapshot| {
-            let mut g = log.lock().unwrap();
-            let _ = writeln!(
-                g,
-                "[Supervisor] install seq={} phase={:?} fetched={} msg={}",
-                snap.seq, snap.phase, snap.fetched, snap.message
-            );
-        })
-    });
+    let install = InstallState::new(
+        {
+            let log = Arc::clone(&log);
+            Arc::new(move |snap: install::InstallSnapshot| {
+                let mut g = log.lock().unwrap();
+                let _ = writeln!(
+                    g,
+                    "[Supervisor] install seq={} phase={:?} fetched={} msg={}",
+                    snap.seq, snap.phase, snap.fetched, snap.message
+                );
+            })
+        },
+        {
+            let kernel = Arc::clone(&kernel);
+            Arc::new(move || {
+                if let Err(e) = kernel.spawn() {
+                    eprintln!("[Supervisor] autostart after install: {e}");
+                }
+            })
+        },
+    );
 
     // token:0600,缺失则生成;cgi 与监督者同读
     let token = match std::fs::read_to_string(&cfg.token_file) {
@@ -111,6 +124,9 @@ fn main() {
         token: token.clone(),
         var_dir: cfg.var_dir.clone(),
         home_dir: cfg.home_dir.clone(),
+        etc_dir: cfg.etc_dir.clone(),
+        share_dir: cfg.share_dir.clone(),
+        kernel_log: cfg.kernel_log.clone(),
     };
     let addr = format!("127.0.0.1:{}", cfg.listen_port);
     let listener = rt

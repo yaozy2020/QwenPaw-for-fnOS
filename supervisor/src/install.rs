@@ -42,10 +42,14 @@ struct Inner {
 pub struct InstallState {
     inner: Arc<Mutex<Inner>>,
     on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
+    on_success: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl InstallState {
-    pub fn new(on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>) -> Self {
+    pub fn new(
+        on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
+        on_success: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 phase: Phase::Idle,
@@ -56,6 +60,7 @@ impl InstallState {
                 running: false,
             })),
             on_change,
+            on_success,
         }
     }
 
@@ -109,6 +114,7 @@ impl InstallState {
         self.emit(self.snapshot());
 
         let this = self.clone();
+        let on_success = std::sync::Arc::clone(&self.on_success);
         std::thread::spawn(move || {
             let mirror_opt = if mirror.is_empty() { String::new() } else { format!("-i {mirror}") };
             let script =
@@ -183,6 +189,10 @@ impl InstallState {
                 }
             });
             this.emit(this.snapshot());
+            if ok {
+                // 安装成功自动拉起内核(装完即用,无需手动重启)
+                (on_success)();
+            }
             let _ = ok;
         });
         true
