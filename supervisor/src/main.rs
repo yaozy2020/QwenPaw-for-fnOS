@@ -52,6 +52,7 @@ fn main() {
         cfg.kernel_port,
     ));
     let events = Events::new();
+    let kernel_for_install = Arc::clone(&kernel);
     let install = InstallState::new(
         {
             let log = Arc::clone(&log);
@@ -62,6 +63,15 @@ fn main() {
                     "[Supervisor] install seq={} phase={:?} fetched={} msg={}",
                     snap.seq, snap.phase, snap.fetched, snap.message
                 );
+                // pip 失败不能把服务留在停机态(独立审计 major):失败终态尝试
+                // 拉起现有内核;半改写 venv 时 spawn 可能失败,如实落日志
+                if snap.phase == install::Phase::Failed {
+                    let _ = writeln!(g, "[Supervisor] install failed, attempting kernel restart");
+                    match kernel_for_install.spawn() {
+                        Ok(pid) => { let _ = writeln!(g, "[Supervisor] kernel restarted after failed install, pid={pid}"); }
+                        Err(e) => { let _ = writeln!(g, "[Supervisor] kernel restart after failed install FAILED: {e}"); }
+                    }
+                }
             })
         },
         {

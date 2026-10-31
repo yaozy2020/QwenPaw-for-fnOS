@@ -371,11 +371,11 @@ const API_BASE = (function() {
           latestStableVer = data.latest_stable || "2.2.2.post1";
           const firstBeta = rawVersionList.find(v => v.is_beta);
           if (firstBeta) latestBetaVer = firstBeta.version;
-          renderVersionCards();
+          refreshVersionCards();
         }
       } catch (e) {
         console.warn("fetchVersionList err:", e);
-        renderVersionCards();
+        refreshVersionCards();
       }
     }
 
@@ -385,14 +385,14 @@ const API_BASE = (function() {
       showToast(`检查完成！最新稳定: v${latestStableVer}，最新测试: v${latestBetaVer}`);
     }
 
-    function renderVersionCards() {
+    function refreshVersionCards() {
       const container = document.getElementById("versionCardsContainer");
       const historyDrop = document.getElementById("historyDropdown");
       if (!container) return;
 
-      let isHistorySelected = selectedVersion !== latestBetaVer && selectedVersion !== latestStableVer;
 
-      renderVersionCards(latestBetaVer, latestStableVer, selectedVersion, pickVersion, container);
+      renderVersionCards(latestBetaVer, latestStableVer, selectedVersion, pickVersion, container)
+        .catch(e => console.error("renderVersionCards err:", e));
 
       if (historyDrop) {
         const historyList = rawVersionList.filter(v => v.version !== latestBetaVer && v.version !== latestStableVer);
@@ -404,7 +404,7 @@ const API_BASE = (function() {
 
     function pickVersion(ver) {
       selectedVersion = ver;
-      renderVersionCards();
+      refreshVersionCards();
       const drop = document.getElementById("historyDropdown");
       if (drop) drop.classList.remove("show");
     }
@@ -550,7 +550,8 @@ const API_BASE = (function() {
 
           // 启动确认:10s 后仍无任何 phase 跳变且未在升级 → 指令未送达(切后台被杀)
           const pending = !sdata.upgrading && !phaseChanged
-            && (sdata.phase === "idle" || sdata.phase === "done" || sdata.phase === "failed");
+            && (sdata.phase === "idle" || sdata.phase === "done" || sdata.phase === "failed"
+              || sdata.success === false); // 新桥+旧监督者过渡态:兜底响应也算未送达
           if (pending && Date.now() - upgradeStartedAt > 10000) {
             clearInterval(upgradePollTimer);
             upgradePollTimer = null;
@@ -673,9 +674,6 @@ const API_BASE = (function() {
       }
     }
 
-    function escapeHtml(str) {
-      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    }
 
     // 初始执行全套自愈
     initTheme();

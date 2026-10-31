@@ -347,7 +347,9 @@ async fn install_log(
         .unwrap_or(40)
         .clamp(1, 500);
     let path = format!("{}/qwenpaw-upgrade.log.pip", state.var_dir);
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let content = std::fs::read(&path)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
     let lines: Vec<String> = content
         .lines()
         .rev()

@@ -34,7 +34,7 @@ export function LogLines({ lines, empty, success = false }: { lines: (string | {
     <>
       {items.map((msg, i) => {
         let cls = "log-info";
-        if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("failed")) cls = "log-error";
+        if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("failed") || msg.includes("失败")) cls = "log-error";
         else if (msg.includes("WARN") || msg.includes("Warning")) cls = "log-warn";
         else if (success && (msg.includes("成功") || msg.includes("Successfully"))) cls = "log-success";
         return <div class={cls} key={i}>{msg}</div>;

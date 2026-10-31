@@ -134,13 +134,16 @@ impl InstallState {
                     // pip 的进度走 stdout:逐行读取 → 落盘 + 解析(dsh consumeNpmOutput 模式)
                     if let Some(out) = child.stdout.take() {
                         let mut reader = BufReader::new(out);
-                        let mut line = String::new();
+                        let mut buf: Vec<u8> = Vec::new();
                         loop {
-                            line.clear();
-                            match reader.read_line(&mut line) {
+                            buf.clear();
+                            // read_until + lossy:pip 吐非法 UTF-8 时逐行降级而不是
+                            // Err 中断(曾导致日志从此截断、进度消息冻结)
+                            match reader.read_until(b'\n', &mut buf) {
                                 Ok(0) => break,
                                 Ok(_) => {
-                                    let l = line.trim_end();
+                                    let owned = String::from_utf8_lossy(&buf);
+                                    let l = owned.trim_end();
                                     if let Some(mut log) = log.as_ref() {
                                         use std::io::Write;
                                         let _ = writeln!(log, "{l}");

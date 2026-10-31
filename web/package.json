@@ -7,7 +7,9 @@
     "build": "node build.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.24.2",
+    "esbuild": "^0.24.2"
+  },
+  "dependencies": {
     "preact": "^11.1.1"
   }
 }
