@@ -21,37 +21,6 @@ chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
 chmod -R 755 "${TRIM_PKGVAR}" 2>/dev/null || true
 chmod -R 755 "${TRIM_PKGETC}" 2>/dev/null || true
 
-# 自动平滑继承老版本 com.dustinky.qwenpaw 的所有数据与账号密码凭据
-OLD_SHARE="/vol2/@appshare/com.dustinky.qwenpaw/.qwenpaw"
-NEW_SHARE="${QWENPAW_WORKING_DIR}"
-OLD_SECRET="/vol2/@appshare/com.dustinky.qwenpaw/.qwenpaw.secret"
-NEW_SECRET="$(dirname "${QWENPAW_WORKING_DIR}")/.qwenpaw.secret"
-
-# 1. 记忆与工作区数据继承
-if [ -d "${OLD_SHARE}" ] && [ ! -d "${NEW_SHARE}/workspaces" ]; then
-    log_msg "检测到老版本数据目录，开始自动无损继承工作区记忆..."
-    mkdir -p "${NEW_SHARE}"
-    cp -r "${OLD_SHARE}/." "${NEW_SHARE}/" 2>/dev/null || true
-    chmod -R 755 "${NEW_SHARE}" 2>/dev/null || true
-    log_msg "老版本记忆、工作区与配置已成功继承！"
-    # 核心路径自愈：将老配置中写死的老包名绝对路径替换为新包名路径，防止 Internal Server Error
-    log_msg "正在自动对齐所有工作区与配置文件的绝对路径..."
-    sed -i "s/com\.dustinky\.qwenpaw/qwenpaw/g" "${NEW_SHARE}/config.json" 2>/dev/null || true
-    find "${NEW_SHARE}/workspaces" -name "*.json" -exec sed -i "s/com\.dustinky\.qwenpaw/qwenpaw/g" {} + 2>/dev/null || true
-    echo '{"language": "zh"}' > "${NEW_SHARE}/settings.json" 2>/dev/null || true
-    log_msg "所有工作区路径已对齐，系统语言已锁定中文！" 
-fi
-
-# 2. 核心账号密码凭据继承 (解决注册账号问题)
-if [ -d "${OLD_SECRET}" ] && [ ! -f "${NEW_SECRET}/auth.json" ]; then
-    log_msg "检测到老版本秘钥凭据，正在无损继承管理员账号密码与加密密钥..."
-    mkdir -p "${NEW_SECRET}"
-    cp -r "${OLD_SECRET}/." "${NEW_SECRET}/" 2>/dev/null || true
-    chmod 700 "${NEW_SECRET}" 2>/dev/null || true
-    chmod 600 "${NEW_SECRET}"/* 2>/dev/null || true
-    log_msg "老版本账号密码 (auth.json) 与 MasterKey 已100%成功继承！"
-fi
-
 MARKER="${TRIM_PKGHOME}/.qwenpaw_keep_runtime"
 if [ -f "${MARKER}" ]; then
     log_msg "检测到保留运行环境标记，跳过安装，仅修正权限"

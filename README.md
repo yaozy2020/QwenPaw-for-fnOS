@@ -1,12 +1,12 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.0.3-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.0.4-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
 将 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) 一键部署到飞牛 NAS 的**轻量外壳包（Launcher）**。
 
-本项目不是 QwenPaw 本体，也不打包本体源码：外壳只负责部署与运维，内核按需从 PyPI 在线安装，二者**版本双轨、互不牵连**。与旧的 `com.dustinky.qwenpaw` 包可以并存，首装自动无损继承旧包的工作区、记忆与管理员凭据。
+本项目不是 QwenPaw 本体，也不打包本体源码：外壳只负责部署与运维，内核按需从 PyPI 在线安装，二者**版本双轨、互不牵连**。
 
 ## 外壳特性
 
@@ -15,7 +15,6 @@
 - **版本双轨制** — 外壳（fpk）升级**不改变**已安装的内核版本；内核版本由"版本钉"记录，运行环境重建时精确恢复
 - **安装源三选一** — 清华 / 阿里云 / 中科大镜像，规避官方源网络问题
 - **端口自定义** — 默认 `18088`，向导与控制台均可修改；旧默认端口 `19091` 冲突时自动升迁自愈
-- **老数据无损继承** — 自动迁移旧包的工作区记忆与 `.qwenpaw.secret` 管理员凭据，路径自动对齐
 - **预压缩传输** — 控制台静态资源按 `Accept-Encoding` 协商发送 brotli/gzip，52KB 控制台实际传输约 11KB
 
 关于 QwenPaw 本体：多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等）、多智能体协作、定时任务、Skills 无限扩展，支持 Ollama 等本地大模型完全离线运行，数据全部留在本地。由 [AgentScope](https://github.com/agentscope-ai) 团队开发。
@@ -44,13 +43,6 @@
 4. 等待安装完成——内核 wheel（约 40MB）及其依赖需要从 PyPI 下载，**进度在 55% 附近停留较久属正常现象**
 
 安装完成后，QwenPaw 内核在服务端口（默认 **18088**）启动；飞牛桌面会出现**两个图标**：QwenPaw（本体 Web 端）与 QwenPaw 控制台（运维面板）。
-
-### 从旧包（com.dustinky.qwenpaw）迁移
-
-新版使用独立包名 `qwenpaw`，可与旧包并存。首装时自动完成：
-
-- 工作区、记忆、配置文件整体继承，其中写死的旧包名路径自动替换为新路径
-- `.qwenpaw.secret` 管理员账号密码与 MasterKey 继承，无需重新注册
 
 ## 升级与版本管理
 
@@ -85,7 +77,13 @@ QwenPaw-for-fnOS/
 
 ## 版本历史
 
-### v1.0.3（当前）
+### v1.0.4（当前）
+
+- 取消旧版数据自动迁移逻辑及相关文案
+- 修复内核 2.3.0b2+ 在 fnOS 的启动崩溃（注入 `QWENPAW_DEPENDENCY_STATE_DIR`）
+- 版本钉全路径闭环：外壳升级、环境重建均不改变内核版本
+
+### v1.0.3
 
 - 应用说明、README 安装引导、升级向导文案对齐实际功能
 - 明确升级向导中 PyPI 镜像仅在运行环境重建时使用
@@ -105,7 +103,7 @@ QwenPaw-for-fnOS/
 
 - 独立发版：确立外壳/内核版本双轨制
 - DSH 风格极简控制台（双模态、版本自选、降级保护）
-- 自定义端口与老包数据无损继承
+- 自定义端口支持
 
 ## 常见问题
 
