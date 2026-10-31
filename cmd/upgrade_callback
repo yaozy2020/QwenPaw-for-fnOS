@@ -61,7 +61,7 @@ if [ ! -d "${VENV_DIR}" ]; then
     fi
 
     # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）
-    VERSION_PIN="$(tr -d '[:space:]' < "${PIN_FILE}" 2>/dev/null || true)"
+    VERSION_PIN="$(tr -d '[:space:]' < "${PIN_FILE}" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
     if [ -n "${VERSION_PIN}" ]; then
         TARGET_PKG="qwenpaw==${VERSION_PIN}"
         log_msg "按版本钉恢复内核: ${TARGET_PKG}"

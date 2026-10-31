@@ -92,7 +92,8 @@ log_msg "虚拟环境 pip 升级成功"
 
 # 内核版本来源：版本钉优先（用户在控制台选过的版本），无钉才按向导渠道
 # 这样即使运行环境被系统升级清掉，也会精确恢复用户选择的版本而非追踪最新
-VERSION_PIN="$(tr -d '[:space:]' < "${TRIM_PKGVAR}/qwenpaw-version" 2>/dev/null || true)"
+# 读取时净化：容忍历史版本钉被写成 "Version: x.y.z" 的整行格式
+VERSION_PIN="$(tr -d '[:space:]' < "${TRIM_PKGVAR}/qwenpaw-version" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
 TARGET_PKG="qwenpaw"
 if [ -n "${VERSION_PIN}" ]; then
     TARGET_PKG="qwenpaw==${VERSION_PIN}"
