@@ -1,9 +1,20 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QwenPaw 控制台</title>
+  <script>
+    // 首屏防闪屏:无用户显式选择时跟随系统 prefers-color-scheme,须在样式表生效前定题
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("qwenpaw_theme_v2"); } catch (e) {}
+      if (t !== "light" && t !== "dark") {
+        t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
   <style>
     /* 1. 暗夜模式 (Dark Mode) - 纯正深邃黑，绝无白边漏光 */
     :root,
@@ -785,6 +796,17 @@
           <div id="kernelInstallTip" style="display:none; margin-bottom:10px; padding:10px 12px; background:var(--primary-bg, rgba(59,130,246,0.12)); border:1px solid rgba(59,130,246,0.25); border-radius:8px; font-size:12px; line-height:1.6; color:var(--text-main);">
             📦 <strong>QwenPaw 内核尚未安装</strong>。请在下方选择一个版本，点击按钮完成安装（首次建议 Stable 稳定版）。安装需从 PyPI 下载约 40MB，请耐心等待。
           </div>
+          <!-- 下载源选择:落盘服务端(VAR_DIR/pip-mirror),升级内核时生效;向导选择的源作为初始默认 -->
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:12px;">
+            <label for="mirrorSelect" style="color:var(--text-sub); white-space:nowrap;">下载源</label>
+            <select id="mirrorSelect" onchange="saveMirror()" style="flex:1; padding:4px 8px; border-radius:6px; border:1px solid var(--border, rgba(128,128,128,0.35)); background:transparent; color:var(--text-main); font-size:12px;">
+              <option value="">官方 PyPI（国内较慢）</option>
+              <option value="https://pypi.tuna.tsinghua.edu.cn/simple">清华大学镜像源</option>
+              <option value="https://mirrors.aliyun.com/pypi/simple/">阿里云镜像源</option>
+              <option value="https://pypi.mirrors.ustc.edu.cn/simple/">中科大镜像源</option>
+              <option value="https://mirrors.cloud.tencent.com/pypi/simple">腾讯云镜像源</option>
+            </select>
+          </div>
           <div class="ver-cards-container" id="versionCardsContainer">
             <div class="ver-card-item active" onclick="pickVersion('2.3.0b1')">
               <div class="ver-info-left">
@@ -932,20 +954,14 @@
       return 0;
     }
 
-    // 核心主题管理
-    function initTheme() {
-      const saved = localStorage.getItem("qwenpaw_theme");
-      if (saved) {
-        setTheme(saved);
-      } else {
-        setTheme("dark");
-      }
+    // 核心主题管理:默认跟随系统(prefers-color-scheme),仅用户点切换时才落盘。
+    // 存储键 v2 —— 旧版曾把默认 dark 自动写入旧键,无法与用户显式选择区分。
+    function systemTheme() {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     }
 
-    function setTheme(t) {
+    function applyTheme(t) {
       document.documentElement.setAttribute("data-theme", t);
-      localStorage.setItem("qwenpaw_theme", t);
-      
       const sun = document.getElementById("themeIconSun");
       const moon = document.getElementById("themeIconMoon");
       const txt = document.getElementById("themeText");
@@ -961,14 +977,30 @@
       }
     }
 
+    function initTheme() {
+      try { localStorage.removeItem("qwenpaw_theme"); } catch (e) {}
+      const saved = localStorage.getItem("qwenpaw_theme_v2");
+      if (saved === "light" || saved === "dark") {
+        applyTheme(saved);
+      } else {
+        applyTheme(systemTheme());
+      }
+    }
+
+    function setTheme(t) {
+      try { localStorage.setItem("qwenpaw_theme_v2", t); } catch (e) {}
+      applyTheme(t);
+    }
+
     function toggleTheme() {
-      const curr = document.documentElement.getAttribute("data-theme") || "dark";
+      const curr = document.documentElement.getAttribute("data-theme") || systemTheme();
       setTheme(curr === "dark" ? "light" : "dark");
     }
 
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
-      if (!localStorage.getItem("qwenpaw_theme")) {
-        setTheme(e.matches ? "dark" : "light");
+      const saved = localStorage.getItem("qwenpaw_theme_v2");
+      if (saved !== "light" && saved !== "dark") {
+        applyTheme(e.matches ? "dark" : "light");
       }
     });
 
@@ -1194,6 +1226,35 @@
     }
 
     // 版本管理与在线检查
+    // 下载源:读/存服务端(VAR_DIR/pip-mirror),全设备共享;控制台每次升级显式携带
+    async function loadMirror() {
+      try {
+        const res = await fetch(`${API_BASE}?action=get_mirror&_t=${Date.now()}`);
+        const d = await res.json();
+        if (d.success) {
+          const el = document.getElementById("mirrorSelect");
+          if (el) el.value = d.mirror || "";
+        }
+      } catch (e) { console.warn("loadMirror err:", e); }
+    }
+
+    async function saveMirror() {
+      const el = document.getElementById("mirrorSelect");
+      if (!el) return;
+      try {
+        const res = await fetch(`${API_BASE}?action=set_mirror&mirror=${encodeURIComponent(el.value)}`, { method: "POST" });
+        const d = await res.json();
+        showToast(d.success ? "下载源已保存，安装/升级内核时生效" : ("保存失败: " + (d.message || "")));
+      } catch (e) {
+        showToast("下载源保存失败");
+      }
+    }
+
+    function currentMirror() {
+      const el = document.getElementById("mirrorSelect");
+      return el ? el.value : "";
+    }
+
     async function fetchVersionList() {
       try {
         const res = await fetch(`${API_BASE}?action=version_list&_t=${Date.now()}`);
@@ -1335,7 +1396,7 @@
       openUpgradeModal();
 
       try {
-        const res = await fetch(`${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}`, { method: "POST" });
+        const res = await fetch(`${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}&mirror=${encodeURIComponent(currentMirror())}`, { method: "POST" });
         const data = await res.json();
         if (!data.success && !data.message.includes("正在进行中")) {
           showToast("升级提示: " + (data.message || "任务派发受阻"));
@@ -1483,6 +1544,7 @@
     fetchStatus();
     fetchLogs();
     fetchVersionList();
+    loadMirror();
     refreshTimer = setInterval(fetchLogs, 3500);
     setInterval(fetchStatus, 5000);
   </script>

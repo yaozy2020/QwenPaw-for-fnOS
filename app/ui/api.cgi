@@ -41,7 +41,15 @@ case "$action" in
         method="POST"
         path="/kernel/install"
         ver=$(qget version)
-        mir=$(qget mirror)
+        # mirror 优先级:显式 mirror= 参数(可为空,控制台总是携带) > 服务端已存
+        # 下载源(VAR_DIR/pip-mirror,set_mirror 落盘) > 空(pip 默认官方)
+        if echo "$QUERY_STRING" | tr '&' '\n' | grep -q '^mirror='; then
+            mir=$(qget mirror)
+        elif [ -f "${VAR_DIR}/pip-mirror" ]; then
+            mir=$(head -n 1 "${VAR_DIR}/pip-mirror" | tr -d '[:space:]')
+        else
+            mir=""
+        fi
         # JSON 体经 python3 构造,杜绝 shell 拼串注入(审计 nit);无 python3 时退化转义
         if command -v python3 >/dev/null 2>&1; then
             body=$(python3 -c 'import json,sys; print(json.dumps({"version": sys.argv[1] or "latest", "mirror": sys.argv[2]}))' "${ver:-latest}" "${mir}")
@@ -98,6 +106,38 @@ PY
                 ;;
         esac
         body="{\"port\":${newp}}"
+        ;;
+    set_mirror)
+        # 下载源落盘:mirror 会进入监督者的 bash -c pip 命令串,必须白名单字符集
+        # (仅 http(s) URL 安全字符),杜绝 shell 注入(独立审计"shell 拼 JSON"同源风险)
+        m=$(qget mirror)
+        ok=1
+        case "$m" in
+            "") : ;;
+            https://*|http://*) case "$m" in *[!A-Za-z0-9:/._~-]*) ok=0 ;; esac ;;
+            *) ok=0 ;;
+        esac
+        if [ "$ok" -ne 1 ]; then
+            echo "Content-Type: application/json"
+            echo ""
+            echo '{"success":false,"message":"下载源需为 http(s):// 开头且仅含 URL 安全字符的地址"}'
+            exit 0
+        fi
+        printf '%s\n' "$m" > "${VAR_DIR}/pip-mirror" 2>/dev/null \
+            && out='{"success":true,"message":"下载源已保存"}' \
+            || out='{"success":false,"message":"下载源写入失败(权限?)"}'
+        echo "Content-Type: application/json"
+        echo ""
+        echo "$out"
+        exit 0
+        ;;
+    get_mirror)
+        m=""
+        [ -f "${VAR_DIR}/pip-mirror" ] && m=$(head -n 1 "${VAR_DIR}/pip-mirror" | tr -d '[:space:]')
+        echo "Content-Type: application/json"
+        echo ""
+        printf '{"success":true,"mirror":"%s"}\n' "$m"
+        exit 0
         ;;
     backup_download|check_tunnel)
         echo "Content-Type: application/json"

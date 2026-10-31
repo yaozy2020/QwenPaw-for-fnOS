@@ -72,6 +72,18 @@ elif [ "$PYPI_MIRROR" = "ustc" ]; then
     PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
 fi
 
+# 向导选择的下载源落盘为控制台初始默认(控制台"下载源"选择器可随时改写;
+# 仅在文件不存在时落盘,不覆盖用户已有选择 —— 源选择自此不再止步于安装时)
+case "$PYPI_MIRROR" in
+    tsinghua) MIRROR_URL="https://pypi.tuna.tsinghua.edu.cn/simple" ;;
+    aliyun)   MIRROR_URL="https://mirrors.aliyun.com/pypi/simple/" ;;
+    ustc)     MIRROR_URL="https://pypi.mirrors.ustc.edu.cn/simple/" ;;
+    *)        MIRROR_URL="" ;;
+esac
+if [ -n "$MIRROR_URL" ] && [ ! -f "${VAR_DIR}/pip-mirror" ]; then
+    printf '%s\n' "$MIRROR_URL" > "${VAR_DIR}/pip-mirror" 2>/dev/null || true
+fi
+
 log_msg "正在升级虚拟环境 pip..."
 python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"

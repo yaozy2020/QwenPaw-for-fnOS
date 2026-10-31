@@ -172,6 +172,15 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        open(sys.argv[2], "a").write(self.path + " " + self.rfile.read(n).decode(errors="replace") + "\n")
+        body = b'{"ok": true, "success": true, "message": "install accepted"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
     def log_message(self, *a):
         pass
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
@@ -277,6 +286,39 @@ if [ "$(json_field "$t5" "d.get('success')")" = "False" ] \
     echo "  [  OK ] version_list 上游失败如实降级"
 else
     echo "  [FAIL] 上游失败被伪装成成功: ${t5:0:160}"
+    fail=1
+fi
+
+# T6 set_mirror:合法 URL 落盘;注入载荷(%3B → ';')被字符白名单拒绝 ——
+# mirror 会进监督者的 bash -c pip 串,这里必须挡死
+t6="$(bridge_run "action=set_mirror&mirror=https://pypi.tuna.tsinghua.edu.cn/simple" "http://127.0.0.1:1")"
+t6bad="$(bridge_run "action=set_mirror&mirror=https%3A%2F%2Fx.test%2F%3Brm" "http://127.0.0.1:1")"
+if [ "$(json_field "$t6" "d.get('success')")" = "True" ] \
+    && [ "$(cat "$FAKE_TOKEN_DIR/pip-mirror")" = "https://pypi.tuna.tsinghua.edu.cn/simple" ] \
+    && [ "$(json_field "$t6bad" "d.get('success')")" = "False" ]; then
+    echo "  [  OK ] set_mirror 落盘 + 注入载荷拒绝"
+else
+    echo "  [FAIL] set_mirror 异常: ok=${t6:0:100} bad=${t6bad:0:100}"
+    fail=1
+fi
+
+# T7 upgrade 未带 mirror → 桥必须把已存下载源注入请求体
+t7="$(bridge_run "action=upgrade&version=2.3.0b2" "http://127.0.0.1:${FAKE_PORT}")"
+if [ "$(json_field "$t7" "d.get('success')")" = "True" ] \
+    && grep -qF '/kernel/install {"version": "2.3.0b2", "mirror": "https://pypi.tuna.tsinghua.edu.cn/simple"}' "$WORK/reqlog"; then
+    echo "  [  OK ] upgrade 请求体携带已存下载源"
+else
+    echo "  [FAIL] upgrade 未携带下载源: ${t7:0:120}"
+    fail=1
+fi
+
+# T8 upgrade 显式 mirror=(空,控制台选官方)→ 覆盖已存文件值
+t8="$(bridge_run "action=upgrade&version=2.2.2.post1&mirror=" "http://127.0.0.1:${FAKE_PORT}")"
+if [ "$(json_field "$t8" "d.get('success')")" = "True" ] \
+    && grep -qF '/kernel/install {"version": "2.2.2.post1", "mirror": ""}' "$WORK/reqlog"; then
+    echo "  [  OK ] upgrade 显式 mirror= 覆盖文件值"
+else
+    echo "  [FAIL] 显式 mirror= 未生效: ${t8:0:120}"
     fail=1
 fi
 
