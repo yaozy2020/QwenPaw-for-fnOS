@@ -43,7 +43,8 @@
 | D5 | **外壳升级语义** | fnOS 停应用 → 全栈下线 → 装新外壳 → 监督者启动 → **自动拉起已安装内核**(D1 收养或冷启动) |
 | D6 | **回环鉴权用共享 token,不用 SO_PEERCRED** | TCP 回环无对端凭证;token 落 `<VAR_DIR>/supervisor-token`(0600,qwenpaw 属主),cgi 与监督者同读;同机其他用户不可读 |
 | D7 | **SSE 与轮询双轨** | 控制台优先 SSE;网关若缓冲 SSE 则自动回退轮询(现有轮询逻辑保留为兜底) |
-| D8 | **首次安装不预装内核(继承 v1.0.7)** | 监督者启动时内核缺失 → 状态 not_installed,控制台引导安装(已实现的行为平移) |
+| D8 | **首次安装不预装内核(继承 v1.0.7)** | 监督者启动时内核缺失 → 状态 not_installed,控制台引导安装(已实现的行为平移)。注意:不预装的是**内核**,监督者自身依赖必须首装即就位(否则控制台都起不来) |
+| D9 | **监督者依赖:wheel 随 fpk 分发,venv 放 TRIM_PKGVAR** | venv 三大风险与对策:①位置——@apphome/@appcenter 会随升级被清(内核 venv 三次实证),监督者 venv 放 `<VAR_DIR>/supervisor-venv`(@appdata,已实证穿越升级);②网络依赖——D 路径教训,安装期不得拉网:构建时 `pip download` 固定版本到 fpk 内 `supervisor-wheels/`,安装时 `--no-index --find-links` 离线秒装,依赖版本随外壳钉死(双轨制延伸);③python312 漂移——install_callback 检测 venv 完整性,缺损时从随包 wheels 离线重建(秒级)。fpk 体积 150K → ~5MB |
 
 ## 4. 监督者 API(草案)
 
@@ -82,4 +83,4 @@
 
 - **v2.0.0-alpha**:监督者骨架(status/start/stop/install+SSE/收养)+ cgi 瘦桥 + 控制台接新 API;manifest main 指向监督者
 - **v2.1**:等待/引导页打磨、psutil 概览、日志轮转
-- 技术栈:FastAPI + uvicorn + sse-starlette + psutil(supervisor venv,首装时从 PyPI 镜像安装,约 5MB);内核 venv 与监督者 venv 分离,互不影响
+- 技术栈:FastAPI + uvicorn + sse-starlette + psutil,**依赖 wheels 随 fpk 分发、离线安装**(见 D9);监督者 venv 与内核 venv 分离,互不影响
