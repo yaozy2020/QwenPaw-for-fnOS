@@ -7,6 +7,8 @@
     "build": "node build.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.24.2"
+    "esbuild": "^0.24.2",
+    "esbuild-svelte": "^0.8.2",
+    "svelte": "^4.2.20"
   }
 }

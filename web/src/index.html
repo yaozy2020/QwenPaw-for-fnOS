@@ -85,25 +85,28 @@
         </div>
       </div>
       <div class="card-body">
-        <div class="info-row">
-          <span class="info-label">服务状态</span>
-          <span class="info-val" id="valStatus">运行中 (Active)</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">进程 PID</span>
-          <span class="info-val" id="valPid">-</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">运行时长</span>
-          <span class="info-val" id="valUptime">-</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">CPU 占用</span>
-          <span class="info-val" id="valCpu">-</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">内存占用</span>
-          <span class="info-val" id="valMem">-</span>
+        <!-- StatusCard(Svelte 打样):挂载失败时保留静态行兜底,行为与旧版一致 -->
+        <div id="statusCardMount">
+          <div class="info-row">
+            <span class="info-label">服务状态</span>
+            <span class="info-val" id="valStatus">运行中 (Active)</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">进程 PID</span>
+            <span class="info-val" id="valPid">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">运行时长</span>
+            <span class="info-val" id="valUptime">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">CPU 占用</span>
+            <span class="info-val" id="valCpu">-</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">内存占用</span>
+            <span class="info-val" id="valMem">-</span>
+          </div>
         </div>
         <div class="info-row">
           <span class="info-label">服务端口</span>

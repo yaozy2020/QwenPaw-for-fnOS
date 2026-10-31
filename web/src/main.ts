@@ -1,3 +1,6 @@
+import { status } from "./statusStore";
+import StatusCard from "./StatusCard.svelte";
+
 const API_BASE = (function() {
       const path = window.location.pathname;
       if (path.includes("index.cgi")) {
@@ -174,18 +177,19 @@ const API_BASE = (function() {
         const data = await res.json();
         
         const badge = document.getElementById("statusBadge");
-        const valStatus = document.getElementById("valStatus");
-        const valPid = document.getElementById("valPid");
-        const valUptime = document.getElementById("valUptime");
         const valVersion = document.getElementById("valVersion");
         const valAuth = document.getElementById("valAuthStatus");
-        const valCpu = document.getElementById("valCpu");
-        const valMem = document.getElementById("valMem");
 
         const notInstalled = data.installed === false;
-        // CPU/内存默认 "-",运行中再覆写(口径:监督者 300ms 采样,占总 CPU 百分比)
-        if (valCpu) valCpu.innerText = "-";
-        if (valMem) valMem.innerText = "-";
+        // 快照入 store:服务状态/PID/运行时长/CPU/内存 由 StatusCard 组件声明式渲染
+        status.set({
+          installed: data.installed,
+          running: Boolean(data.running),
+          pid: String(data.pid ?? "-"),
+          startAt: data.running && data.startAt ? data.startAt : null,
+          cpu: typeof data.cpu === "number" ? data.cpu : null,
+          memKB: typeof data.memKB === "number" ? data.memKB : null,
+        });
 
         if (notInstalled) {
           // 内核未安装（首次安装模式）：提示去版本管理安装
@@ -193,12 +197,6 @@ const API_BASE = (function() {
             badge.className = "badge badge-warning";
             badge.innerHTML = `<span class="pulse-dot"></span> 内核未安装`;
           }
-          if (valStatus) {
-            valStatus.innerText = "内核未安装";
-            valStatus.style.color = "var(--text-sub)";
-          }
-          if (valPid) valPid.innerText = "-";
-          if (valUptime) valUptime.innerText = "-";
           if (valVersion) valVersion.innerText = "未安装";
           currentRunningVersion = "";
           const tip = document.getElementById("kernelInstallTip");
@@ -213,33 +211,11 @@ const API_BASE = (function() {
             badge.className = "badge badge-success";
             badge.innerHTML = `<span class="pulse-dot"></span> 运行中`;
           }
-          if (valStatus) {
-            valStatus.innerText = "运行中 (Active)";
-            valStatus.style.color = "var(--success)";
-          }
-          if (valPid) valPid.innerText = data.pid || "-";
-          
-          if (valUptime) {
-            if (data.startAt) {
-              const nowSec = Math.floor(Date.now() / 1000);
-              valUptime.innerText = formatUptime(nowSec - data.startAt);
-            } else {
-              valUptime.innerText = "已就绪";
-            }
-          }
-          if (valCpu) valCpu.innerText = typeof data.cpu === "number" ? data.cpu.toFixed(1) + "%" : "-";
-          if (valMem) valMem.innerText = formatMem(data.memKB);
         } else if (!notInstalled) {
           if (badge) {
             badge.className = "badge badge-danger";
             badge.innerHTML = `<span class="pulse-dot"></span> 已停止`;
           }
-          if (valStatus) {
-            valStatus.innerText = "已停止 (Stopped)";
-            valStatus.style.color = "var(--danger)";
-          }
-          if (valPid) valPid.innerText = "-";
-          if (valUptime) valUptime.innerText = "-";
         }
 
         if (valVersion && data.version) { valVersion.innerText = data.version; currentRunningVersion = data.version; updateUpgradeButtonText(); }
@@ -764,6 +740,16 @@ const API_BASE = (function() {
 
     function escapeHtml(str) {
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // Svelte 打样:服务状态卡(挂载失败降级到挂载点内的静态行,不拖垮整个脚本)
+    const statusMount = document.getElementById("statusCardMount");
+    if (statusMount) {
+      try {
+        new StatusCard({ target: statusMount }); // Svelte 4:实例化即挂载
+      } catch (e) {
+        console.error("StatusCard mount err:", e);
+      }
     }
 
     // 初始执行全套自愈
