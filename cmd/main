@@ -26,7 +26,7 @@ if [ -r "${PORT_FILE}" ]; then
 fi
 PORT="${PORT:-${TRIM_SERVICE_PORT:-18088}}"
 
-CMD="source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port ${PORT}"
+CMD="source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port ${PORT}"
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}

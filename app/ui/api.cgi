@@ -172,7 +172,7 @@ start_service() {
         fi
     fi
 
-    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
     nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
@@ -262,7 +262,7 @@ restart_service() {
         rm -f "${PID_FILE}"
     fi
 
-    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
     nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 

@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.0.8
+version                    = 1.0.9
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS —— 将个人 AI 助理 QwenPaw 一键部署到飞牛 NAS 的轻量外壳包。</p><h3>外壳特性</h3><p>极简运维控制台（服务启停、日志、内核版本管理、端口修改），内核经 PyPI 镜像在线安装，外壳与内核版本双轨制（外壳升级不影响内核），控制台资源预压缩传输。</p><h3>QwenPaw 内核</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作，定时任务，能力由 Skills 决定且可无限扩展；支持 Ollama 本地大模型完全离线运行，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = all
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "脚本路径全面接入 TRIM_* 变量(带回退,对齐官方规范); 安装与升级失败信息接入 TRIM_TEMP_LOGFILE 用户可见通道; 内核未安装时启动/改端口给出明确提示"
+changelog                  = "修复进程管理顽疾: pid 文件记录的是 bash 包装进程而非 python, 停止/重启无法真正结束内核(孤儿进程占端口); 启动改为 exec 形式, pid 即内核进程, 停止/重启语义恢复正常"
