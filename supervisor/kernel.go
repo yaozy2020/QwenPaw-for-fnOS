@@ -89,7 +89,7 @@ func (m *KernelManager) Stop() {
 func (m *KernelManager) stopLocked() {
 	target := m.tracked
 	if target == 0 || !processAlive(target) {
-		target = m.rediscoverLocked(0)
+		target, _ = m.rediscoverLocked(0)
 	}
 	if target <= 0 {
 		m.reapCmd()
@@ -130,8 +130,20 @@ func (m *KernelManager) Running() (int, bool) {
 	if m.tracked != 0 && processAlive(m.tracked) {
 		return m.tracked, true
 	}
-	pid := m.rediscoverLocked(m.tracked)
+	pid, count := m.rediscoverLocked(m.tracked)
 	if pid > 0 {
+		// 多实例清扫:同端口的多余内核(历史孤儿)全部终结,只保留最新的
+		if count > 1 {
+			for _, e := range m.matches(m.tracked) {
+				if e != pid {
+					pgid := groupOf(e)
+					if pgid == e {
+						_ = syscall.Kill(-e, syscall.SIGKILL)
+					}
+					_ = syscall.Kill(e, syscall.SIGKILL)
+				}
+			}
+		}
 		m.livePid = pid
 		m.startedAt = processStartWall(pid) // 收养路径:反推真实启动时刻,防 uptime 溢出
 		m.writePidFile()
@@ -142,9 +154,11 @@ func (m *KernelManager) Running() (int, bool) {
 	return 0, false
 }
 
-// rediscoverLocked 扫 /proc:cmdline 匹配 python3/-m/qwenpaw/app/--port N,取最大 pid。
-func (m *KernelManager) rediscoverLocked(exclude int) int {
-	best := 0
+// rediscoverLocked 扫 /proc:cmdline 匹配 python3/-m/qwenpaw/app/--port N。
+// 返回 (最大 pid, 全部匹配数)——匹配数 >1 说明存在多实例(历史孤儿),
+// 调用方应清扫多余实例,只保留最大 pid(最新)。
+func (m *KernelManager) rediscoverLocked(exclude int) (int, int) {
+	best, count := 0, 0
 	entries, _ := os.ReadDir("/proc")
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
@@ -159,11 +173,33 @@ func (m *KernelManager) rediscoverLocked(exclude int) int {
 		if !isKernelArgv(argv, m.port) {
 			continue
 		}
+		count++
 		if pid > best {
 			best = pid
 		}
 	}
-	return best
+	return best, count
+}
+
+// matches 列出全部匹配内核特征的 pid(多实例检测用)。
+func (m *KernelManager) matches(exclude int) []int {
+	var out []int
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == exclude || pid == os.Getpid() {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if isKernelArgv(argv, m.port) {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 // isKernelArgv 特征匹配:basename 含 python3 且 argv 含 -m/qwenpaw/app/--port N。
