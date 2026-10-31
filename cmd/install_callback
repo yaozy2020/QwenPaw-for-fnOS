@@ -121,12 +121,19 @@ log_msg "正在升级虚拟环境 pip..."
 python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"
 
-log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎..."
-PIP_LOG=$(mktemp)
+# 内核版本来源：版本钉优先（用户在控制台选过的版本），无钉才按向导渠道
+# 这样即使运行环境被系统升级清掉，也会精确恢复用户选择的版本而非追踪最新
+VERSION_PIN="$(tr -d '[:space:]' < "${TRIM_PKGVAR}/qwenpaw-version" 2>/dev/null || true)"
 TARGET_PKG="qwenpaw"
-if [ "${wizard_channel:-stable}" = "beta" ]; then
+if [ -n "${VERSION_PIN}" ]; then
+    TARGET_PKG="qwenpaw==${VERSION_PIN}"
+    log_msg "检测到内核版本钉，按其精确恢复: ${TARGET_PKG}"
+elif [ "${wizard_channel:-stable}" = "beta" ]; then
     TARGET_PKG="--pre qwenpaw"
 fi
+
+log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎..."
+PIP_LOG=$(mktemp)
 
 log_msg "安装目标包: ${TARGET_PKG}，使用选项: ${PIP_OPTS}"
 if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
