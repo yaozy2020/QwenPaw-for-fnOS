@@ -2,7 +2,7 @@
 # 瘦桥:旧 action API → 监督者 HTTP(127.0.0.1:19090)。
 # 职责仅剩:token 读取 + 路径映射 + 旧响应形状兼容;全部业务逻辑在监督者。
 
-SUP="http://127.0.0.1:19090"
+SUP="${QWENPAW_SUP_URL:-http://127.0.0.1:19090}"  # 可注入假地址供 lint 测兜底路径
 VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
 TOKEN_FILE="${VAR_DIR}/supervisor-token"
 
@@ -97,6 +97,32 @@ except Exception:
     exit 0
 fi
 
+# version_list:监督者吐 PyPI 原始形状 {releases,latest_stable};
+# 控制台吃旧形状 {success,versions:[{version,is_beta}],latest_stable} —— 桥接转换
+if [ "$action" = "version_list" ]; then
+    echo "Content-Type: application/json"
+    echo ""
+    printf '%s' "$resp" | python3 -c '
+import json, re, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(json.dumps({"success": False, "versions": [], "latest_stable": ""}))
+    raise SystemExit
+vers = [{"version": v, "is_beta": bool(re.search(r"(?:a|b|rc)[0-9]", v))}
+        for v in d.get("releases", [])]
+print(json.dumps({"success": True, "versions": vers, "latest_stable": d.get("latest_stable", "")}))
+'
+    exit 0
+fi
+
+# 非 JSON 防御:监督者未响应或返回纯文本(如 invalid token)时,一律输出兜底对象。
+# 纪律:绝不透传非 JSON —— 否则控制台 res.json() 抛异常,所有动态渲染静默失效,
+# 页面停在 HTML 静态默认值(运行中 + PID "-"),看似活着实则全断(r7 闭环教训)。
+case "$resp" in
+    \{*) : ;;
+    *) resp='{"success":false,"message":"监督者未响应,请稍后重试"}' ;;
+esac
 echo "Content-Type: application/json"
 echo ""
-echo "${resp:-{\"success\":false,\"message\":\"监督者未响应,请稍后重试\"}}"
+echo "$resp"

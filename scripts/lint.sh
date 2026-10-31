@@ -1,11 +1,14 @@
 #!/bin/bash
-# lint.sh — 语法与静态检查门禁（三层）
-#   [1/3] bash -n 全量
-#   [2/3] shellcheck（error 级为门禁，warning 仅报告；本地无二进制时自动下载 pinned 版本）
-#   [3/3] 内嵌 spawn 脚本展开验证 —— api.cgi 中以 nohup bash -c "..." / local cmd="..."
+# lint.sh — 语法与静态检查门禁（四层）
+#   [1/4] bash -n 全量
+#   [2/4] shellcheck（error 级为门禁，warning 仅报告；本地无二进制时自动下载 pinned 版本）
+#   [3/4] 内嵌 spawn 脚本展开验证 —— api.cgi 中以 nohup bash -c "..." / local cmd="..."
 #         形式内嵌的启动脚本是"运行时展开"代码，bash -n 与 shellcheck 都查不出其中的
 #         变量误展开（历史事故：awk $2 被 nohup 外层展开成空），必须按真实展开语义
 #         生成内层脚本后单独验证，并断言每条启动路径都携带内核启动必需的环境变量。
+#   [4/4] api.cgi 桥接输出 JSON 有效性 —— 控制台所有动态渲染依赖 res.json() 成功；
+#         桥接只要吐出一段非 JSON（历史事故：echo "${resp:-{...}}" 默认词里的 }
+#         提前终止参数展开，输出 "{...}}"），前端就全体静默失效停在静态默认值。
 # 用法: bash scripts/lint.sh
 # 注意: 不用 set -e（工程铁律），失败显式 exit 1
 
@@ -16,7 +19,7 @@ fail=0
 echo "========== lint: 语法与静态检查 =========="
 
 # ── [1/3] bash -n 全量 ──
-echo "[1/3] bash -n ..."
+echo "[1/4] bash -n ..."
 for f in "$ROOT"/cmd/* "$ROOT"/app/ui/*.cgi "$ROOT"/build.sh "$ROOT"/scripts/*.sh; do
     [ -f "$f" ] || continue
     if bash -n "$f" 2>/dev/null; then
@@ -29,7 +32,7 @@ for f in "$ROOT"/cmd/* "$ROOT"/app/ui/*.cgi "$ROOT"/build.sh "$ROOT"/scripts/*.s
 done
 
 # ── [2/3] shellcheck（error 级门禁；warning 仅报告不拦截） ──
-echo "[2/3] shellcheck v${SHELLCHECK_VER} ..."
+echo "[2/4] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"
 [ -z "$SC_BIN" ] && [ -x /tmp/shellcheck ] && SC_BIN=/tmp/shellcheck
 if [ -z "$SC_BIN" ]; then
@@ -55,7 +58,7 @@ else
 fi
 
 # ── [3/3] 内嵌 spawn 脚本展开验证 ──
-echo "[3/3] 内嵌 spawn 脚本展开验证 ..."
+echo "[3/4] 内嵌 spawn 脚本展开验证 ..."
 API_CGI="$ROOT/app/ui/api.cgi"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -140,6 +143,78 @@ while read -r vname; do
         echo "  [  OK ] $label（展开后 $(printf '%s' "$script" | wc -c) 字符）"
     fi
 done < "$WORK/names.txt"
+
+# ── [4/4] api.cgi 桥接输出 JSON 有效性 ──
+echo "[4/4] api.cgi 桥接 JSON 有效性 ..."
+BR="$ROOT/app/ui/api.cgi"
+FAKE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+FAKE_TOKEN_DIR="$(mktemp -d)"
+echo "lint-fake-token-lint-fake-token-lint-fake-token" > "$FAKE_TOKEN_DIR/supervisor-token"
+
+# 一次性假监督者:/kernel/versions 回 PyPI 原始形状;/status 回纯文本(模拟上游非 JSON)
+python3 - "$FAKE_PORT" <<'PY' &
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/kernel/versions"):
+            body = json.dumps({"releases": ["2.3.0b2", "2.2.2.post1"],
+                               "latest_stable": "2.2.2.post1"}).encode()
+        else:
+            body = b"invalid token"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+FAKE_PID=$!
+trap 'kill $FAKE_PID 2>/dev/null; rm -rf "$FAKE_TOKEN_DIR"' EXIT
+sleep 0.5
+
+json_field() {  # $1=payload $2=python表达式 → 输出求值结果
+    printf '%s' "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)" 2>/dev/null
+}
+
+bridge_run() {  # $1=QUERY_STRING $2=SUP_URL → 输出尾行(JSON 体)
+    local out
+    out="$(QWENPAW_SUP_URL="$2" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
+        QUERY_STRING="$1" REQUEST_METHOD=GET "$BR")"
+    printf '%s\n' "$out" | tail -n 1
+}
+
+# T1 非 JSON 防御:上游回纯文本,桥必须替换为兜底对象而非透传
+t1="$(bridge_run "action=status" "http://127.0.0.1:${FAKE_PORT}")"
+if [ "$(json_field "$t1" "d.get('success')")" = "False" ] \
+    && [ "$(json_field "$t1" "'监督者' in d.get('message','')")" = "True" ]; then
+    echo "  [  OK ] 非 JSON 上游 → 兜底对象(不透传)"
+else
+    echo "  [FAIL] 非 JSON 上游被透传或兜底形状错误: ${t1:0:120}"
+    fail=1
+fi
+
+# T2 version_list 形状转换:PyPI {releases} → 旧形状 {versions:[{version,is_beta}]}
+t2="$(bridge_run "action=version_list" "http://127.0.0.1:${FAKE_PORT}")"
+if [ "$(json_field "$t2" "d.get('success')")" = "True" ] \
+    && [ "$(json_field "$t2" "d['versions'][0]['is_beta']")" = "True" ] \
+    && [ "$(json_field "$t2" "d['versions'][1]['is_beta']")" = "False" ] \
+    && [ "$(json_field "$t2" "d.get('latest_stable')")" = "2.2.2.post1" ]; then
+    echo "  [  OK ] version_list 形状转换 + is_beta 判定"
+else
+    echo "  [FAIL] version_list 转换错误: ${t2:0:120}"
+    fail=1
+fi
+
+# T3 监督者不可达:兜底对象必须是合法 JSON
+t3="$(bridge_run "action=status" "http://127.0.0.1:1")"
+if [ "$(json_field "$t3" "d.get('success')")" = "False" ]; then
+    echo "  [  OK ] 监督者不可达 → 合法兜底 JSON"
+else
+    echo "  [FAIL] 不可达兜底非法: ${t3:0:120}"
+    fail=1
+fi
 
 echo "========================================="
 if [ $fail -eq 0 ]; then
