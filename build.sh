@@ -75,9 +75,9 @@ fi
 echo "[3/4] fnpack 极速构建 ..."
 cd "$STAGE" || exit 1
 
-# fnpack 可执行文件探测：本机在 /usr/local/bin，fnpackup 镜像内位置不定，
-# 按常见路径 + 全盘浅层查找兜底（找不到时显式报错，不再吞输出）
-FNPACK_BIN="$(command -v fnpack 2>/dev/null || true)"
+# fnpack 可执行文件探测：环境变量显式指定优先（CI 用仓库内 vendor 的静态二进制），
+# 其次本机约定路径 / command -v，最后常见路径浅层查找（找不到时显式报错）
+FNPACK_BIN="${FNPACK_BIN:-$(command -v fnpack 2>/dev/null || true)}"
 if [ -z "$FNPACK_BIN" ]; then
   FNPACK_BIN="$(find /usr/local/bin /usr/bin /opt /app / -maxdepth 2 -type f \( -name 'fnpack' -o -name 'fnpackup' \) -perm -u+x 2>/dev/null | head -1)"
 fi

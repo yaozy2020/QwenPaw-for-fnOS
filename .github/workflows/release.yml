@@ -49,32 +49,16 @@ jobs:
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
 
-      # 零构建架构：控制台(index.html)与工程层直接进包，build.sh 只做
-      # 预压缩(.gz/.br，容器内自带 node)与 fnpack 封装
-      - name: Build fpk via fnpackup Docker
+      # 零构建架构：控制台(index.html)与工程层直接进包；fnpack 为仓库内 vendor 的
+      # 静态 ELF（x86-64，任意 Linux 可跑），不再依赖容器
+      - name: Build fpk (vendored static fnpack)
         env:
-          FNPAYLOAD: ${{ github.workspace }}/fnpayload
+          FPK_OUT: ${{ github.workspace }}
+          FNPACK_BIN: ${{ github.workspace }}/tools/fnpack
         run: |
-          mkdir -p "$FNPAYLOAD"
-          tar -cf - \
-            --exclude='./fnpayload' --exclude='./.git' \
-            --exclude='./ui-fndesign' \
-            --exclude='*.fpk' --exclude='*.fpk.sha256' \
-            . | tar -xf - -C "$FNPAYLOAD"
-          docker run --rm \
-            --entrypoint /bin/bash \
-            -e SKIP_GATES=1 \
-            -e FPK_OUT=/app \
-            -v "$FNPAYLOAD:/app" \
-            snltty/fnpackup:v1.1.4 \
-            -c "cd /app && bash build.sh"
-          fpk=$(ls "$FNPAYLOAD"/qwenpaw_v*.fpk | head -n1)
-          if [ -z "$fpk" ]; then
-            echo "::error::fpk build failed"
-            exit 1
-          fi
-          cp "$fpk" "${{ github.workspace }}/"
-          cp "${fpk}.sha256" "${{ github.workspace }}/" 2>/dev/null || true
+          chmod +x tools/fnpack
+          bash build.sh
+          ls -lh qwenpaw_v*.fpk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
