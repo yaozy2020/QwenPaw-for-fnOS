@@ -26,7 +26,7 @@ if [ -r "${PORT_FILE}" ]; then
 fi
 PORT="${PORT:-${TRIM_SERVICE_PORT:-18088}}"
 
-CMD="source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port ${PORT}"
+CMD="source ${VENV_DIR}/bin/activate && exec setsid python3 -m qwenpaw app --host 0.0.0.0 --port ${PORT}"
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
@@ -53,35 +53,58 @@ start_process() {
 stop_process() {
     log_msg "Stopping QwenPaw ..."
 
-    if [ -r "${PID_FILE}" ]; then
-        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-        
-        log_msg "pid=${pid}"
-        if ! check_process "${pid}"; then
-            rm -f "${PID_FILE}"
-            log_msg "remove pid file"
-            return
-        fi
-
-        log_msg "send TERM signal to PID:${pid}..."
-        kill -TERM ${pid} >> ${LOG_FILE} 2>&1
-
-        local count=0
-        while check_process "${pid}" && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-            log_msg "waiting process terminal... (${count}s/10s)"
-        done
-
-        if check_process "${pid}"; then
-            log_msg "send KILL signal to PID:${pid}..."
-            kill -KILL "${pid}"
-            sleep 1
-            rm -f "${PID_FILE}"
-        else
-            log_msg "process killed"
-        fi
+    if [ ! -r "${PID_FILE}" ]; then
+        return 0
     fi
+
+    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+    if [ -z "${pid}" ]; then
+        rm -f "${PID_FILE}"
+        return 0
+    fi
+
+    log_msg "pid=${pid}"
+    if ! check_process "${pid}"; then
+        rm -f "${PID_FILE}"
+        log_msg "remove pid file"
+        return 0
+    fi
+
+    # 保底机制:setsid 启动的内核是自身进程组长,组信号可连带浏览器/MCP 等
+    # 子进程;pgid != pid(旧版或 setsid 缺失启动)时禁用整组杀,防止误伤同组平台进程
+    local pgid=""
+    pgid=$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')
+    local group_kill=0
+    if [ -n "${pgid}" ] && [ "${pgid}" = "${pid}" ]; then
+        group_kill=1
+    fi
+
+    log_msg "send TERM signal to PID:${pid}...${group_kill} (含进程组)"
+    if [ ${group_kill} -eq 1 ]; then
+        kill -TERM -- -"${pid}" >> ${LOG_FILE} 2>&1 || true
+    else
+        kill -TERM ${pid} >> ${LOG_FILE} 2>&1 || true
+    fi
+
+    local count=0
+    while check_process "${pid}" && [ $count -lt 10 ]; do
+        sleep 1
+        count=$((count + 1))
+        log_msg "waiting process terminal... (${count}s/10s)"
+    done
+
+    if check_process "${pid}"; then
+        log_msg "send KILL signal to PID:${pid}..."
+        kill -KILL "${pid}" >> ${LOG_FILE} 2>&1 || true
+    else
+        log_msg "process killed"
+    fi
+    # 兜底清扫:无视 TERM 的子进程(chromium/MCP)由组 KILL 清除;
+    # 已退出的成员为空操作(ESRCH 忽略),对已死进程无害
+    if [ ${group_kill} -eq 1 ]; then
+        kill -KILL -- -"${pid}" >> ${LOG_FILE} 2>&1 || true
+    fi
+    rm -f "${PID_FILE}"
 
     return 0
 }

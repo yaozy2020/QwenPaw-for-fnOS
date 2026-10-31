@@ -172,7 +172,7 @@ start_service() {
         fi
     fi
 
-    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec setsid python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
     nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
@@ -199,6 +199,12 @@ stop_service() {
     if [ -f "${PID_FILE}" ]; then
         local pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
         if check_process "${pid}"; then
+            # 保底机制:setsid 启动的内核为自身进程组长,组信号连带浏览器/MCP
+            # 等子进程;pgid != pid 时禁用整组杀,防止误伤同组平台进程
+            local pgid=$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "${pgid}" ] && [ "${pgid}" = "${pid}" ]; then
+                kill -TERM -- -"${pid}" 2>/dev/null || true
+            fi
             kill -TERM "${pid}"
 
             local count=0
@@ -210,6 +216,10 @@ stop_service() {
             if check_process "${pid}"; then
                 kill -KILL "${pid}"
                 sleep 1
+            fi
+            # 兜底清扫:无视 TERM 的子进程由组 KILL 清除
+            if [ -n "${pgid}" ] && [ "${pgid}" = "${pid}" ]; then
+                kill -KILL -- -"${pid}" 2>/dev/null || true
             fi
 
             rm -f "${PID_FILE}"
@@ -248,6 +258,10 @@ restart_service() {
     if [ -f "${PID_FILE}" ]; then
         local pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
         if check_process "${pid}"; then
+            local rpgid=$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "${rpgid}" ] && [ "${rpgid}" = "${pid}" ]; then
+                kill -TERM -- -"${pid}" 2>/dev/null || true
+            fi
             kill -TERM "${pid}"
             local count=0
             while check_process "${pid}" && [ $count -lt 10 ]; do
@@ -262,7 +276,7 @@ restart_service() {
         rm -f "${PID_FILE}"
     fi
 
-    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec setsid python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
     nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
@@ -342,7 +356,7 @@ change_port() {
         export QWENPAW_AUTH_ENABLED=true
         export PATH=/var/apps/nodejs_v24/target/bin:\$PATH
         source ${VENV_DIR}/bin/activate
-        python3 -m qwenpaw app --host 0.0.0.0 --port ${new_port} >> ${LOG_FILE} 2>&1 &
+        setsid python3 -m qwenpaw app --host 0.0.0.0 --port ${new_port} >> ${LOG_FILE} 2>&1 &
         echo \$! > ${PID_FILE}
     " >/dev/null 2>&1 &
 
@@ -480,7 +494,7 @@ upgrade_service() {
             export QWENPAW_AUTH_ENABLED=true
             export PATH=/var/apps/nodejs_v24/target/bin:\$PATH
             source ${VENV_DIR}/bin/activate
-            python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port) >> ${LOG_FILE} 2>&1 &
+            setsid python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port) >> ${LOG_FILE} 2>&1 &
             echo \$! > ${PID_FILE}
             echo 'QwenPaw 已重启' >> ${UPGRADE_LOG_FILE}
         else
