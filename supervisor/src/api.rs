@@ -41,6 +41,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/logs", get(logs))
         .route("/logs/clear", post(logs_clear))
         .route("/kernel/install", post(kernel_install))
+        .route("/kernel/install-status", get(install_status))
+        .route("/kernel/install-log", get(install_log))
         .route("/kernel/versions", get(kernel_versions))
         .route("/kernel/pin", post(kernel_pin))
         .route("/kernel/reset-auth", post(kernel_reset_auth))
@@ -260,6 +262,12 @@ async fn kernel_install(
             _ => String::new(),
         }
     };
+    // 忙检查必须在停内核之前:重入时只拒绝,绝不停掉正在陪跑 pip 的内核
+    // (-7 回归:stop 级联修真后,忙路径曾先杀内核再被 try_start 拒绝)
+    if state.install.snapshot().running {
+        return Json(json!({"ok": true, "success": false, "message": "安装正在进行中,请等待完成后再试"}))
+            .into_response();
+    }
     // 安装期间先停内核(pip 换包需停服);装完由安装协程自动拉起(on_success)
     state.kernel.stop().await;
     let started = state.install.try_start(
@@ -301,6 +309,55 @@ print(json.dumps({'releases': releases, 'latest_stable': data['info']['version']
         }
         _ => err_json(StatusCode::BAD_GATEWAY, "查询 PyPI 失败"),
     }
+}
+
+/// 安装快照(桥的 upgrade_status 透传,替代每 800ms 一次的 python3 解析)
+async fn install_status(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let s = state.install.snapshot();
+    Json(json!({
+        "success": true,
+        "upgrading": s.running,
+        "phase": match s.phase { crate::install::Phase::Idle => "idle", crate::install::Phase::Downloading => "downloading", crate::install::Phase::Installing => "installing", crate::install::Phase::Done => "done", crate::install::Phase::Failed => "failed" },
+        "fetched": s.fetched,
+        "message": s.message,
+        "error": s.error,
+    }))
+    .into_response()
+}
+
+/// pip 日志尾部(Rust 侧 JSON 转义,替代桥侧 python3;含引号/反斜杠安全)
+async fn install_log(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let tail = req
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find(|p| p.starts_with("tail=")).map(|p| p[5..].parse::<usize>().ok()))
+        .flatten()
+        .unwrap_or(40)
+        .clamp(1, 500);
+    let path = format!("{}/qwenpaw-upgrade.log.pip", state.var_dir);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let lines: Vec<String> = content
+        .lines()
+        .rev()
+        .take(tail)
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Json(json!({"success": true, "logs": lines})).into_response()
 }
 
 async fn kernel_pin(

@@ -1,8 +1,6 @@
-// 监督者 /status 快照的共享 store —— vanilla 世界与 Svelte 组件之间的契约:
-// main.ts 的轮询(fetchStatus)负责取数与旁路副作用(徽章/提示/版本联动),
-// 组件只按订阅声明式渲染。轮询节奏与隐藏页暂停语义留在 vanilla,行为不变。
-import { writable } from "svelte/store";
-
+// 状态快照类型与格式化工具(Preact 版:纯数据契约,无框架绑定)。
+// 渲染契约:vanilla 轮询(fetchStatus 等)每拍以最新数据调 render() 重渲染,
+// Preact 负责 diff —— 行为语义(节奏/隐藏页暂停/旁路副作用)全部留在 vanilla。
 export interface StatusData {
   installed: boolean | undefined; // undefined = 尚未取得首个快照
   running: boolean;
@@ -11,15 +9,6 @@ export interface StatusData {
   cpu: number | null; // 占总 CPU 百分比(监督者 300ms 采样)
   memKB: number | null; // RSS
 }
-
-export const status = writable<StatusData>({
-  installed: undefined,
-  running: false,
-  pid: "-",
-  startAt: null,
-  cpu: null,
-  memKB: null,
-});
 
 export function formatUptime(seconds: number | null): string {
   if (!seconds || seconds <= 0) return "-";

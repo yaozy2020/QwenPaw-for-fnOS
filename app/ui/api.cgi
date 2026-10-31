@@ -58,32 +58,14 @@ case "$action" in
         fi
         ;;
     upgrade_status)
-        # 旧形状:{success, upgrading} —— 从监督者快照的 install.running 转换
+        # 监督者轻端点直出旧形状,桥零转换(曾每轮询起一个 python3,卡顿源之一)
         method="GET"
-        path="/status"
+        path="/kernel/install-status"
         ;;
     upgrade_logs)
-        # pip 日志尾部(监督者落盘,与 api.rs /kernel/install 写入路径一致)。
-        # 必须经 json.dumps 转义:pip 报错信息含引号/反斜杠,裸拼必产出非法 JSON
-        # (审计 major —— r7 事故同族,曾只转义换行)
-        PIP_LOG="${VAR_DIR}/qwenpaw-upgrade.log.pip"
-        echo "Content-Type: application/json"
-        echo ""
-        if command -v python3 >/dev/null 2>&1; then
-            python3 - "$PIP_LOG" <<'PY'
-import json, sys
-logs = []
-try:
-    with open(sys.argv[1], errors="replace") as f:
-        logs = f.read().splitlines()[-40:]
-except OSError:
-    pass
-print(json.dumps({"success": True, "logs": logs}))
-PY
-        else
-            echo '{"success":false,"message":"环境缺少 python3,无法读取升级日志"}'
-        fi
-        exit 0
+        # 监督者轻端点直出(Rust 侧 JSON 转义),桥零转换零 python3
+        method="GET"
+        path="/kernel/install-log?tail=40"
         ;;
     version_list)
         path="/kernel/versions"
@@ -153,32 +135,6 @@ resp=$(curl -s --max-time 30 -X "$method" \
     -H "Content-Type: application/json" \
     ${body:+-d "$body"} \
     "${SUP}${path}")
-
-# upgrade_status:旧形状升级为 {success,upgrading,phase,error} —— 前端完成/失败
-# 判定以 phase(done/failed)为准,v1 靠日志文本找中文标记在 v2 永不出现(审计 major)
-if [ "$action" = "upgrade_status" ]; then
-    echo "Content-Type: application/json"
-    echo ""
-    if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "$resp" | python3 -c '
-import json, sys
-out = {"success": False, "upgrading": False, "phase": "idle", "error": ""}
-try:
-    d = json.load(sys.stdin)
-    i = d.get("install", {}) if isinstance(d, dict) else {}
-    out["success"] = bool(d.get("success", True)) if isinstance(d, dict) else False
-    out["upgrading"] = bool(i.get("running"))
-    out["phase"] = str(i.get("phase", "idle"))
-    out["error"] = str(i.get("error", ""))
-except Exception as e:
-    out["error"] = "监督者未响应: %s" % e
-print(json.dumps(out))
-'
-    else
-        echo '{"success":false,"upgrading":false,"phase":"idle","error":"环境缺少 python3"}'
-    fi
-    exit 0
-fi
 
 # version_list:监督者交回 PyPI 全量原始键名;语义排序(2.10.0>2.9.9,稳定>
 # 预发布)、is_beta 判定、最新稳定版推导都在这里做 —— 控制台取 versions[0]

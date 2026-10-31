@@ -162,7 +162,11 @@ import http.server, json, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         open(sys.argv[2], "a").write(self.path + "\n")
-        if self.path.startswith("/kernel/versions"):
+        if self.path.startswith("/kernel/install-log"):
+            # 含引号/反斜杠的 canned 响应:钉死"桥透传不破坏 JSON"完整性
+            body = json.dumps({"success": True,
+                               "logs": ['Downloading "qwenpaw" wheel', "path C:\\Users\\x"]}).encode()
+        elif self.path.startswith("/kernel/versions"):
             body = json.dumps({"releases": ["2.2.2.post1", "2.3.0b2", "2.9.9", "2.10.0b1", "2.10.0"],
                                "latest_stable": "2.2.2.post1"}).encode()
         else:
@@ -266,10 +270,9 @@ else
     fail=1
 fi
 
-# T4 upgrade_logs:pip 日志含引号/反斜杠时必须经 json.dumps 转义(审计 major ——
-# 旧实现裸拼,升级日志一出引号就产出非法 JSON,且该路径此前零覆盖)
-printf 'Downloading "qwenpaw" wheel\npath C:\\Users\\x\n' > "$FAKE_TOKEN_DIR/qwenpaw-upgrade.log.pip"
-t4="$(bridge_run "action=upgrade_logs" "http://127.0.0.1:1")"
+# T4 upgrade_logs 透传完整性:转义职责已下沉监督者(Rust),桥必须原样转发
+# 含引号/反斜杠的 JSON 而不破坏结构(该路径曾裸拼产出非法 JSON,审计 major)
+t4="$(bridge_run "action=upgrade_logs" "http://127.0.0.1:${FAKE_PORT}")"
 if [ "$(json_field "$t4" "d.get('success')")" = "True" ] \
     && [ "$(json_field "$t4" "len(d.get('logs', []))")" = "2" ] \
     && [ "$(json_field "$t4" "chr(34) + 'qwenpaw' + chr(34) in d['logs'][0]")" = "True" ]; then

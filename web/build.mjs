@@ -2,7 +2,6 @@
 // 运行时契约不变(index.cgi 服务 target/www/index.html + .gz/.br 预压缩),
 // 变化的只是"源码可编译":语法错误在此处即失败,不再静默上线(r7 教训)。
 import { build } from "esbuild";
-import esbuildSvelte from "esbuild-svelte";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 
 const buildId = process.env.BUILD_ID || "dev";
@@ -14,8 +13,9 @@ await build({
   outfile: "dist/main.js",
   minify: true,
   target: ["es2020"], // fnOS 桌面/Android WebView 均为 Chromium
+  jsx: "automatic",
+  jsxImportSource: "preact", // esbuild 原生 JSX,零插件零 babel
   charset: "utf8",
-  plugins: [esbuildSvelte({ compilerOptions: { dev: false } })],
   logLevel: "warning",
 });
 

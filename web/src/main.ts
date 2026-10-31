@@ -1,5 +1,4 @@
-import { status } from "./statusStore";
-import StatusCard from "./StatusCard.svelte";
+import { renderStatusCard, renderLogLines, renderMirrorOptions, renderVersionCards, renderHistoryItems } from "./components";
 
 const API_BASE = (function() {
       const path = window.location.pathname;
@@ -12,6 +11,7 @@ const API_BASE = (function() {
     let refreshTimer = null;
     let upgradePollTimer = null;
     let upgradeStartedAt = 0;
+    let upPollLastAt = 0;
     let upgradeSeenPhase = null;
 
     let rawVersionList = [];
@@ -148,26 +148,6 @@ const API_BASE = (function() {
       setTimeout(() => t.classList.remove("show"), 2500);
     }
 
-    function formatUptime(seconds) {
-      if (!seconds || seconds <= 0) return "-";
-      const days = Math.floor(seconds / 86400);
-      const hours = Math.floor((seconds % 86400) / 3600);
-      const minutes = Math.floor((seconds % 3600) / 60);
-      const secs = Math.floor(seconds % 60);
-      // 进程运行时长须显示到秒:刚重启的 59 秒内只显示"0分钟"会被误读为卡住
-      if (days > 0) return `${days}天 ${hours}小时 ${minutes}分`;
-      if (hours > 0) return `${hours}小时 ${minutes}分`;
-      if (minutes > 0) return `${minutes}分 ${secs}秒`;
-      return `${secs}秒`;
-    }
-
-    function formatMem(kb) {
-      if (!kb || kb <= 0) return "-";
-      if (kb >= 1024 * 1024) return (kb / 1024 / 1024).toFixed(2) + " GB";
-      if (kb >= 1024) return (kb / 1024).toFixed(1) + " MB";
-      return `${kb} KB`;
-    }
-
     // 服务状态监控 (全空值保护，稳健守护)
     async function fetchStatus() {
       if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
@@ -181,15 +161,18 @@ const API_BASE = (function() {
         const valAuth = document.getElementById("valAuthStatus");
 
         const notInstalled = data.installed === false;
-        // 快照入 store:服务状态/PID/运行时长/CPU/内存 由 StatusCard 组件声明式渲染
-        status.set({
-          installed: data.installed,
-          running: Boolean(data.running),
-          pid: String(data.pid ?? "-"),
-          startAt: data.running && data.startAt ? data.startAt : null,
-          cpu: typeof data.cpu === "number" ? data.cpu : null,
-          memKB: typeof data.memKB === "number" ? data.memKB : null,
-        });
+        // 每拍重渲染:服务状态/PID/运行时长/CPU/内存 由 StatusCardView 声明式渲染
+        const cardMount = document.getElementById("statusCardMount");
+        if (cardMount) {
+          renderStatusCard({
+            installed: data.installed,
+            running: Boolean(data.running),
+            pid: String(data.pid ?? "-"),
+            startAt: data.running && data.startAt ? data.startAt : null,
+            cpu: typeof data.cpu === "number" ? data.cpu : null,
+            memKB: typeof data.memKB === "number" ? data.memKB : null,
+          }, cardMount);
+        }
 
         if (notInstalled) {
           // 内核未安装（首次安装模式）：提示去版本管理安装
@@ -326,11 +309,7 @@ const API_BASE = (function() {
       if (label) label.innerText = (MIRRORS.find(m => m.value === mirrorValue) || MIRRORS[0]).label;
       const drop = document.getElementById("mirrorDropdown");
       if (drop) {
-        drop.innerHTML = MIRRORS.map(m => `
-          <div class="history-item" style="${m.value === mirrorValue ? "color:var(--primary);" : ""}" onclick="pickMirror('${m.value}')">
-            <span>${m.label}</span>
-            ${m.value === mirrorValue ? '<span style="color:var(--primary);">✓</span>' : ""}
-          </div>`).join("");
+        renderMirrorOptions(MIRRORS, mirrorValue, pickMirror, drop);
       }
     }
 
@@ -413,45 +392,11 @@ const API_BASE = (function() {
 
       let isHistorySelected = selectedVersion !== latestBetaVer && selectedVersion !== latestStableVer;
 
-      let cardsHtml = `
-        <div class="ver-card-item ${selectedVersion === latestBetaVer ? 'active' : ''}" onclick="pickVersion('${latestBetaVer}')">
-          <div class="ver-info-left">
-            <span class="ver-number">v${latestBetaVer}</span>
-            <span class="ver-tag-pill beta">最新测试 Beta</span>
-          </div>
-          <div class="custom-radio"></div>
-        </div>
-        <div class="ver-card-item ${selectedVersion === latestStableVer ? 'active' : ''}" onclick="pickVersion('${latestStableVer}')">
-          <div class="ver-info-left">
-            <span class="ver-number">v${latestStableVer}</span>
-            <span class="ver-tag-pill stable">推荐稳定 Stable</span>
-          </div>
-          <div class="custom-radio"></div>
-        </div>
-      `;
-
-      if (isHistorySelected) {
-        cardsHtml = `
-          <div class="ver-card-item active" onclick="pickVersion('${selectedVersion}')">
-            <div class="ver-info-left">
-              <span class="ver-number">v${selectedVersion}</span>
-              <span class="ver-tag-pill history">自选历史版本</span>
-            </div>
-            <div class="custom-radio"></div>
-          </div>
-        ` + cardsHtml;
-      }
-
-      container.innerHTML = cardsHtml;
+      renderVersionCards(latestBetaVer, latestStableVer, selectedVersion, pickVersion, container);
 
       if (historyDrop) {
         const historyList = rawVersionList.filter(v => v.version !== latestBetaVer && v.version !== latestStableVer);
-        historyDrop.innerHTML = historyList.slice(0, 10).map(item => `
-          <div class="history-item" onclick="pickVersion('${item.version}')">
-            <span style="font-family:monospace; font-weight:600;">v${item.version}</span>
-            <span class="ver-tag-pill ${item.is_beta ? 'beta' : 'stable'}" style="font-size:10px;">${item.is_beta ? 'Beta' : '稳定版'}</span>
-          </div>
-        `).join("");
+        renderHistoryItems(historyList.slice(0, 10), pickVersion, historyDrop);
       }
 
       updateUpgradeButtonText();
@@ -568,6 +513,10 @@ const API_BASE = (function() {
     }
 
     async function pollUpgradeLogs() {
+      // 节流守卫:上游慢时不叠加请求(800ms 轮询 × 慢响应曾是界面卡顿源之一)
+      const now = Date.now();
+      if (now - upPollLastAt < 1200) return;
+      upPollLastAt = now;
       if (document.hidden) return; // 后台标签页暂停轮询
       try {
         const [logsRes, statusRes] = await Promise.all([
@@ -579,17 +528,10 @@ const API_BASE = (function() {
           const ldata = await logsRes.json();
           if (ldata.success && Array.isArray(ldata.logs)) {
             const terminal = document.getElementById("upTerminal");
-            const html = ldata.logs.map(item => {
-              const msg = (typeof item === "string" ? item : (item.message || JSON.stringify(item)));
-              let cls = "log-info";
-              if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("失败")) cls = "log-error";
-              else if (msg.includes("WARN") || msg.includes("Warning")) cls = "log-warn";
-              else if (msg.includes("成功") || msg.includes("Successfully")) cls = "log-success";
-              return `<div class="${cls}">${escapeHtml(msg)}</div>`;
-            }).join("");
-            
-            terminal.innerHTML = html || "正在等待 pip 安装输出...\n";
-            terminal.scrollTop = terminal.scrollHeight;
+            if (terminal) {
+              renderLogLines(ldata.logs, terminal, "正在等待 pip 安装输出...", true);
+              terminal.scrollTop = terminal.scrollHeight;
+            }
           }
         }
 
@@ -658,14 +600,7 @@ const API_BASE = (function() {
       const end = logLines.length - logPageFromEnd * LOG_PAGE_SIZE;
       const start = Math.max(0, end - LOG_PAGE_SIZE);
       const pageLines = logLines.slice(start, end);
-      const html = pageLines.map(item => {
-        const msg = (typeof item === "string" ? item : (item.message || JSON.stringify(item)));
-        let cls = "log-info";
-        if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("failed")) cls = "log-error";
-        else if (msg.includes("WARN") || msg.includes("Warning")) cls = "log-warn";
-        return `<div class="${cls}">${escapeHtml(msg)}</div>`;
-      }).join("");
-      terminal.innerHTML = html || "<span style='color:var(--text-muted);'>（当前无日志输出）</span>";
+      renderLogLines(pageLines, terminal, "（当前无日志输出）");
 
       const totalPages = Math.max(1, Math.ceil(logLines.length / LOG_PAGE_SIZE));
       const displayPage = totalPages - logPageFromEnd;
@@ -740,16 +675,6 @@ const API_BASE = (function() {
 
     function escapeHtml(str) {
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    }
-
-    // Svelte 打样:服务状态卡(挂载失败降级到挂载点内的静态行,不拖垮整个脚本)
-    const statusMount = document.getElementById("statusCardMount");
-    if (statusMount) {
-      try {
-        new StatusCard({ target: statusMount }); // Svelte 4:实例化即挂载
-      } catch (e) {
-        console.error("StatusCard mount err:", e);
-      }
     }
 
     // 初始执行全套自愈
