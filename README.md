@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.0.11-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
@@ -79,7 +79,14 @@ QwenPaw-for-fnOS/
 
 ## 版本历史
 
-### v1.0.10（当前）
+### v2.0.0-1（当前）
+
+- **架构升级:常驻 Rust 监督者接管内核生命周期**——安装/重启/改端口全部经监督者执行,App 切后台、网关回收不再影响任何后台作业(App 切后台杀死安装的事故从架构上消失)
+- api.cgi 退役为瘦桥(token+转发),cmd/main 只管监督者进程;内核 18088 直连不变
+- SSE 实时状态推送(预留,控制台轮询兜底)
+- 监督者依赖 wheels 随包分发,离线安装
+
+### v1.0.10
 
 - **进程管理保底机制**：内核以 setsid 独立进程组启动，停止时组信号连带浏览器/MCP 等子进程（TERM 宽限 10s 后组 KILL 清扫，实测 TERM 免疫子进程可被清除）
 - 安全阀：组信号仅在确认 setsid 启动时启用，旧版启动的进程自动降级为单进程信号，不误伤平台进程

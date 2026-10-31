@@ -1,134 +1,66 @@
 #!/bin/bash
+# fnOS 生命周期入口:本脚本只管理监督者进程;内核生命周期由监督者负责。
+# start → 拉起监督者(监督者自动收养/拉起内核)
+# stop  → TERM 监督者(监督者收到信号级联停内核)→ 宽限 → KILL
+# status→ 监督者存活即应用运行(退出码 0/3,官方约定)
 
-# 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为运行态语义
-. "$(dirname "$0")/lib.sh"
-LOG_FILE="${VAR_DIR}/qwenpaw.log"
-PID_FILE="${VAR_DIR}/qwenpaw.pid"
-export HOME="${ETC_DIR}"
+SUP_BIN_CANDIDATES=(
+    "${TRIM_APPDEST}/app/bin/qwenpaw-supervisor"
+    "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"
+)
+VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+PID_FILE="${VAR_DIR}/supervisor.pid"
+LOG_FILE="${VAR_DIR}/supervisor.log"
 
-# 端口获取机制 (对齐 DSH，默认优雅端口 18088，且避开老应用占用的 19091)
-PORT_FILE="${VAR_DIR}/service_port"
-PORT="${wizard_port:-}"
-if [ -z "${PORT}" ] && [ -r "${PORT_FILE}" ]; then
-    PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
-fi
-# 核心自愈：若读到老冲突端口 19091，自动平滑升级为 18088
-if [ -z "${PORT}" ] || [ "${PORT}" = "19091" ]; then
-    PORT="18088"
-    echo "18088" > "${PORT_FILE}" 2>/dev/null || true
-fi
-if [ -z "${PORT}" ] && [ -r "${PORT_FILE}" ]; then
-    PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
-fi
-PORT="${PORT:-18088}"
-if [ -r "${PORT_FILE}" ]; then
-    PORT=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
-fi
-PORT="${PORT:-${TRIM_SERVICE_PORT:-18088}}"
-
-CMD="source ${VENV_DIR}/bin/activate && exec setsid python3 -m qwenpaw app --host 0.0.0.0 --port ${PORT}"
-
-log_msg() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
-}
+SUP_BIN=""
+for c in "${SUP_BIN_CANDIDATES[@]}"; do
+    if [ -x "$c" ]; then
+        SUP_BIN="$c"
+        break
+    fi
+done
 
 start_process() {
     if status; then
         return 0
     fi
-
-    # 内核未安装时跳过启动（首次安装模式：内核由控制台「版本更新」安装）
-    if ! kernel_installed; then
-        log_msg "内核未安装，跳过启动（请在 QwenPaw 控制台「版本更新」中安装内核）"
-        notify_user "QwenPaw 内核尚未安装，请打开控制台「版本更新」选择版本安装。"
-        return 0
+    if [ -z "$SUP_BIN" ]; then
+        echo "supervisor binary not found" >&2
+        return 1
     fi
-
-    log_msg "Starting QwenPaw ..."
-    bash -c "${CMD}" >> ${LOG_FILE} 2>&1 &
-    printf "%s" "$!" > ${PID_FILE}
+    # TRIM_* 环境变量由平台注入本脚本,子进程继承;监督者据此定位数据目录
+    nohup "$SUP_BIN" >> "${LOG_FILE}" 2>&1 &
+    echo $! > "${PID_FILE}"
     return 0
 }
 
 stop_process() {
-    log_msg "Stopping QwenPaw ..."
-
-    if [ ! -r "${PID_FILE}" ]; then
-        return 0
-    fi
-
-    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-    if [ -z "${pid}" ]; then
+    if [ -r "${PID_FILE}" ]; then
+        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            # 监督者收到 TERM 会级联停内核(设计 D4),宽限 15s(内核安装进行中时会先完成清扫)
+            kill -TERM "${pid}" 2>/dev/null || true
+            count=0
+            while kill -0 "${pid}" 2>/dev/null && [ $count -lt 15 ]; do
+                sleep 1
+                count=$((count + 1))
+            done
+            kill -KILL "${pid}" 2>/dev/null || true
+        fi
         rm -f "${PID_FILE}"
-        return 0
     fi
-
-    log_msg "pid=${pid}"
-    if ! check_process "${pid}"; then
-        rm -f "${PID_FILE}"
-        log_msg "remove pid file"
-        return 0
-    fi
-
-    # 保底机制:setsid 启动的内核是自身进程组长,组信号可连带浏览器/MCP 等
-    # 子进程;pgid != pid(旧版或 setsid 缺失启动)时禁用整组杀,防止误伤同组平台进程
-    local pgid=""
-    pgid=$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')
-    local group_kill=0
-    if [ -n "${pgid}" ] && [ "${pgid}" = "${pid}" ]; then
-        group_kill=1
-    fi
-
-    log_msg "send TERM signal to PID:${pid}...${group_kill} (含进程组)"
-    if [ ${group_kill} -eq 1 ]; then
-        kill -TERM -- -"${pid}" >> ${LOG_FILE} 2>&1 || true
-    else
-        kill -TERM ${pid} >> ${LOG_FILE} 2>&1 || true
-    fi
-
-    local count=0
-    while check_process "${pid}" && [ $count -lt 10 ]; do
-        sleep 1
-        count=$((count + 1))
-        log_msg "waiting process terminal... (${count}s/10s)"
-    done
-
-    if check_process "${pid}"; then
-        log_msg "send KILL signal to PID:${pid}..."
-        kill -KILL "${pid}" >> ${LOG_FILE} 2>&1 || true
-    else
-        log_msg "process killed"
-    fi
-    # 兜底清扫:无视 TERM 的子进程(chromium/MCP)由组 KILL 清除;
-    # 已退出的成员为空操作(ESRCH 忽略),对已死进程无害
-    if [ ${group_kill} -eq 1 ]; then
-        kill -KILL -- -"${pid}" >> ${LOG_FILE} 2>&1 || true
-    fi
-    rm -f "${PID_FILE}"
-
     return 0
 }
 
-check_process() {
-    local pid=$1
-    if kill -0 "${pid}" 2>/dev/null; then
-        return 0
-    else
-        return 1
-    fi
-}
-
 status() {
-    if [ -f "${PID_FILE}" ]; then
+    if [ -r "${PID_FILE}" ]; then
         pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-        if check_process "${pid}"; then
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
             return 0
-        else
-            rm -f "${PID_FILE}"
-        fi    
+        fi
+        rm -f "${PID_FILE}"
     fi
-
-    return 1
+    return 3
 }
 
 case $1 in
@@ -139,9 +71,9 @@ stop)
     stop_process
     ;;
 status)
-    if status; then 
+    if status; then
         exit 0
-    else 
+    else
         exit 3
     fi
     ;;

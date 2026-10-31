@@ -30,6 +30,19 @@ else
   echo "[1/4] preflight 跳过（SKIP_GATES=1，已在宿主侧完成）"
 fi
 
+# [1b/4] 构建监督者(release 单二进制;无 cargo 时复用已有产物)
+SUP_BIN_SRC="$PROJ_DIR/supervisor/target/release/qwenpaw-supervisor"
+if command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then
+  echo "[1b/4] 构建监督者 (cargo release) ..."
+  (cd "$PROJ_DIR/supervisor" && cargo build --release 2>&1 | tail -1)
+elif [ -x "$SUP_BIN_SRC" ]; then
+  echo "[1b/4] 无 cargo,复用已有监督者产物"
+fi
+if [ ! -x "$SUP_BIN_SRC" ]; then
+  echo -e "${RED}ERROR: 监督者二进制缺失(supervisor/target/release/qwenpaw-supervisor)${NC}"
+  exit 1
+fi
+
 # [2/4] 准备纯净 staging (排除源码，仅保留外壳、控制台、向导与脚本)
 echo "[2/4] 准备 staging 纯净目录树 ..."
 rm -rf "$STAGE"
@@ -49,6 +62,11 @@ tar -cf - -C "$PROJ_DIR" \
   --exclude='app/www/*.jpg' \
   --exclude='app/www/public' \
   . | tar -xf - -C "$STAGE"
+
+# 监督者二进制入包(app/bin/,运行时位于 /var/apps/qwenpaw/app/bin/)
+mkdir -p "$STAGE/app/bin"
+cp "$SUP_BIN_SRC" "$STAGE/app/bin/qwenpaw-supervisor"
+chmod +x "$STAGE/app/bin/qwenpaw-supervisor"
 
 # 关键校验
 if [ ! -f "$STAGE/app/www/index.html" ] || [ ! -f "$STAGE/cmd/install_callback" ]; then
