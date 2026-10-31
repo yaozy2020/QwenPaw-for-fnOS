@@ -1,14 +1,12 @@
 name: Release
 
+# 仅手动触发：推 tag 不会自动打包，避免半成品 tag 意外出包。
+# 发版流程：确认版本 → git tag vX.Y.Z && git push → Actions → Release → Run workflow → 填入 tag 名
 on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "v*.*.*.*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v1.0.1)"
+        description: "Tag to release (e.g. v1.0.7)"
         required: true
 
 permissions:
