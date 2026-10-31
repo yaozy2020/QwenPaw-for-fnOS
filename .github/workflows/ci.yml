@@ -27,11 +27,10 @@ jobs:
       - name: Verify AUDIT_REPORT.md is up-to-date
         run: python3 scripts/gen-audit.py --check
 
-      - name: Shell syntax gate (cmd/ + cgi + build.sh)
+      - name: Lint (bash -n + shellcheck + 内嵌 spawn 脚本展开验证)
         run: |
-          for f in cmd/* app/ui/*.cgi build.sh; do
-            bash -n "$f" || { echo "::error::语法错误: $f"; exit 1; }
-          done
+          chmod +x scripts/lint.sh scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
+          bash scripts/lint.sh
 
       - name: Console artifact sanity (零构建架构，控制台为提交产物)
         run: |

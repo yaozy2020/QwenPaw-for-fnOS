@@ -304,6 +304,7 @@ change_port() {
         fi
         export HOME=/var/apps/qwenpaw/home
         export QWENPAW_WORKING_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw
+        export QWENPAW_DEPENDENCY_STATE_DIR=/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw/dependency-environments
         export QWENPAW_AUTH_ENABLED=true
         export PATH=/var/apps/nodejs_v24/target/bin:\$PATH
         source ${VENV_DIR}/bin/activate
