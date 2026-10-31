@@ -90,16 +90,19 @@ log_msg "正在升级虚拟环境 pip..."
 python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"
 
-# 内核版本来源：版本钉优先（用户在控制台选过的版本），无钉才按向导渠道
-# 这样即使运行环境被系统升级清掉，也会精确恢复用户选择的版本而非追踪最新
-# 读取时净化：容忍历史版本钉被写成 "Version: x.y.z" 的整行格式
+# 内核版本来源（修复路径）：版本钉优先，精确恢复用户选择的版本
 VERSION_PIN="$(tr -d '[:space:]' < "${TRIM_PKGVAR}/qwenpaw-version" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
-TARGET_PKG="qwenpaw"
 if [ -n "${VERSION_PIN}" ]; then
     TARGET_PKG="qwenpaw==${VERSION_PIN}"
     log_msg "检测到内核版本钉，按其精确恢复: ${TARGET_PKG}"
-elif [ "${wizard_channel:-stable}" = "beta" ]; then
-    TARGET_PKG="--pre qwenpaw"
+else
+    # 首次安装不预装内核（对齐 DSH 模式）：由用户打开控制台「版本更新」自选版本安装
+    log_msg "首次安装完成（外壳）。内核未预装——请打开 QwenPaw 控制台，在「版本更新」中选择版本安装。"
+    log_msg "提示: 内核 wheel 约 40MB，控制台安装时从所选 PyPI 镜像下载。"
+    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
+    chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+    log_msg "QwenPaw 安装成功！（内核待控制台安装）"
+    exit 0
 fi
 
 log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎..."

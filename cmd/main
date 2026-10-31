@@ -54,6 +54,12 @@ start_process() {
         return 0
     fi
 
+    # 内核未安装时跳过启动（首次安装模式：内核由控制台「版本更新」安装）
+    if ! "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+        log_msg "内核未安装，跳过启动（请在 QwenPaw 控制台「版本更新」中安装内核）"
+        return 0
+    fi
+
     log_msg "Starting QwenPaw ..."
     bash -c "${CMD}" >> ${LOG_FILE} 2>&1 &
     printf "%s" "$!" > ${PID_FILE}

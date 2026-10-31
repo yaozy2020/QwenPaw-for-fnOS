@@ -126,8 +126,13 @@ get_status() {
         auth_enabled=true
     fi
 
+    local installed=false
+    if [ -n "${version}" ]; then
+        installed=true
+    fi
+
     local current_port=$(get_service_port)
-    echo "{\"success\":true,\"running\":${running},\"pid\":\"${pid}\",\"startAt\":${start_at},\"version\":\"${version:-未知}\",\"authEnabled\":${auth_enabled},\"port\":\"${current_port}\"}"
+    echo "{\"success\":true,\"running\":${running},\"pid\":\"${pid}\",\"startAt\":${start_at},\"version\":\"${version}\",\"installed\":${installed},\"authEnabled\":${auth_enabled},\"port\":\"${current_port}\"}"
 }
 
 status() {
@@ -139,6 +144,14 @@ start_service() {
         echo "Content-Type: application/json"
         echo ""
         echo "{\"success\":false,\"message\":\"仅支持 POST 请求\"}"
+        exit 0
+    fi
+
+    # 内核未安装时禁止启动（首次安装模式：内核由控制台「版本更新」安装）
+    if ! "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+        echo "Content-Type: application/json"
+        echo ""
+        echo "{\"success\":false,\"message\":\"QwenPaw 内核尚未安装，请在「版本更新」中选择版本安装\",\"installed\":false}"
         exit 0
     fi
 
@@ -219,6 +232,14 @@ restart_service() {
         exit 0
     fi
 
+    # 内核未安装时禁止启动（首次安装模式：内核由控制台「版本更新」安装）
+    if ! "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+        echo "Content-Type: application/json"
+        echo ""
+        echo "{\"success\":false,\"message\":\"QwenPaw 内核尚未安装，请在「版本更新」中选择版本安装\",\"installed\":false}"
+        exit 0
+    fi
+
     if [ -f "${PID_FILE}" ]; then
         local pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
         if check_process "${pid}"; then
@@ -257,6 +278,14 @@ change_port() {
         echo "Content-Type: application/json"
         echo ""
         echo "{\"success\":false,\"message\":\"仅支持 POST 请求\"}"
+        exit 0
+    fi
+
+    # 内核未安装时不允许改端口重启（首次安装模式）
+    if ! "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+        echo "Content-Type: application/json"
+        echo ""
+        echo "{\"success\":false,\"message\":\"QwenPaw 内核尚未安装，请在「版本更新」中选择版本安装\",\"installed\":false}"
         exit 0
     fi
 

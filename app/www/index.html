@@ -132,6 +132,7 @@
     }
     .badge-success { background: var(--success-bg); color: var(--success); }
     .badge-danger { background: var(--danger-bg); color: var(--danger); }
+    .badge-warning { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
     .pulse-dot {
       width: 7px;
       height: 7px;
@@ -781,6 +782,9 @@
           </div>
 
           <!-- 单选卡片容器 -->
+          <div id="kernelInstallTip" style="display:none; margin-bottom:10px; padding:10px 12px; background:var(--primary-bg, rgba(59,130,246,0.12)); border:1px solid rgba(59,130,246,0.25); border-radius:8px; font-size:12px; line-height:1.6; color:var(--text-main);">
+            📦 <strong>QwenPaw 内核尚未安装</strong>。请在下方选择一个版本，点击按钮完成安装（首次建议 Stable 稳定版）。安装需从 PyPI 下载约 40MB，请耐心等待。
+          </div>
           <div class="ver-cards-container" id="versionCardsContainer">
             <div class="ver-card-item active" onclick="pickVersion('2.3.0b1')">
               <div class="ver-info-left">
@@ -1043,7 +1047,30 @@
         const valVersion = document.getElementById("valVersion");
         const valAuth = document.getElementById("valAuthStatus");
 
-        if (data.running) {
+        const notInstalled = data.installed === false;
+
+        if (notInstalled) {
+          // 内核未安装（首次安装模式）：提示去版本管理安装
+          if (badge) {
+            badge.className = "badge badge-warning";
+            badge.innerHTML = `<span class="pulse-dot"></span> 内核未安装`;
+          }
+          if (valStatus) {
+            valStatus.innerText = "内核未安装";
+            valStatus.style.color = "var(--text-sub)";
+          }
+          if (valPid) valPid.innerText = "-";
+          if (valUptime) valUptime.innerText = "-";
+          if (valVersion) valVersion.innerText = "未安装";
+          currentRunningVersion = "";
+          const tip = document.getElementById("kernelInstallTip");
+          if (tip) tip.style.display = "block";
+        } else {
+          const tip = document.getElementById("kernelInstallTip");
+          if (tip) tip.style.display = "none";
+        }
+
+        if (!notInstalled && data.running) {
           if (badge) {
             badge.className = "badge badge-success";
             badge.innerHTML = `<span class="pulse-dot"></span> 运行中`;
@@ -1062,7 +1089,7 @@
               valUptime.innerText = "已就绪";
             }
           }
-        } else {
+        } else if (!notInstalled) {
           if (badge) {
             badge.className = "badge badge-danger";
             badge.innerHTML = `<span class="pulse-dot"></span> 已停止`;
@@ -1260,6 +1287,14 @@
       const btn = document.getElementById("btnUpgradeAction");
       const warnBar = document.getElementById("downgradeWarnBar");
       if (!btn) return;
+
+      // 内核未安装：按钮语义是「安装」而非「更新/降级」
+      if (!currentRunningVersion) {
+        btn.innerText = `安装内核 v${selectedVersion}`;
+        btn.className = "btn btn-primary btn-sm";
+        if (warnBar) warnBar.style.display = "none";
+        return;
+      }
 
       const isDowngrade = compareVersion(currentRunningVersion, selectedVersion) > 0;
       if (isDowngrade) {
