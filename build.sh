@@ -5,7 +5,11 @@
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
-OUTPUT="/vol2/1000/下载/qwenpaw_v${VERSION}.fpk"
+# 输出路径可被环境变量覆盖（CI 用 FPK_OUT=$GITHUB_WORKSPACE）；
+# 默认仍是本机下载目录，本地用法不变。
+FPK_OUT="${FPK_OUT:-/vol2/1000/下载}"
+mkdir -p "$FPK_OUT"
+OUTPUT="${FPK_OUT}/qwenpaw_v${VERSION}.fpk"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,11 +19,16 @@ NC='\033[0m'
 echo -e "${GREEN}===== QwenPaw for fnOS v${VERSION} Launcher 打包 =====${NC}"
 
 # [1/4] preflight 一致性门禁
-echo "[1/4] preflight 一致性门禁 ..."
-bash "$PROJ_DIR/scripts/preflight.sh" || {
-  echo -e "${RED}ERROR: preflight 失败${NC}"
-  exit 1
-}
+# SKIP_GATES=1 时跳过（CI 场景：宿主侧已跑过 preflight+AUDIT，且容器内可能无 python3）
+if [ "${SKIP_GATES:-0}" != "1" ]; then
+  echo "[1/4] preflight 一致性门禁 ..."
+  bash "$PROJ_DIR/scripts/preflight.sh" || {
+    echo -e "${RED}ERROR: preflight 失败${NC}"
+    exit 1
+  }
+else
+  echo "[1/4] preflight 跳过（SKIP_GATES=1，已在宿主侧完成）"
+fi
 
 # [2/4] 准备纯净 staging (排除源码，仅保留外壳、控制台、向导与脚本)
 echo "[2/4] 准备 staging 纯净目录树 ..."
