@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QwenPaw 控制台</title>
+  <script>
+    // 首屏防闪屏:无用户显式选择时跟随系统 prefers-color-scheme,须在样式表生效前定题
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("qwenpaw_theme_v2"); } catch (e) {}
+      if (t !== "light" && t !== "dark") {
+        t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <style>
+/*__INLINE_CSS__*/
+  </style>
+</head>
+<body>
+
+  <!-- 顶部导航 -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor">
+          <circle cx="8.5" cy="5.5" r="2.5"/>
+          <circle cx="15.5" cy="5.5" r="2.5"/>
+          <circle cx="4.5" cy="11.5" r="2.5"/>
+          <circle cx="19.5" cy="11.5" r="2.5"/>
+          <path d="M12 11c-3.5 0-6 2.5-6 6.5 0 2.2 1.8 4 4 4 1.2 0 2.4-.6 3-1.6.6 1 1.8 1.6 3 1.6 2.2 0 4-1.8 4-4 0-4-2.5-6.5-6-6.5z"/>
+        </svg>
+      </div>
+      <div class="brand-info">
+        <h1>QwenPaw 控制台 <span id="statusBadge" class="badge badge-success"><span class="pulse-dot"></span> 运行中</span></h1>
+        <p>个人 AI 智能管家运维面板 · 基于飞牛 fnOS 原生轻量架构 · <span style="color:var(--primary);font-size:11px;">Build __BUILD_ID__</span></p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <!-- 白天/暗夜切换按钮 -->
+      <button class="btn-outline" id="themeToggleBtn" onclick="toggleTheme()" title="切换白天/暗夜模式">
+        <svg id="themeIconSun" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" style="display:none; color:#f59e0b;">
+          <circle cx="12" cy="12" r="5"/>
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+        <svg id="themeIconMoon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" style="color:#38bdf8;">
+          <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+        </svg>
+        <span id="themeText">暗夜</span>
+      </button>
+
+      <!-- 刷新按钮 -->
+      <button class="btn-outline" onclick="fetchStatus(); fetchLogs();" title="手动刷新">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M23 4v6h-6M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+        </svg>
+        刷新
+      </button>
+
+      <!-- 进入对话主按钮 -->
+      <a id="btnWebConsole" class="btn btn-primary" href="#" target="_blank">
+        进入 Web 对话
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/>
+        </svg>
+      </a>
+    </div>
+  </header>
+
+  <!-- 三栏核心卡片 -->
+  <div class="grid">
+    <!-- 卡片 1: 运行状态 -->
+    <div class="card">
+      <div class="card-title">
+        <div class="card-title-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+            <line x1="8" y1="21" x2="16" y2="21"/>
+            <line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+          服务监控
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-row">
+          <span class="info-label">服务状态</span>
+          <span class="info-val" id="valStatus">运行中 (Active)</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">进程 PID</span>
+          <span class="info-val" id="valPid">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">运行时长</span>
+          <span class="info-val" id="valUptime">-</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">服务端口</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="info-val" id="valPort">18088</span>
+            <button class="btn-outline btn-sm" onclick="changeServicePort()" style="padding: 2px 8px; font-size: 11px;">修改端口</button>
+          </div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <button class="btn-outline btn-sm" style="flex:1" onclick="controlService('restart')">重启服务</button>
+        <button class="btn-danger btn-sm" style="flex:1" onclick="controlService('stop')">停止服务</button>
+      </div>
+    </div>
+
+    <!-- 卡片 2: 鉴权与安全 -->
+    <div class="card">
+      <div class="card-title">
+        <div class="card-title-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+            <path d="M7 11V7a5 5 0 0110 0v4"/>
+          </svg>
+          访问鉴权
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="info-row">
+          <span class="info-label">Web 登录验证</span>
+          <span class="info-val" id="valAuthStatus" style="color:var(--success);">已启用密码保护</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">管理员身份</span>
+          <span class="info-val">已绑定管理账号</span>
+        </div>
+        <p style="font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 4px;">
+          进入 Web 对话端需输入你的管理员密码。如忘记密码，可点击下方按钮一键重置。
+        </p>
+      </div>
+      <div style="margin-top: 8px;">
+        <button class="btn-outline btn-sm" style="width: 100%;" onclick="resetAuth()">重置管理密码</button>
+      </div>
+    </div>
+
+    <!-- 卡片 3: 版本与升级 (纯净单选卡片 + 检查更新) -->
+    <div class="card">
+      <div class="card-title">
+        <div class="card-title-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 00-2.91-.09z"/>
+            <path d="M12 15l-3-3a22 22 0 012-3.95A12.88 12.88 0 0122 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 01-4 2z"/>
+          </svg>
+          版本更新
+        </div>
+        <button class="btn-outline btn-sm" onclick="checkOnlineVersions()" style="padding: 2px 8px; font-size: 11px; gap:4px;">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 4v6h-6M1 20v-6h6"/>
+            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+          </svg>
+          检查更新
+        </button>
+      </div>
+      <div class="card-body">
+        <div class="info-row">
+          <span class="info-label">当前运行</span>
+          <span class="info-val" id="valVersion">2.3.0b1</span>
+        </div>
+
+        <div style="margin-top: 4px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span class="info-label" style="font-size: 12px;">目标通道 / 版本</span>
+            <span class="history-versions-toggle" onclick="toggleHistoryDropdown()">历史归档 ▾</span>
+          </div>
+
+          <!-- 单选卡片容器 -->
+          <div id="kernelInstallTip" style="display:none; margin-bottom:10px; padding:10px 12px; background:var(--primary-bg, rgba(59,130,246,0.12)); border:1px solid rgba(59,130,246,0.25); border-radius:8px; font-size:12px; line-height:1.6; color:var(--text-main);">
+            📦 <strong>QwenPaw 内核尚未安装</strong>。请在下方选择一个版本，点击按钮完成安装（首次建议 Stable 稳定版）。安装需从 PyPI 下载约 40MB，请耐心等待。
+          </div>
+          <!-- 下载源选择:自定义下拉(原生 select 在移动端弹系统白框,与主题割裂);
+               落盘服务端(VAR_DIR/pip-mirror),升级内核时生效;向导选择的源作为初始默认 -->
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:12px;">
+            <label style="color:var(--text-sub); white-space:nowrap;">下载源</label>
+            <div style="flex:1; position:relative;">
+              <button type="button" class="history-versions-toggle" id="mirrorToggleBtn" onclick="toggleMirrorDropdown()" style="width:100%; display:flex; justify-content:space-between; align-items:center; padding:7px 10px; border:1px solid var(--card-border); border-radius:8px; background:var(--token-bg); font-size:12px;">
+                <span id="mirrorLabel">—</span>
+                <span style="color:var(--text-sub);">▾</span>
+              </button>
+              <div class="history-dropdown" id="mirrorDropdown" style="position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:60; max-height:240px; box-shadow:var(--shadow);"></div>
+            </div>
+          </div>
+          <div class="ver-cards-container" id="versionCardsContainer">
+            <div class="ver-card-item active" onclick="pickVersion('2.3.0b1')">
+              <div class="ver-info-left">
+                <span class="ver-number">v2.3.0b1</span>
+                <span class="ver-tag-pill beta">最新测试 Beta</span>
+              </div>
+              <div class="custom-radio"></div>
+            </div>
+            <div class="ver-card-item" onclick="pickVersion('2.2.2.post1')">
+              <div class="ver-info-left">
+                <span class="ver-number">v2.2.2.post1</span>
+                <span class="ver-tag-pill stable">推荐稳定 Stable</span>
+              </div>
+              <div class="custom-radio"></div>
+            </div>
+          </div>
+
+          <!-- 历史版本折叠菜单 -->
+          <div class="history-dropdown" id="historyDropdown"></div>
+
+          <!-- 动态降级风险提示条 -->
+          <div id="downgradeWarnBar" style="display:none; margin-top:8px; padding:8px 12px; background:var(--danger-bg); border:1px solid rgba(239,68,68,0.25); border-radius:8px; font-size:11px; color:var(--danger); line-height:1.5;">
+            ⚠️ <strong>降级风险提示</strong>：目标版本低于当前运行版本，旧版本可能无法识别新版配置字段或记忆结构，建议谨慎操作！
+          </div>
+        </div>
+      </div>
+      <div style="margin-top: 8px;">
+        <button class="btn-primary btn-sm" id="btnUpgradeAction" style="width: 100%;" onclick="checkOrUpgrade()">执行更新至选定版本</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卡片 4: 实时日志终端 -->
+  <div class="terminal-card">
+    <div class="terminal-header">
+      <div class="card-title">
+        <div class="card-title-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+          运行日志 (qwenpaw.log)
+        </div>
+      </div>
+      <div class="terminal-controls">
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+          <input type="checkbox" id="autoScrollCheck" checked> 自动滚底
+        </label>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+          <input type="checkbox" id="autoRefreshCheck" checked onchange="toggleAutoRefresh(this.checked)"> 实时刷新
+        </label>
+        <button class="btn-outline btn-sm" onclick="clearTerminalLogs()">清屏</button>
+      </div>
+    </div>
+    <div class="terminal-body" id="logTerminal">正在加载实时日志...</div>
+    <div style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:12px; flex-wrap:wrap;">
+      <button class="btn-outline btn-sm" id="logPrevBtn" onclick="logGoPrev()">上一页</button>
+      <span id="logPageIndicator" style="color:var(--text-sub);">第 - 页</span>
+      <button class="btn-outline btn-sm" id="logNextBtn" onclick="logGoNext()">下一页</button>
+      <button class="btn-outline btn-sm" onclick="logGoLatest()">回到最新</button>
+      <span id="logWindowHint" style="display:none; color:#b45309;">已到回看窗口边界（2000 行），更早内容请直接查看服务器日志文件</span>
+    </div>
+  </div>
+
+  <!-- 置顶灵动岛 Toast -->
+  <div id="toast">操作已触发</div>
+
+  <!-- 自定义确认弹窗 Modal (置顶展开) -->
+  <div class="modal-overlay" id="customModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-icon-badge" id="modalBadge">
+          <svg id="modalIcon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+          </svg>
+        </div>
+        <div class="modal-title" id="modalTitle">提示确认</div>
+      </div>
+      <div class="modal-msg" id="modalMessage">确认执行此操作吗？</div>
+      <div class="modal-actions">
+        <button class="btn-outline" id="modalCancelBtn">取消</button>
+        <button class="btn-primary" id="modalConfirmBtn">确认执行</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 专属升级终端弹窗 (置顶展开，实时流式) -->
+  <div class="modal-overlay" id="upgradeModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-icon-badge primary" id="upBadge">
+          <span class="spinner" id="upSpinner"></span>
+          <svg id="upDoneIcon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" style="display:none; color:var(--success);">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        </div>
+        <div style="flex:1;">
+          <div class="modal-title" id="upTitle">QwenPaw 在线升级中...</div>
+          <div style="font-size: 12px; color: var(--text-muted); margin-top:2px;" id="upSubTitle">正在执行 pip 安装与环境构建，期间服务将自动重启</div>
+        </div>
+      </div>
+      <div class="upgrade-terminal-body" id="upTerminal">正在建立升级日志管道...</div>
+      <div class="modal-actions" style="justify-content: flex-end;">
+        <button class="btn-primary" id="btnUpClose" onclick="closeUpgradeModal()" style="display:none; width: 100%;">完成并返回控制台</button>
+      </div>
+    </div>
+  </div>
+
+  <script>//__INLINE_JS__</script>
+</body>
+</html>

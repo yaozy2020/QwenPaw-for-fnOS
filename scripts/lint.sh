@@ -1,12 +1,12 @@
 #!/bin/bash
-# lint.sh — 语法与静态检查门禁（四层）
-#   [1/4] bash -n 全量
-#   [2/4] shellcheck（error 级为门禁，warning 仅报告；本地无二进制时自动下载 pinned 版本）
-#   [3/4] 内嵌 spawn 脚本展开验证 —— api.cgi 中以 nohup bash -c "..." / local cmd="..."
+# lint.sh — 语法与静态检查门禁（五层）
+#   [1/5] bash -n 全量
+#   [2/5] shellcheck（error 级为门禁，warning 仅报告；本地无二进制时自动下载 pinned 版本）
+#   [3/5] 内嵌 spawn 脚本展开验证 —— api.cgi 中以 nohup bash -c "..." / local cmd="..."
 #         形式内嵌的启动脚本是"运行时展开"代码，bash -n 与 shellcheck 都查不出其中的
 #         变量误展开（历史事故：awk $2 被 nohup 外层展开成空），必须按真实展开语义
 #         生成内层脚本后单独验证，并断言每条启动路径都携带内核启动必需的环境变量。
-#   [4/4] api.cgi 桥接输出 JSON 有效性 —— 控制台所有动态渲染依赖 res.json() 成功；
+#   [4/5] api.cgi 桥接输出 JSON 有效性 —— 控制台所有动态渲染依赖 res.json() 成功；
 #         桥接只要吐出一段非 JSON（历史事故：echo "${resp:-{...}}" 默认词里的 }
 #         提前终止参数展开，输出 "{...}}"），前端就全体静默失效停在静态默认值。
 # 用法: bash scripts/lint.sh
@@ -19,7 +19,7 @@ fail=0
 echo "========== lint: 语法与静态检查 =========="
 
 # ── [1/3] bash -n 全量 ──
-echo "[1/4] bash -n ..."
+echo "[1/5] bash -n ..."
 for f in "$ROOT"/cmd/* "$ROOT"/app/ui/*.cgi "$ROOT"/build.sh "$ROOT"/scripts/*.sh; do
     [ -f "$f" ] || continue
     if bash -n "$f" 2>/dev/null; then
@@ -32,7 +32,7 @@ for f in "$ROOT"/cmd/* "$ROOT"/app/ui/*.cgi "$ROOT"/build.sh "$ROOT"/scripts/*.s
 done
 
 # ── [2/3] shellcheck（error 级门禁；warning 仅报告不拦截） ──
-echo "[2/4] shellcheck v${SHELLCHECK_VER} ..."
+echo "[2/5] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"
 [ -z "$SC_BIN" ] && [ -x /tmp/shellcheck ] && SC_BIN=/tmp/shellcheck
 if [ -z "$SC_BIN" ]; then
@@ -60,7 +60,7 @@ fi
 # ── [3/4] 内嵌 spawn 脚本展开验证 ──
 # v2 起 spawn 逻辑迁入监督者(kernel.rs process_group),瘦桥无内嵌启动脚本,
 # 本层常态提取 0 段 —— 保留作哨兵:若未来重新出现内嵌启动脚本即自动激活。
-echo "[3/4] 内嵌 spawn 脚本展开验证 ..."
+echo "[3/5] 内嵌 spawn 脚本展开验证 ..."
 API_CGI="$ROOT/app/ui/api.cgi"
 WORK="$(mktemp -d)"
 
@@ -146,7 +146,7 @@ while read -r vname; do
 done < "$WORK/names.txt"
 
 # ── [4/4] api.cgi 桥接输出 JSON 有效性 ──
-echo "[4/4] api.cgi 桥接 JSON 有效性 ..."
+echo "[4/5] api.cgi 桥接 JSON 有效性 ..."
 BR="$ROOT/app/ui/api.cgi"
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
 FAKE_PORT="$(free_port)"
@@ -320,6 +320,28 @@ if [ "$(json_field "$t8" "d.get('success')")" = "True" ] \
 else
     echo "  [FAIL] 显式 mirror= 未生效: ${t8:0:120}"
     fail=1
+fi
+
+# ── [5/5] 控制台前端编译(esbuild 即语法门禁;内联 JS 语法错误曾令控制台
+# 全动态渲染静默失效停在静态默认 —— 编译不过是同一事故类别的门禁) ──
+echo "[5/5] 控制台前端编译 ..."
+WEB_DIR="$ROOT/web"
+if [ -f "$WEB_DIR/src/main.ts" ] && [ -f "$WEB_DIR/src/index.html" ]; then
+    NODE_BIN="$(command -v node 2>/dev/null || true)"
+    [ -z "$NODE_BIN" ] && [ -x /var/apps/nodejs_v24/target/bin/node ] && NODE_BIN=/var/apps/nodejs_v24/target/bin/node
+    if [ -n "$NODE_BIN" ] && [ -x "$WEB_DIR/node_modules/.bin/esbuild" ]; then
+        if (cd "$WEB_DIR" && BUILD_ID=lint "$NODE_BIN" build.mjs >/dev/null 2>&1); then
+            echo "  [  OK ] esbuild 编译通过(单文件产物 dist/index.html)"
+        else
+            echo "  [FAIL] esbuild 编译失败:"
+            (cd "$WEB_DIR" && BUILD_ID=lint "$NODE_BIN" build.mjs)
+            fail=1
+        fi
+    else
+        echo "  [SKIP] esbuild 不可用(缺 node 或 web/node_modules,先 npm install)"
+    fi
+else
+    echo "  [SKIP] web/src 缺失"
 fi
 
 echo "========================================="

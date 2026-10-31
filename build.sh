@@ -43,6 +43,28 @@ if [ ! -x "$SUP_BIN_SRC" ]; then
   exit 1
 fi
 
+# [2a/4] 编译控制台(esbuild:web/src → 单文件 dist/index.html,app/www 运行时契约不变)
+echo "[2a/4] 编译控制台 (esbuild) ..."
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE_BIN" ] && [ -x /var/apps/nodejs_v24/target/bin/node ]; then
+  NODE_BIN=/var/apps/nodejs_v24/target/bin/node
+fi
+if [ -z "$NODE_BIN" ]; then
+  echo -e "${RED}ERROR: 未找到 node,控制台编译需要${NC}"
+  exit 1
+fi
+if [ ! -x "$PROJ_DIR/web/node_modules/.bin/esbuild" ]; then
+  echo "  esbuild 未安装,执行 npm install (npmmirror) ..."
+  (cd "$PROJ_DIR/web" && env PATH="$(dirname "$NODE_BIN"):$PATH" \
+    npm install --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -1)
+fi
+BUILD_ID="r$(git -C "$PROJ_DIR" rev-list --count HEAD 2>/dev/null || echo 0)"
+export BUILD_ID
+(cd "$PROJ_DIR/web" && "$NODE_BIN" build.mjs) || {
+  echo -e "${RED}ERROR: 控制台编译失败(语法/引用错误在 web/src 中)${NC}"
+  exit 1
+}
+
 # [2/4] 准备纯净 staging (排除源码，仅保留外壳、控制台、向导与脚本)
 echo "[2/4] 准备 staging 纯净目录树 ..."
 rm -rf "$STAGE"
@@ -53,6 +75,7 @@ tar -cf - -C "$PROJ_DIR" \
   --exclude='.git' \
   --exclude='.github' \
   --exclude='scripts' \
+  --exclude='web' \
   --exclude='ui-fndesign' \
   --exclude='AUDIT_REPORT.md' \
   --exclude='*.fpk' \
@@ -67,6 +90,13 @@ tar -cf - -C "$PROJ_DIR" \
 mkdir -p "$STAGE/app/bin"
 cp "$SUP_BIN_SRC" "$STAGE/app/bin/qwenpaw-supervisor"
 chmod +x "$STAGE/app/bin/qwenpaw-supervisor"
+
+# 控制台以编译产物覆盖(app/www/index.html 已迁移为 web/src 源,仓库不存生成物)
+if [ ! -f "$PROJ_DIR/web/dist/index.html" ]; then
+  echo -e "${RED}ERROR: web/dist/index.html 缺失,控制台编译未执行${NC}"
+  exit 1
+fi
+cp "$PROJ_DIR/web/dist/index.html" "$STAGE/app/www/index.html"
 
 # 关键校验
 if [ ! -f "$STAGE/app/www/index.html" ] || [ ! -f "$STAGE/cmd/install_callback" ]; then

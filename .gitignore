@@ -3,6 +3,7 @@
 *.fpk.sha256
 build/
 node_modules/
+web/dist/
 
 # 上游源码（由 scripts/sync-upstream.sh 按 .upstream-version 物化，不入库）
 app/qwenpaw/code/

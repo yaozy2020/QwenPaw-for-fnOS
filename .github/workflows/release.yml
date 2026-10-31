@@ -47,14 +47,15 @@ jobs:
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
 
-      # 零构建架构：控制台(index.html)与工程层直接进包；fnpack 为仓库内 vendor 的
-      # 静态 ELF（x86-64，任意 Linux 可跑），不再依赖容器
+      # 控制台经 esbuild 编译(web/src → 单文件 index.html);fnpack 为仓库内
+      # vendor 的静态 ELF（x86-64，任意 Linux 可跑），不再依赖容器
       - name: Build fpk (vendored static fnpack)
         env:
           FPK_OUT: ${{ github.workspace }}
           FNPACK_BIN: ${{ github.workspace }}/tools/fnpack
         run: |
           chmod +x tools/fnpack
+          npm install --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
           bash build.sh
           ls -lh qwenpaw_v*.fpk
 

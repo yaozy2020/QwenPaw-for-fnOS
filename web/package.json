@@ -1,0 +1,12 @@
+{
+  "name": "qwenpaw-console",
+  "private": true,
+  "type": "module",
+  "description": "QwenPaw for fnOS 控制台前端源码;esbuild 编译为单文件 dist/index.html(app/www 运行时契约不变)",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

@@ -1,0 +1,623 @@
+/* 1. 暗夜模式 (Dark Mode) - 纯正深邃黑，绝无白边漏光 */
+    :root,
+    html[data-theme="dark"] {
+      --bg: #0b0f19;
+      --card-bg: #131b2e;
+      --card-border: #1e293b;
+      --card-hover: #17223b;
+      --brand-icon-bg: #1e293b;
+      --brand-icon-border: #334155;
+      --brand-icon-color: #38bdf8;
+      --text-main: #f8fafc;
+      --text-sub: #94a3b8;
+      --text-muted: #64748b;
+      --divider: rgba(255, 255, 255, 0.07);
+      --token-bg: #0a0e17;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.15);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.15);
+      --terminal-bg: #050811;
+      --terminal-text: #cbd5e1;
+      --shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+      color-scheme: dark;
+    }
+
+    /* 2. 白天模式 (Light Mode) - 素雅纯白，白底黑字无黑框 */
+    html[data-theme="light"] {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --card-border: #e2e8f0;
+      --card-hover: #f1f5f9;
+      --brand-icon-bg: #eff6ff;
+      --brand-icon-border: #bfdbfe;
+      --brand-icon-color: #2563eb;
+      --text-main: #0f172a;
+      --text-sub: #334155;
+      --text-muted: #64748b;
+      --divider: rgba(0, 0, 0, 0.06);
+      --token-bg: #f1f5f9;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --success: #059669;
+      --success-bg: rgba(5, 150, 105, 0.12);
+      --danger: #dc2626;
+      --danger-bg: rgba(220, 38, 38, 0.12);
+      --terminal-bg: #f8fafc;
+      --terminal-text: #1e293b;
+      --shadow: 0 4px 18px rgba(0, 0, 0, 0.04);
+      color-scheme: light;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    html, body {
+      background-color: var(--bg) !important;
+      color: var(--text-main);
+      min-height: 100vh;
+      margin: 0;
+      padding: 0;
+      overflow-x: hidden;
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* 顶部导航 */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--card-bg) !important;
+      border: 1px solid var(--card-border);
+      padding: 16px 24px;
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      transition: all 0.25s ease;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .brand-icon {
+      background: var(--brand-icon-bg) !important;
+      width: 46px;
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      border: 1px solid var(--brand-icon-border);
+      color: var(--brand-icon-color);
+      transition: all 0.25s ease;
+    }
+    .brand-info h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text-main);
+    }
+    .brand-info p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .badge-success { background: var(--success-bg); color: var(--success); }
+    .badge-danger { background: var(--danger-bg); color: var(--danger); }
+    .badge-warning { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* 按钮基础 */
+    button, .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      border-radius: 8px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.2s ease;
+      text-decoration: none;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: var(--primary-hover);
+      box-shadow: 0 0 12px rgba(37, 99, 235, 0.4);
+    }
+    .btn-outline {
+      background: transparent;
+      border-color: var(--card-border);
+      color: var(--text-sub);
+    }
+    .btn-outline:hover {
+      background: var(--card-hover);
+      color: var(--text-main);
+      border-color: var(--primary);
+    }
+    .btn-danger {
+      background: var(--danger-bg);
+      color: var(--danger);
+      border-color: rgba(239, 68, 68, 0.2);
+    }
+    .btn-danger:hover {
+      background: var(--danger);
+      color: #fff;
+    }
+    .btn-sm {
+      padding: 6px 12px;
+      font-size: 12px;
+    }
+
+    /* 主网格 */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    /* 卡片 */
+    .card {
+      background: var(--card-bg) !important;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      box-shadow: var(--shadow);
+      transition: all 0.25s ease;
+    }
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-sub);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .card-title-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-title svg {
+      width: 16px;
+      height: 16px;
+      color: var(--primary);
+    }
+    .card-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--divider);
+      font-size: 13px;
+    }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: var(--text-muted); }
+    .info-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: var(--text-main);
+      font-weight: 500;
+    }
+
+    /* 版本单选卡片组 */
+    .ver-cards-container {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .ver-card-item {
+      background: var(--token-bg) !important;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      user-select: none;
+    }
+    .ver-card-item:hover {
+      border-color: var(--primary);
+      background: var(--card-hover) !important;
+    }
+    .ver-card-item.active {
+      border-color: var(--primary) !important;
+      background: rgba(59, 130, 246, 0.08) !important;
+      box-shadow: 0 0 0 1px var(--primary);
+    }
+    html[data-theme="light"] .ver-card-item.active {
+      background: rgba(37, 99, 235, 0.08) !important;
+    }
+
+    .ver-info-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: nowrap;
+    }
+    .ver-tag-pill {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .ver-tag-pill.beta {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+    }
+    .ver-tag-pill.stable {
+      background: rgba(59, 130, 246, 0.15);
+      color: var(--primary);
+    }
+    .ver-tag-pill.history {
+      background: rgba(148, 163, 184, 0.15);
+      color: var(--text-sub);
+    }
+    .ver-number {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .custom-radio {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+    .ver-card-item.active .custom-radio {
+      border-color: var(--primary);
+    }
+    .custom-radio::after {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--primary);
+      transform: scale(0);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .ver-card-item.active .custom-radio::after {
+      transform: scale(1);
+    }
+
+    .history-versions-toggle {
+      font-size: 12px;
+      color: var(--primary);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: opacity 0.2s ease;
+    }
+    .history-versions-toggle:hover {
+      opacity: 0.8;
+    }
+    .history-dropdown {
+      display: none;
+      margin-top: 8px;
+      background: var(--token-bg) !important;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 6px;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .history-dropdown.show {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .history-item {
+      padding: 8px 12px;
+      font-size: 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--text-sub);
+      transition: background 0.15s ease;
+    }
+    .history-item:hover {
+      background: var(--card-hover) !important;
+      color: var(--text-main);
+    }
+
+    /* 终端卡片 */
+    .terminal-card {
+      background: var(--card-bg) !important;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: var(--shadow);
+      transition: all 0.25s ease;
+    }
+    .terminal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .terminal-controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      font-size: 12px;
+      color: var(--text-sub);
+    }
+    .terminal-body {
+      background: var(--terminal-bg) !important;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--terminal-text);
+      height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .terminal-body::-webkit-scrollbar { width: 6px; }
+    .terminal-body::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+    .log-info { color: #94a3b8; }
+    .log-warn { color: #f59e0b; }
+    .log-error { color: #ef4444; font-weight: 600; }
+    .log-success { color: #10b981; font-weight: 600; }
+    html[data-theme="light"] .log-info { color: #334155; }
+    html[data-theme="light"] .log-warn { color: #b45309; font-weight: 500; }
+    html[data-theme="light"] .log-error { color: #dc2626; font-weight: 600; }
+    html[data-theme="light"] .log-success { color: #059669; font-weight: 600; }
+
+    /* ============================================================ */
+    /* 核心置顶优化：Toast 通知置顶居中灵动岛风格，绝不沉底！ */
+    /* ============================================================ */
+    #toast {
+      position: fixed;
+      top: 24px;
+      left: 50%;
+      transform: translate(-50%, -30px);
+      padding: 12px 24px;
+      background: var(--card-bg);
+      color: var(--text-main);
+      border: 1px solid var(--primary);
+      border-radius: 30px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 12px 35px rgba(0, 0, 0, 0.4);
+      opacity: 0;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      pointer-events: none;
+      z-index: 999999;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+    #toast.show {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+
+    /* ============================================================ */
+    /* 核心置顶优化：所有 Modal 弹窗贴近顶部展开，绝不在底部被忽略！ */
+    /* ============================================================ */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      display: flex;
+      align-items: flex-start; /* 关键：靠顶展示 */
+      justify-content: center;
+      padding: 20px;
+      padding-top: calc(40px + env(safe-area-inset-top, 0px));
+      z-index: 99999;
+      opacity: 0;
+      pointer-events: none;
+      overflow-y: auto;
+      transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .modal-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .modal-box {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      width: 100%;
+      max-width: 440px;
+      padding: 24px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5);
+      margin-top: 20px;
+      transform: scale(0.92) translateY(-10px);
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .modal-overlay.active .modal-box {
+      transform: scale(1) translateY(0);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .modal-icon-badge {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .modal-icon-badge.warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .modal-icon-badge.danger { background: var(--danger-bg); color: var(--danger); }
+    .modal-icon-badge.primary { background: rgba(59, 130, 246, 0.15); color: var(--primary); }
+    .modal-title { font-size: 16px; font-weight: 600; color: var(--text-main); }
+    .modal-msg { font-size: 13px; color: var(--text-sub); line-height: 1.6; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 6px; }
+    .modal-actions button { flex: 1; min-height: 40px; justify-content: center; font-size: 13px; }
+
+    /* 专属升级终端弹窗 */
+    #upgradeModal .modal-box {
+      max-width: 680px;
+      width: 95%;
+      padding: 20px;
+    }
+    .upgrade-terminal-body {
+      background: var(--terminal-bg) !important;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--terminal-text);
+      height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #3b82f6;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* 移动端全面屏深度适配 */
+    @media (max-width: 768px) {
+      body {
+        padding: 12px;
+        padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+        gap: 14px;
+      }
+      header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 14px;
+        padding: 14px 16px;
+      }
+      .brand { gap: 12px; }
+      .brand-icon { width: 40px; height: 40px; }
+      .brand-info h1 { font-size: 16px; }
+      .brand-info p { font-size: 11px; }
+      .header-actions {
+        width: 100%;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .header-actions button, .header-actions a {
+        flex: 1;
+        justify-content: center;
+        min-height: 42px;
+      }
+      #btnWebConsole { flex-basis: 100%; }
+      .grid {
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+      .card { padding: 16px; gap: 14px; }
+      .terminal-card { padding: 16px; gap: 10px; }
+      .terminal-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+      .terminal-controls {
+        width: 100%;
+        justify-content: space-between;
+      }
+      .terminal-body {
+        height: 220px;
+        font-size: 11px;
+        padding: 10px;
+      }
+      .modal-overlay {
+        padding: 12px;
+        padding-top: calc(24px + env(safe-area-inset-top, 0px));
+      }
+      .modal-box { padding: 18px; }
+      #upgradeModal .modal-box { width: 100%; max-width: 100%; }
+      .upgrade-terminal-body { height: 260px; }
+      button, .btn {
+        min-height: 38px;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+      }
+    }
