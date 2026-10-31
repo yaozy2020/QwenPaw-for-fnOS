@@ -2,7 +2,6 @@
 *.fpk
 *.fpk.sha256
 build/
-AUDIT_REPORT.md
 node_modules/
 
 # 上游源码（由 scripts/sync-upstream.sh 按 .upstream-version 物化，不入库）
