@@ -57,11 +57,12 @@ else
     echo "  [SKIP] shellcheck 不可用（网络/二进制缺失），跳过本层"
 fi
 
-# ── [3/3] 内嵌 spawn 脚本展开验证 ──
+# ── [3/4] 内嵌 spawn 脚本展开验证 ──
+# v2 起 spawn 逻辑迁入监督者(kernel.rs process_group),瘦桥无内嵌启动脚本,
+# 本层常态提取 0 段 —— 保留作哨兵:若未来重新出现内嵌启动脚本即自动激活。
 echo "[3/4] 内嵌 spawn 脚本展开验证 ..."
 API_CGI="$ROOT/app/ui/api.cgi"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 
 python3 - "$API_CGI" "$WORK/spawn_harness.sh" "$WORK/names.txt" <<'PY'
 import re, sys
@@ -147,17 +148,22 @@ done < "$WORK/names.txt"
 # ── [4/4] api.cgi 桥接输出 JSON 有效性 ──
 echo "[4/4] api.cgi 桥接 JSON 有效性 ..."
 BR="$ROOT/app/ui/api.cgi"
-FAKE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
+FAKE_PORT="$(free_port)"
+FAIL_PORT="$(free_port)"
 FAKE_TOKEN_DIR="$(mktemp -d)"
 echo "lint-fake-token-lint-fake-token-lint-fake-token" > "$FAKE_TOKEN_DIR/supervisor-token"
 
-# 一次性假监督者:/kernel/versions 回 PyPI 原始形状;/status 回纯文本(模拟上游非 JSON)
-python3 - "$FAKE_PORT" <<'PY' &
+# 一次性假监督者 ×2,请求落盘(reqlog)防"服务没起来→测了个空"的空转通过:
+#   FAKE_PORT  /kernel/versions 回乱序 PyPI 形状(故意回旧 latest_stable);其余回纯文本
+#   FAIL_PORT  一律回 err_json 形状(模拟监督者的上游 PyPI 失败)
+python3 - "$FAKE_PORT" "$WORK/reqlog" <<'PY' &
 import http.server, json, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        open(sys.argv[2], "a").write(self.path + "\n")
         if self.path.startswith("/kernel/versions"):
-            body = json.dumps({"releases": ["2.3.0b2", "2.2.2.post1"],
+            body = json.dumps({"releases": ["2.2.2.post1", "2.3.0b2", "2.9.9", "2.10.0b1", "2.10.0"],
                                "latest_stable": "2.2.2.post1"}).encode()
         else:
             body = b"invalid token"
@@ -171,8 +177,39 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 FAKE_PID=$!
-trap 'kill $FAKE_PID 2>/dev/null; rm -rf "$FAKE_TOKEN_DIR"' EXIT
-sleep 0.5
+python3 - "$FAIL_PORT" "$WORK/reqlog2" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        open(sys.argv[2], "a").write(self.path + "\n")
+        body = '{"ok": false, "success": false, "error": "upstream", "message": "查询 PyPI 失败"}'.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+FAIL_PID=$!
+# 单一 trap 收口(此前两个 EXIT trap 互相覆盖,$WORK 泄漏);INT/TERM 一并清理
+trap 'rm -rf "$WORK" "$FAKE_TOKEN_DIR"; kill "$FAKE_PID" "$FAIL_PID" 2>/dev/null' EXIT INT TERM
+
+# 就绪探测:轮询 /healthz 直至假监督者真正应答(固定 sleep 在慢机偶发假 FAIL)
+ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -s -o /dev/null "http://127.0.0.1:${FAKE_PORT}/healthz" \
+        && grep -q '^/healthz' "$WORK/reqlog" 2>/dev/null; then
+        ready=1
+        break
+    fi
+    sleep 0.2
+done
+if [ "$ready" -ne 1 ]; then
+    echo "  [FAIL] 假监督者未就绪,本层结果不可信"
+    fail=1
+fi
 
 json_field() {  # $1=payload $2=python表达式 → 输出求值结果
     printf '%s' "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)" 2>/dev/null
@@ -195,15 +232,19 @@ else
     fail=1
 fi
 
-# T2 version_list 形状转换:PyPI {releases} → 旧形状 {versions:[{version,is_beta}]}
+# T2 version_list:形状转换 + 语义排序(2.10.0>2.9.9,稳定>预发布)+ latest_stable
+# 推导(假监督者故意回旧值 2.2.2.post1,桥必须推出 2.10.0,不信 PyPI info.version)
 t2="$(bridge_run "action=version_list" "http://127.0.0.1:${FAKE_PORT}")"
 if [ "$(json_field "$t2" "d.get('success')")" = "True" ] \
-    && [ "$(json_field "$t2" "d['versions'][0]['is_beta']")" = "True" ] \
-    && [ "$(json_field "$t2" "d['versions'][1]['is_beta']")" = "False" ] \
-    && [ "$(json_field "$t2" "d.get('latest_stable')")" = "2.2.2.post1" ]; then
-    echo "  [  OK ] version_list 形状转换 + is_beta 判定"
+    && [ "$(json_field "$t2" "d['versions'][0]['version']")" = "2.10.0" ] \
+    && [ "$(json_field "$t2" "d['versions'][0]['is_beta']")" = "False" ] \
+    && [ "$(json_field "$t2" "d['versions'][1]['version']")" = "2.10.0b1" ] \
+    && [ "$(json_field "$t2" "d['versions'][1]['is_beta']")" = "True" ] \
+    && [ "$(json_field "$t2" "d['versions'][2]['version']")" = "2.9.9" ] \
+    && [ "$(json_field "$t2" "d.get('latest_stable')")" = "2.10.0" ]; then
+    echo "  [  OK ] version_list 形状转换 + 语义排序 + latest_stable 推导"
 else
-    echo "  [FAIL] version_list 转换错误: ${t2:0:120}"
+    echo "  [FAIL] version_list 转换错误: ${t2:0:160}"
     fail=1
 fi
 
@@ -213,6 +254,29 @@ if [ "$(json_field "$t3" "d.get('success')")" = "False" ]; then
     echo "  [  OK ] 监督者不可达 → 合法兜底 JSON"
 else
     echo "  [FAIL] 不可达兜底非法: ${t3:0:120}"
+    fail=1
+fi
+
+# T4 upgrade_logs:pip 日志含引号/反斜杠时必须经 json.dumps 转义(审计 major ——
+# 旧实现裸拼,升级日志一出引号就产出非法 JSON,且该路径此前零覆盖)
+printf 'Downloading "qwenpaw" wheel\npath C:\\Users\\x\n' > "$FAKE_TOKEN_DIR/qwenpaw-upgrade.log.pip"
+t4="$(bridge_run "action=upgrade_logs" "http://127.0.0.1:1")"
+if [ "$(json_field "$t4" "d.get('success')")" = "True" ] \
+    && [ "$(json_field "$t4" "len(d.get('logs', []))")" = "2" ] \
+    && [ "$(json_field "$t4" "chr(34) + 'qwenpaw' + chr(34) in d['logs'][0]")" = "True" ]; then
+    echo "  [  OK ] upgrade_logs 引号/反斜杠安全转义"
+else
+    echo "  [FAIL] upgrade_logs 转义失败: ${t4:0:160}"
+    fail=1
+fi
+
+# T5 version_list 上游失败:必须 success:false + 错误透传,绝不伪装"检查完成"
+t5="$(bridge_run "action=version_list" "http://127.0.0.1:${FAIL_PORT}")"
+if [ "$(json_field "$t5" "d.get('success')")" = "False" ] \
+    && [ "$(json_field "$t5" "'查询 PyPI 失败' in d.get('message','')")" = "True" ]; then
+    echo "  [  OK ] version_list 上游失败如实降级"
+else
+    echo "  [FAIL] 上游失败被伪装成成功: ${t5:0:160}"
     fail=1
 fi
 

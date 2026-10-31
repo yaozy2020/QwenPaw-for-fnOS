@@ -255,7 +255,9 @@ async fn kernel_install(
         format!("{}/venv", state.home_dir),
         spec,
         mirror.to_string(),
-        format!("{}/qwenpaw-upgrade", state.var_dir),
+        // 与 app/ui/api.cgi 的 upgrade_logs 读取路径一致 —— 三方文件名曾各不相同,
+        // 升级弹窗日志恒为空(独立审计 major,勿再漂移)
+        format!("{}/qwenpaw-upgrade.log.pip", state.var_dir),
     );
     if started {
         state.events.publish(render_snapshot(&state));
@@ -272,12 +274,14 @@ async fn kernel_versions(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    // 全量原始键名交桥接层排序:字典序会截丢 2.10.0 这类版本,语义排序在
+    // 桥内 python(真实缩进可测)完成,监督者不做截断(独立审计 minor)。
     let probe = "\
 import urllib.request, json
 req = urllib.request.Request('https://pypi.org/pypi/qwenpaw/json', headers={'User-Agent': 'QwenPaw'})
 data = json.loads(urllib.request.urlopen(req, timeout=5).read())
-releases = sorted(data.get('releases', {}).keys())
-print(json.dumps({'releases': releases[-14:], 'latest_stable': data['info']['version']}))";
+releases = list(data.get('releases', {}).keys())
+print(json.dumps({'releases': releases, 'latest_stable': data['info']['version']}))";
     match std::process::Command::new("python3").arg("-c").arg(probe).output() {
         Ok(o) if o.status.success() => {
             let payload: serde_json::Value =

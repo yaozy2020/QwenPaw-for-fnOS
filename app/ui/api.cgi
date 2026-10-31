@@ -8,9 +8,14 @@ TOKEN_FILE="${VAR_DIR}/supervisor-token"
 
 TOKEN=$(tr -d '[:space:]' < "${TOKEN_FILE}" 2>/dev/null)
 
-# query 参数提取
+# query 参数提取。%XX 必须解码(encodeURIComponent 发来的 %2B 即 '+',PEP440
+# 本地版本段);'+' 保留原样不转空格。%b 会解释 \n 等序列 —— 版本号/端口/行数
+# 的合法取值不含反斜杠,可接受(审计 minor:原 tr -d '+' 曾把 +cpu 剥成 cpu)。
+urldecode() {
+    printf '%b' "${1//%/\\x}"
+}
 qget() {  # $1=key → 输出值
-    echo "$QUERY_STRING" | tr '&' '\n' | grep "^${1}=" | head -1 | cut -d= -f2- | tr -d '+'
+    urldecode "$(echo "$QUERY_STRING" | tr '&' '\n' | grep "^${1}=" | head -1 | cut -d= -f2-)"
 }
 
 action=$(echo "$QUERY_STRING" | tr '&' '\n' | grep '^action=' | head -1 | cut -d= -f2-)
@@ -37,7 +42,12 @@ case "$action" in
         path="/kernel/install"
         ver=$(qget version)
         mir=$(qget mirror)
-        body="{\"version\":\"${ver:-latest}\",\"mirror\":\"${mir}\"}"
+        # JSON 体经 python3 构造,杜绝 shell 拼串注入(审计 nit);无 python3 时退化转义
+        if command -v python3 >/dev/null 2>&1; then
+            body=$(python3 -c 'import json,sys; print(json.dumps({"version": sys.argv[1] or "latest", "mirror": sys.argv[2]}))' "${ver:-latest}" "${mir}")
+        else
+            body="{\"version\":\"${ver//\"/\\\"}\",\"mirror\":\"${mir//\"/\\\"}\"}"
+        fi
         ;;
     upgrade_status)
         # 旧形状:{success, upgrading} —— 从监督者快照的 install.running 转换
@@ -45,12 +55,26 @@ case "$action" in
         path="/status"
         ;;
     upgrade_logs)
-        # pip 日志尾部(监督者落盘文件,同用户直接读)
+        # pip 日志尾部(监督者落盘,与 api.rs /kernel/install 写入路径一致)。
+        # 必须经 json.dumps 转义:pip 报错信息含引号/反斜杠,裸拼必产出非法 JSON
+        # (审计 major —— r7 事故同族,曾只转义换行)
         PIP_LOG="${VAR_DIR}/qwenpaw-upgrade.log.pip"
         echo "Content-Type: application/json"
         echo ""
-        logs=$(tail -n 40 "${PIP_LOG}" 2>/dev/null | tr '\n' '\001' | sed 's/\x01/\\n/g')
-        echo "{\"success\":true,\"logs\":[\"${logs}\"]}"
+        if command -v python3 >/dev/null 2>&1; then
+            python3 - "$PIP_LOG" <<'PY'
+import json, sys
+logs = []
+try:
+    with open(sys.argv[1], errors="replace") as f:
+        logs = f.read().splitlines()[-40:]
+except OSError:
+    pass
+print(json.dumps({"success": True, "logs": logs}))
+PY
+        else
+            echo '{"success":false,"message":"环境缺少 python3,无法读取升级日志"}'
+        fi
         exit 0
         ;;
     version_list)
@@ -64,7 +88,16 @@ case "$action" in
         method="POST"
         path="/port"
         newp=$(qget port)
-        body="{\"port\":${newp:-18088}}"
+        case "$newp" in
+            ''|*[!0-9]*)
+                # 端口进 JSON 数字位,非纯数字一律拒绝(审计 nit)
+                echo "Content-Type: application/json"
+                echo ""
+                echo '{"success":false,"message":"端口参数非法,需为纯数字"}'
+                exit 0
+                ;;
+        esac
+        body="{\"port\":${newp}}"
         ;;
     backup_download|check_tunnel)
         echo "Content-Type: application/json"
@@ -81,48 +114,86 @@ resp=$(curl -s --max-time 30 -X "$method" \
     ${body:+-d "$body"} \
     "${SUP}${path}")
 
-# upgrade_status:旧形状转换(控制台轮询升级标志)
+# upgrade_status:旧形状升级为 {success,upgrading,phase,error} —— 前端完成/失败
+# 判定以 phase(done/failed)为准,v1 靠日志文本找中文标记在 v2 永不出现(审计 major)
 if [ "$action" = "upgrade_status" ]; then
-    upgrading=$(echo "$resp" | python3 -c "
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    print('true' if d.get('install', {}).get('running') else 'false')
-except Exception:
-    print('false')
-" 2>/dev/null)
     echo "Content-Type: application/json"
     echo ""
-    echo "{\"success\":true,\"upgrading\":${upgrading:-false}}"
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$resp" | python3 -c '
+import json, sys
+out = {"success": False, "upgrading": False, "phase": "idle", "error": ""}
+try:
+    d = json.load(sys.stdin)
+    i = d.get("install", {}) if isinstance(d, dict) else {}
+    out["success"] = bool(d.get("success", True)) if isinstance(d, dict) else False
+    out["upgrading"] = bool(i.get("running"))
+    out["phase"] = str(i.get("phase", "idle"))
+    out["error"] = str(i.get("error", ""))
+except Exception as e:
+    out["error"] = "监督者未响应: %s" % e
+print(json.dumps(out))
+'
+    else
+        echo '{"success":false,"upgrading":false,"phase":"idle","error":"环境缺少 python3"}'
+    fi
     exit 0
 fi
 
-# version_list:监督者吐 PyPI 原始形状 {releases,latest_stable};
-# 控制台吃旧形状 {success,versions:[{version,is_beta}],latest_stable} —— 桥接转换
+# version_list:监督者交回 PyPI 全量原始键名;语义排序(2.10.0>2.9.9,稳定>
+# 预发布)、is_beta 判定、最新稳定版推导都在这里做 —— 控制台取 versions[0]
+# 前的第一个 is_beta 作"最新测试",降序排列才能取到真正最新的 beta。
+# 上游失败(err_json/形状异常)必须 success:false 透传,绝不伪装"检查完成"。
 if [ "$action" = "version_list" ]; then
     echo "Content-Type: application/json"
     echo ""
-    printf '%s' "$resp" | python3 -c '
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$resp" | python3 -c '
 import json, re, sys
+out = {"success": False, "versions": [], "latest_stable": "", "message": ""}
 try:
     d = json.load(sys.stdin)
-except Exception:
-    print(json.dumps({"success": False, "versions": [], "latest_stable": ""}))
-    raise SystemExit
-vers = [{"version": v, "is_beta": bool(re.search(r"(?:a|b|rc)[0-9]", v))}
-        for v in d.get("releases", [])]
-print(json.dumps({"success": True, "versions": vers, "latest_stable": d.get("latest_stable", "")}))
+    if not isinstance(d, dict) or d.get("ok") is False or not isinstance(d.get("releases"), list):
+        out["message"] = (d.get("message") or d.get("error") or "查询 PyPI 失败") if isinstance(d, dict) else "监督者响应形状异常"
+    else:
+        def vkey(v):
+            m = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)", v)
+            if not m:
+                return (0, 0, 0, -1, v)
+            rest = m.group(4) or ""
+            rank = 1 if (rest == "" or rest.startswith(".post")) else 0
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), rank, rest)
+        names = sorted(map(str, d["releases"]), key=vkey, reverse=True)[:14]
+        out["success"] = True
+        out["versions"] = [{"version": v, "is_beta": bool(re.search(r"(?:a|b|rc)[0-9]", v))} for v in names]
+        out["latest_stable"] = next(
+            (v for v in names if re.match(r"^\d+(\.\d+)*(\.post\d+)?$", v)),
+            str(d.get("latest_stable", "")),
+        )
+except Exception as e:
+    out["message"] = "解析失败: %s" % e
+print(json.dumps(out))
 '
+    else
+        echo '{"success":false,"versions":[],"latest_stable":"","message":"环境缺少 python3,无法解析版本列表"}'
+    fi
     exit 0
 fi
 
-# 非 JSON 防御:监督者未响应或返回纯文本(如 invalid token)时,一律输出兜底对象。
-# 纪律:绝不透传非 JSON —— 否则控制台 res.json() 抛异常,所有动态渲染静默失效,
-# 页面停在 HTML 静态默认值(运行中 + PID "-"),看似活着实则全断(r7 闭环教训)。
-case "$resp" in
-    \{*) : ;;
-    *) resp='{"success":false,"message":"监督者未响应,请稍后重试"}' ;;
-esac
+# 非 JSON 防御:监督者未响应/返回纯文本/JSON 被截断,一律替换为兜底对象,
+# 绝不透传 —— 否则控制台 res.json() 抛异常,所有动态渲染静默失效,页面停在
+# HTML 静态默认值(r7 闭环事故)。有 python3 时做完整 json.loads 校验(审计
+# minor:仅查首字符拦不住截断 JSON);无 python3 退化为首尾花括号启发式。
+if command -v python3 >/dev/null 2>&1; then
+    if ! printf '%s' "$resp" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+        resp='{"success":false,"message":"监督者未响应,请稍后重试"}'
+    fi
+else
+    case "$resp" in
+        \{*) : ;;
+        *) resp='{"success":false,"message":"监督者未响应,请稍后重试"}' ;;
+    esac
+fi
 echo "Content-Type: application/json"
 echo ""
 echo "$resp"

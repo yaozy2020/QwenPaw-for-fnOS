@@ -1401,7 +1401,11 @@
         if (statusRes.ok) {
           const sdata = await statusRes.json();
           const terminalText = document.getElementById("upTerminal").innerText;
-          const isDone = terminalText.includes("QwenPaw 已重启") || terminalText.includes("升级成功") || terminalText.includes("升级失败");
+          // v2 完成判据 = 桥转发的 install.phase(done/failed);v1 靠日志文本找
+          // 中文标记在 v2 的 pip 流水里永不出现,弹窗曾永转(独立审计 major)
+          const isDone = sdata.phase === "done" || sdata.phase === "failed"
+            || terminalText.includes("升级成功") || terminalText.includes("升级失败");
+          const isFailed = sdata.phase === "failed" || terminalText.includes("升级失败");
 
           if (!sdata.upgrading && isDone) {
             clearInterval(upgradePollTimer);
@@ -1411,7 +1415,7 @@
             document.getElementById("upDoneIcon").style.display = "inline-block";
             document.getElementById("btnUpClose").style.display = "block";
 
-            if (terminalText.includes("升级失败")) {
+            if (isFailed) {
               document.getElementById("upTitle").innerText = "升级遇到问题";
               document.getElementById("upSubTitle").innerText = "执行遇到异常退出，请查看上方详细日志";
               document.getElementById("upDoneIcon").style.color = "var(--danger)";
