@@ -172,8 +172,8 @@ start_service() {
         fi
     fi
 
-    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec setsid python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
-    nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    setsid bash -c "${cmd}" </dev/null >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
     sleep 2
@@ -276,8 +276,8 @@ restart_service() {
         rm -f "${PID_FILE}"
     fi
 
-    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec setsid python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
-    nohup bash -c "${cmd}" >> "${LOG_FILE}" 2>&1 &
+    local cmd="export HOME=${HOME_DIR} && export QWENPAW_WORKING_DIR=${SHARE_DIR} && export QWENPAW_DEPENDENCY_STATE_DIR=${SHARE_DIR}/dependency-environments && export QWENPAW_AUTH_ENABLED=true && export PATH=/var/apps/nodejs_v24/target/bin:\$PATH && source ${VENV_DIR}/bin/activate && exec python3 -m qwenpaw app --host 0.0.0.0 --port $(get_service_port)"
+    setsid bash -c "${cmd}" </dev/null >> "${LOG_FILE}" 2>&1 &
     echo $! > "${PID_FILE}"
 
     sleep 2
@@ -335,7 +335,7 @@ change_port() {
     fi
 
     # 3. 彻底杀死旧 PID，并直接拉起绑定新端口的进程
-    nohup bash -c "
+    setsid bash -c "
         sleep 1
         if [ -f '${PID_FILE}' ]; then
             old_pid=\$(head -n 1 '${PID_FILE}' | tr -d '[:space:]')
@@ -358,7 +358,7 @@ change_port() {
         source ${VENV_DIR}/bin/activate
         setsid python3 -m qwenpaw app --host 0.0.0.0 --port ${new_port} >> ${LOG_FILE} 2>&1 &
         echo \$! > ${PID_FILE}
-    " >/dev/null 2>&1 &
+    " </dev/null >/dev/null 2>&1 &
 
     echo "Content-Type: application/json"
     echo ""
@@ -461,7 +461,7 @@ upgrade_service() {
 
     local upgrade_cmd="source ${VENV_DIR}/bin/activate && PYTHONUNBUFFERED=1 pip install --upgrade ${pkg_spec} ${mirror_url} 2>&1"
 
-    nohup bash -c "
+    setsid bash -c "
         echo '=== QwenPaw 升级开始 ===' >> ${UPGRADE_LOG_FILE}
         echo '时间: $(date)' >> ${UPGRADE_LOG_FILE}
         echo '' >> ${UPGRADE_LOG_FILE}
@@ -502,7 +502,7 @@ upgrade_service() {
         fi
         rm -f ${UPGRADE_PID_FILE}
         rm -rf ${UPGRADE_LOCK_DIR}
-    " &
+    " </dev/null &
     echo $! > "${UPGRADE_PID_FILE}"
 
     sleep 1
