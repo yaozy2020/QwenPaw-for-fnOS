@@ -156,6 +156,13 @@ const API_BASE = (function() {
       return `${secs}秒`;
     }
 
+    function formatMem(kb) {
+      if (!kb || kb <= 0) return "-";
+      if (kb >= 1024 * 1024) return (kb / 1024 / 1024).toFixed(2) + " GB";
+      if (kb >= 1024) return (kb / 1024).toFixed(1) + " MB";
+      return `${kb} KB`;
+    }
+
     // 服务状态监控 (全空值保护，稳健守护)
     async function fetchStatus() {
       if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
@@ -170,8 +177,13 @@ const API_BASE = (function() {
         const valUptime = document.getElementById("valUptime");
         const valVersion = document.getElementById("valVersion");
         const valAuth = document.getElementById("valAuthStatus");
+        const valCpu = document.getElementById("valCpu");
+        const valMem = document.getElementById("valMem");
 
         const notInstalled = data.installed === false;
+        // CPU/内存默认 "-",运行中再覆写(口径:监督者 300ms 采样,占总 CPU 百分比)
+        if (valCpu) valCpu.innerText = "-";
+        if (valMem) valMem.innerText = "-";
 
         if (notInstalled) {
           // 内核未安装（首次安装模式）：提示去版本管理安装
@@ -213,6 +225,8 @@ const API_BASE = (function() {
               valUptime.innerText = "已就绪";
             }
           }
+          if (valCpu) valCpu.innerText = typeof data.cpu === "number" ? data.cpu.toFixed(1) + "%" : "-";
+          if (valMem) valMem.innerText = formatMem(data.memKB);
         } else if (!notInstalled) {
           if (badge) {
             badge.className = "badge badge-danger";
