@@ -72,15 +72,57 @@
 | 停止应用 | 不变 | 停止(停内核) | 下线 |
 | 监督者崩溃 | 不变 | — | 存活,监督者重启后收养 |
 
-## 6. 需要确认的开放问题
+## 6. 需要确认的开放问题(2026-10-31 调研后修订)
 
-1. fnOS 网关对 SSE 的缓冲行为未知——实现时以实测为准,轮询兜底常驻
+1. ~~fnOS 网关对 SSE 的缓冲行为未知~~ → **已解决**:dsh 的 SSE(visitors/status/logs/update 四条流)在 fnOS 网关上生产运行,配方实证有效(X-Accel-Buffering: no + 15s 心跳注释行对抗网关 300s read_timeout + 首帧全量快照 + 自适应降频)
 2. 监督者监听端口的冲突自愈(对齐现有 19091→18088 模式)
 3. b1(2.3.0b1)与 b2 的托管子进程行为差异——b2 验证通过后,b1 亦走同一机制
 4. 日志轮转:qwenpaw.log 当前无限增长,监督者启动时顺带处理(保留最近 N MB)
+5. 统一网关入口下,桌面图标双入口(本体/控制台)的 manifest 配置方式(desktop_applaunchname 与 gatewayPrefix 的对应关系)
 
 ## 7. 实施切分
 
 - **v2.0.0-alpha**:监督者骨架(status/start/stop/install+SSE/收养)+ cgi 瘦桥 + 控制台接新 API;manifest main 指向监督者
 - **v2.1**:等待/引导页打磨、psutil 概览、日志轮转
 - 技术栈:FastAPI + uvicorn + sse-starlette + psutil,**依赖 wheels 随 fpk 分发、离线安装**(见 D9);监督者 venv 与内核 venv 分离,互不影响
+
+
+## 8. 调研结论(2026-10-31,三路实证:dsh 源码深读 / 官方文档全量 / 同类开源对比)
+
+> 调研方式:dsh 后端全量源码深读(MIT,单二进制 Go,依赖仅 creack/pty);官方文档 15 页全量;同类项目对比(CasaOS/1Panel/Dockge/HA Supervisor/supervisord/vLLM/Jupyter)。
+
+### 8.1 对既有决策的修订
+
+| 决策 | 调研结论 | 修订 |
+|:--|:--|:--|
+| D7(SSE) | **风险大幅降级**:dsh 的四条 SSE 流在 fnOS 网关上生产运行;血泪配方齐备 | 采纳 dsh 配方(见 8.2-S2) |
+| D12(停止语义) | **官方契约比想象的更窄**:平台 stop 只 TERM PID 文件里的单个 pid(官方 Native 示例:TERM→10s 轮询→KILL→清理),**平台不做任何监督**;setsid/进程组在官方文档属未定义区(既无允许也无禁止) | 监督者收到 TERM 必须自己级联停内核;setsid 已实测可用,保留但标注"未定义区" |
+| 入口模型(新增 D10) | 官方三种入口:端口服务(与 NAS 登录态无关)/ CGI(明确不适合后台进程、流式、长请求)/ **统一网关**(复用登录态、支持 WebSocket、注入 X-Trim-* 用户上下文);index.cgi 文档原文:"需要后台进程、流式响应、长时间请求时,请使用端口服务或统一网关" | **采用统一网关**(gatewaySocket + gatewayPrefix):监督者 API 与控制面板走同一条网关入口,index.cgi/api.cgi 退役(dsh 同款:admin unix socket + 网关) |
+| 进度推送(新增 D11) | 五项目实证排行:任务落库+轮询兜底(1Panel 主干)> SSE+心跳 > WebSocket(网关兼容风险最高)> 消息总线(过重);HA 的"推送+REST 双轨"最稳;**无编造百分比**是 dsh/npm 的共同纪律 | 任务对象常驻内存 + 日志落盘(监督者重启后可恢复显示)+ SSE 推送 + 轮询兜底,四件套齐上 |
+| /proc 收养(新增 D13) | dsh 的实现规范:cmdline 按 NUL 切分,按 argv 特征(basename 集合+子命令+端口)匹配取最大 pid;僵尸判定看 `/proc/<pid>/stat` **最后一个右括号之后**的状态字符(不能只看目录存在);重发现结果缓存 2s;双 PID 文件(监督者自身/被管进程)分离且被管 pid 随重发现刷新 | 照抄该规范 |
+
+### 8.2 必须原样继承的 dsh 血泪清单(每条都有线上事故背书)
+
+- S1 SSE 心跳:15s 发 `: ping` 注释行——fnOS 网关 300s read_timeout 掐空闲连接,曾致"实际在下载却一直 0%"
+- S2 前端 EventSource:onerror **绝不永久 close**(曾致重连后再也连不上),指数退避 1s→15s,重连靠后端首帧快照追平
+- S3 **绝不按进程名杀**:pkill -x 杀掉了持锁的 node,留下 120s 陈旧锁——只按 PID/进程组杀
+- S4 取消只发信号,终态唯一写入者是安装协程(否则取消与收尾竞态会误写状态);取消/失败删光半成品与缓存
+- S5 僵尸判定看 stat 状态字段,不看 /proc 目录存在
+- S6 推送节流 300ms + 关键节点强推;Seq 作为前端"结果只提示一次"的去重键
+- S7 配置原子写:tmp → fsync → rename,0600
+- S8 不编造百分比:只报"已获取 N 项"+ 尾行消息
+
+### 8.3 技术栈与先例确认
+
+- **Python 常驻监督者有直系先例**:HA Supervisor(asyncio+aiohttp,生产级最重的 Python 管理后端)、vLLM(FastAPI 常驻服务管 Python 子进程)、supervisord(进程语义黄金标准)
+- **无四位一体现成 OSS**(FastAPI+pip 生命周期+监督+进度推送),为组合先例:HA(形态/进度模型)+ supervisord(停止语义)+ 1Panel(任务落库与轮询)+ vLLM(可行性背书)
+- **排除项(均有证据)**:复用 supervisord 进程(XML-RPC+stdin 协议双桥接,成本>自研几个函数)、Docker 化内核(改变分发语义)、systemd 单元(fnOS 无权限模型)、Celery/RQ(单机单对象过重)
+- **依赖极简实证**:dsh 全标准库零框架;五项目无 DB/无消息队列——NAS 规模"文件+内存"即全部状态;FastAPI/uvicorn 保留(用户偏好成熟架构),但依赖清单克制
+
+### 8.4 官方文档关键原文备份
+
+- framework:"如果应用正在运行,飞牛 fnOS 可能会在升级前停止应用,并在升级完成后重新启动";"脚本应尽量具备可重复执行能力"
+- index-cgi:"当应用需要后台进程、WebSocket、流式响应、长时间请求、高流量 API 或复杂 API 时,请使用端口服务或统一网关"
+- app-entry 三模型:端口服务("和 NAS 用户登录态无关")/ CGI / 统一网关("复用系统访问域名、支持 WebSocket、获取网关提供的用户上下文")
+- gateway-registration:gatewaySocket + gatewayPrefix 决定统一网关入口,"protocol 和 port 会被忽略";注入 X-Trim-Userid/Isadmin/Username
+- stop 官方示例:PID 文件单 pid → TERM → 10s 轮询 → KILL → 清理;平台不做监督
