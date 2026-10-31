@@ -148,9 +148,12 @@ const API_BASE = (function() {
       const days = Math.floor(seconds / 86400);
       const hours = Math.floor((seconds % 86400) / 3600);
       const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = Math.floor(seconds % 60);
+      // 进程运行时长须显示到秒:刚重启的 59 秒内只显示"0分钟"会被误读为卡住
       if (days > 0) return `${days}天 ${hours}小时 ${minutes}分`;
       if (hours > 0) return `${hours}小时 ${minutes}分`;
-      return `${minutes}分钟`;
+      if (minutes > 0) return `${minutes}分 ${secs}秒`;
+      return `${secs}秒`;
     }
 
     // 服务状态监控 (全空值保护，稳健守护)
