@@ -5,8 +5,9 @@
 # status→ 监督者存活即应用运行(退出码 0/3,官方约定)
 
 SUP_BIN_CANDIDATES=(
+    "${TRIM_APPDEST}/bin/qwenpaw-supervisor"
     "${TRIM_APPDEST}/app/bin/qwenpaw-supervisor"
-    "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"
+    "/var/apps/qwenpaw/bin/qwenpaw-supervisor"
 )
 VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
 PID_FILE="${VAR_DIR}/supervisor.pid"
