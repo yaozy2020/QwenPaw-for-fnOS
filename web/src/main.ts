@@ -8,6 +8,8 @@ const API_BASE = (function() {
 
     let refreshTimer = null;
     let upgradePollTimer = null;
+    let upgradeStartedAt = 0;
+    let upgradeSeenPhase = null;
 
     let rawVersionList = [];
     let selectedVersion = "2.3.0b1";
@@ -543,15 +545,22 @@ const API_BASE = (function() {
       if (!ok) return;
 
       openUpgradeModal();
+      upgradeStartedAt = Date.now();
+      upgradeSeenPhase = null;
 
+      // 触发即忘:sendBeacon 由浏览器保证页面卸载/切后台时仍尽力送达 ——
+      // iOS 切后台曾把 fetch 连人带请求杀掉,升级指令从未到达监督者(取证:
+      // supervisor.log 无任何 install 事件)。busy 竞争由监督者单槽兜底,
+      // 是否送达由弹窗对 install.phase 的轮询与 10s 启动确认守卫呈现。
+      const url = `${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}&mirror=${encodeURIComponent(currentMirror())}`;
+      let sent = false;
       try {
-        const res = await fetch(`${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}&mirror=${encodeURIComponent(currentMirror())}`, { method: "POST" });
-        const data = await res.json();
-        if (!data.success && !data.message.includes("正在进行中")) {
-          showToast("升级提示: " + (data.message || "任务派发受阻"));
-        }
-      } catch (e) {
-        console.warn("升级请求发送响应（服务可能正在重启）:", e);
+        sent = Boolean(navigator.sendBeacon && navigator.sendBeacon(url));
+      } catch (e) { sent = false; }
+      if (!sent) {
+        try {
+          await fetch(url, { method: "POST", keepalive: true });
+        } catch (e) { /* 送达与否交给弹窗轮询判断 */ }
       }
     }
 
@@ -613,9 +622,26 @@ const API_BASE = (function() {
           const terminalText = document.getElementById("upTerminal").innerText;
           // v2 完成判据 = 桥转发的 install.phase(done/failed);v1 靠日志文本找
           // 中文标记在 v2 的 pip 流水里永不出现,弹窗曾永转(独立审计 major)
-          const isDone = sdata.phase === "done" || sdata.phase === "failed"
+          // phase 必须在本轮会话内发生跳变才判定完成 —— 防止上次安装遗留的
+          // 终态 + 本次指令未送达 造成"秒完成"假象
+          if (upgradeSeenPhase === null) upgradeSeenPhase = sdata.phase;
+          const phaseChanged = sdata.phase !== upgradeSeenPhase;
+          const isDone = (phaseChanged && (sdata.phase === "done" || sdata.phase === "failed"))
             || terminalText.includes("升级成功") || terminalText.includes("升级失败");
-          const isFailed = sdata.phase === "failed" || terminalText.includes("升级失败");
+          const isFailed = (phaseChanged && sdata.phase === "failed") || terminalText.includes("升级失败");
+
+          // 启动确认:10s 后仍无任何 phase 跳变且未在升级 → 指令未送达(切后台被杀)
+          const pending = !sdata.upgrading && !phaseChanged
+            && (sdata.phase === "idle" || sdata.phase === "done" || sdata.phase === "failed");
+          if (pending && Date.now() - upgradeStartedAt > 10000) {
+            clearInterval(upgradePollTimer);
+            upgradePollTimer = null;
+            document.getElementById("upSpinner").style.display = "none";
+            document.getElementById("upTitle").innerText = "升级指令未送达";
+            document.getElementById("upSubTitle").innerText = "请检查网络后关闭本窗口重试";
+            document.getElementById("btnUpClose").style.display = "block";
+            return;
+          }
 
           if (!sdata.upgrading && isDone) {
             clearInterval(upgradePollTimer);

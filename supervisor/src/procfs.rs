@@ -18,6 +18,44 @@ pub fn process_alive(pid: i32) -> bool {
     }
 }
 
+/// 全部后代(按 /proc ppid 树广度优先收集;必须在目标存活时调用 ——
+/// 死后整棵子树 reparent 到 1,按 ppid 再也找不到)。覆盖 b2 shared_worker
+/// 这类双 setsid 自成进程组的直接子进程,以及 worker 再派生的孙进程。
+pub fn descendants_of(pid: i32) -> Vec<i32> {
+    let mut edges: Vec<(i32, i32)> = Vec::new(); // (child, ppid)
+    let Ok(entries) = fs::read_dir("/proc") else { return Vec::new() };
+    for e in entries.flatten() {
+        let Ok(c) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
+        if c == pid {
+            continue;
+        }
+        let Ok(s) = fs::read_to_string(format!("/proc/{c}/stat")) else { continue };
+        let Some(i) = s.rfind(')') else { continue };
+        let ppid = s[i + 2..]
+            .split_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0);
+        edges.push((c, ppid));
+    }
+    let mut out: Vec<i32> = Vec::new();
+    let mut frontier: Vec<i32> = vec![pid];
+    loop {
+        let next: Vec<i32> = edges
+            .iter()
+            .filter(|(_, p)| frontier.contains(p))
+            .map(|(c, _)| *c)
+            .filter(|c| !out.contains(c))
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        out.extend(next.clone());
+        frontier = next;
+    }
+    out
+}
+
 pub fn cpu_ticks(pid: i32) -> (u64, u64) {
     let Some(s) = fs::read_to_string(format!("/proc/{pid}/stat")).ok() else {
         return (0, 0);

@@ -157,6 +157,9 @@ impl KernelManager {
             return;
         }
         let group_ok = procfs::group_of(target) == target;
+        // 自成进程组的后代(b2 shared_worker 双 setsid,及其再派生的孙进程):
+        // 组信号打不到,必须在目标死亡前按 ppid 树收集(死后 reparent 到 1)。
+        let mut kids = procfs::descendants_of(target);
 
         // 1) 组 TERM + 单 TERM(宽限 10s)
         if group_ok {
@@ -169,8 +172,9 @@ impl KernelManager {
             }
             std::thread::sleep(Duration::from_secs(1));
         }
-        // 2) 仍活:单 KILL
+        // 2) 仍活:单 KILL(宽限期内新生的子进程补收)
         if procfs::process_alive(target) {
+            kids.extend(procfs::descendants_of(target));
             unsafe { libc::kill(target, libc::SIGKILL) };
             std::thread::sleep(Duration::from_millis(500));
         }
@@ -178,6 +182,19 @@ impl KernelManager {
         //    已死成员 ESRCH 为空操作。组不可用时跳过(防误伤同组平台进程)。
         if group_ok {
             unsafe { libc::kill(-target, libc::SIGKILL) };
+        }
+        // 4) 自成组的直接子进程:TERM → 1s → KILL 逐个清扫(去重,防孤儿)
+        kids.sort_unstable();
+        kids.dedup();
+        let alive_kids: Vec<i32> = kids.into_iter().filter(|k| procfs::process_alive(*k)).collect();
+        for k in &alive_kids {
+            unsafe { libc::kill(*k, libc::SIGTERM) };
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        for k in &alive_kids {
+            if procfs::process_alive(*k) {
+                unsafe { libc::kill(*k, libc::SIGKILL) };
+            }
         }
         let _ = std::fs::remove_file(&self.cfg.pid_file);
         let mut st = self.state.lock().unwrap();

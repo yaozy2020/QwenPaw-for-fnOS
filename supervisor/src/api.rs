@@ -138,7 +138,7 @@ async fn stop(State(state): State<AppState>, req: Request<axum::body::Body>) -> 
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    state.kernel.stop();
+    state.kernel.stop().await;
     state.events.publish(render_snapshot(&state));
     Json(json!({"ok": true, "success": true, "message": "QwenPaw 已停止"})).into_response()
 }
@@ -147,7 +147,7 @@ async fn restart(State(state): State<AppState>, req: Request<axum::body::Body>) 
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    state.kernel.stop();
+    state.kernel.stop().await;
     match state.kernel.spawn() {
         Ok(pid) => {
             state.events.publish(render_snapshot(&state));
@@ -243,14 +243,25 @@ async fn kernel_install(
         "beta" | "pre" => "--pre qwenpaw".to_string(),
         v => format!("qwenpaw=={v}"),
     };
-    let mirror = match req.mirror.as_str() {
-        "tsinghua" => "https://pypi.tuna.tsinghua.edu.cn/simple",
-        "aliyun" => "https://mirrors.aliyun.com/pypi/simple/",
-        "ustc" => "https://pypi.mirrors.ustc.edu.cn/simple/",
-        _ => "",
+    // 桥送来的是完整 URL(pip-mirror 落盘值);短名映射仅兼容旧调用方。
+    // 此前完整 URL 落进 _ => "" 被静默变成官方源 —— 用户选源失效(实测发现)。
+    // 字符白名单与桥端 set_mirror 一致:mirror 会进 bash -c pip 串,防注入。
+    let mirror = if req.mirror.starts_with("http://") || req.mirror.starts_with("https://") {
+        if req.mirror.chars().all(|c| c.is_ascii_alphanumeric() || ":/._~-".contains(c)) {
+            req.mirror.clone()
+        } else {
+            String::new()
+        }
+    } else {
+        match req.mirror.as_str() {
+            "tsinghua" => "https://pypi.tuna.tsinghua.edu.cn/simple".to_string(),
+            "aliyun" => "https://mirrors.aliyun.com/pypi/simple/".to_string(),
+            "ustc" => "https://pypi.mirrors.ustc.edu.cn/simple/".to_string(),
+            _ => String::new(),
+        }
     };
     // 安装期间先停内核(pip 换包需停服);装完由安装协程自动拉起(on_success)
-    state.kernel.stop();
+    state.kernel.stop().await;
     let started = state.install.try_start(
         format!("{}/venv", state.home_dir),
         spec,
@@ -335,7 +346,7 @@ async fn kernel_reset_auth(
         .unwrap_or_default();
     match std::fs::remove_file(&auth) {
         Ok(_) => {
-            state.kernel.stop();
+            state.kernel.stop().await;
             state.kernel.spawn().unwrap_or(0);
             state.events.publish(render_snapshot(&state));
             Json(json!({"ok": true, "success": true, "message": "管理员密码已重置,服务已重启"}))
@@ -374,7 +385,7 @@ async fn port(
     }
     let _ = std::fs::write(format!("{}/service_port", state.var_dir), format!("{}\n", req.port));
     state.kernel.set_port(req.port);
-    state.kernel.stop();
+    state.kernel.stop().await;
     let pid = state.kernel.spawn().unwrap_or(0);
     state.events.publish(render_snapshot(&state));
     Json(json!({
