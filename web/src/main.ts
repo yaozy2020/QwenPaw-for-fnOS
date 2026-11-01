@@ -242,6 +242,12 @@ const API_BASE = (function() {
         showToast(`正在保存新端口 ${newPort}...`);
         const res = await fetch(`${API_BASE}?action=change_port&port=${newPort}`, { method: "POST" });
         const data = await res.json();
+        if (data.success === false) {
+          // 后端事务失败(端口冲突/回滚完成)必须如实呈现,不提示"已更改"
+          showToast("修改端口失败: " + (data.message || "未知错误"));
+          setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
+          return;
+        }
         showToast(data.message || `端口已变更为 ${newPort}，正在重启...`);
         setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
       } catch (e) {
@@ -263,7 +269,11 @@ const API_BASE = (function() {
         showToast("正在请求重置...");
         const res = await fetch(`${API_BASE}?action=reset_auth`, { method: "POST" });
         const data = await res.json();
-        showToast(data.message || "密码已重置成功！");
+        if (data.success === false) {
+          showToast("重置失败: " + (data.message || "服务重启异常,请查看日志"));
+        } else {
+          showToast(data.message || "密码已重置成功！");
+        }
         setTimeout(fetchStatus, 1200);
       } catch (e) {
         showToast("请求失败: " + e.message);
@@ -361,7 +371,7 @@ const API_BASE = (function() {
       }
     });
 
-    async function fetchVersionList() {
+    async function fetchVersionList(): Promise<boolean> {
       try {
         const res = await fetch(`${API_BASE}?action=version_list&_t=${Date.now()}`);
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -372,17 +382,25 @@ const API_BASE = (function() {
           const firstBeta = rawVersionList.find(v => v.is_beta);
           if (firstBeta) latestBetaVer = firstBeta.version;
           refreshVersionCards();
+          return true;
         }
+        showToast("版本检查失败: " + (data.message || "上游响应异常"));
+        return false;
       } catch (e) {
         console.warn("fetchVersionList err:", e);
+        showToast("版本检查失败: " + (e as Error).message);
         refreshVersionCards();
+        return false;
       }
     }
 
     async function checkOnlineVersions() {
       showToast("正在在线检查 PyPI 最新版本...");
-      await fetchVersionList();
-      showToast(`检查完成！最新稳定: v${latestStableVer}，最新测试: v${latestBetaVer}`);
+      // 检查失败必须如实提示,不伪装"检查完成"(历史版本恒报成功)
+      const ok = await fetchVersionList();
+      if (ok) {
+        showToast(`检查完成！最新稳定: v${latestStableVer}，最新测试: v${latestBetaVer}`);
+      }
     }
 
     function refreshVersionCards() {
@@ -415,6 +433,16 @@ const API_BASE = (function() {
 
     let currentRunningVersion = "2.3.0b1";
 
+    // 降级判定:优先用服务端排序结果(桥内 python 按 PEP 440 语义排序,经 lint
+    // 钉死 2.10.0>2.9.9、稳定>预发布);两个版本都在列表外时退回本地启发式比较。
+    // 纯本地 `-100+数字` 比较曾把 alpha/beta/rc 排错
+    function isDowngradeOf(current: string, selected: string): boolean {
+      const ci = rawVersionList.findIndex(v => v.version === current);
+      const si = rawVersionList.findIndex(v => v.version === selected);
+      if (ci >= 0 && si >= 0) return ci > si;
+      return compareVersion(current, selected) > 0;
+    }
+
     function updateUpgradeButtonText() {
       const btn = document.getElementById("btnUpgradeAction");
       const warnBar = document.getElementById("downgradeWarnBar");
@@ -428,7 +456,7 @@ const API_BASE = (function() {
         return;
       }
 
-      const isDowngrade = compareVersion(currentRunningVersion, selectedVersion) > 0;
+      const isDowngrade = isDowngradeOf(currentRunningVersion, selectedVersion);
       if (isDowngrade) {
         btn.innerText = `⚠️ 降级至 v${selectedVersion}`;
         btn.className = "btn btn-danger btn-sm";
@@ -442,7 +470,7 @@ const API_BASE = (function() {
 
     // 升级执行与专属流式终端 (第 0 毫秒置顶秒开)
     async function checkOrUpgrade() {
-      const isDowngrade = compareVersion(currentRunningVersion, selectedVersion) > 0;
+      const isDowngrade = isDowngradeOf(currentRunningVersion, selectedVersion);
       let ok = false;
 
       if (isDowngrade) {

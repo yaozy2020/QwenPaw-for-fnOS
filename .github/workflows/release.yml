@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -41,26 +41,32 @@ jobs:
             exit 1
           fi
 
+      - name: Verify git exec bits
+        run: |
+          for f in app/ui/api.cgi app/ui/index.cgi cmd/main build.sh tools/fnpack; do
+            mode=$(git ls-files -s "$f" | awk '{print $1}')
+            [ "$mode" = "100755" ] || { echo "::error::$f 应为 100755,实际 ${mode:-缺失}"; exit 1; }
+          done
+
       - name: Preflight + AUDIT
         run: |
-          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
 
       # 控制台经 esbuild 编译(web/src → 单文件 index.html);fnpack 为仓库内
-      # vendor 的静态 ELF（x86-64，任意 Linux 可跑），不再依赖容器
+      # vendor 的静态 ELF（x86-64，任意 Linux 可跑），不再依赖容器。
+      # npm ci 保证按锁文件安装;build.sh 内含 cargo --locked 构建 + FPK 内容审计。
       - name: Build fpk (vendored static fnpack)
         env:
           FPK_OUT: ${{ github.workspace }}
           FNPACK_BIN: ${{ github.workspace }}/tools/fnpack
         run: |
-          chmod +x tools/fnpack
-          npm install --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+          npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
           bash build.sh
           ls -lh qwenpaw_v*.fpk
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: QwenPaw for fnOS ${{ steps.tag.outputs.tag }}

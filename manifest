@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 2.0.0-11
+version                    = 2.0.0-12
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS —— 将个人 AI 助理 QwenPaw 一键部署到飞牛 NAS 的轻量外壳包。</p><h3>外壳特性</h3><p>极简运维控制台（服务启停、日志、内核版本管理、端口修改），内核经 PyPI 镜像在线安装，外壳与内核版本双轨制（外壳升级不影响内核），控制台资源预压缩传输。</p><h3>QwenPaw 内核</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作，定时任务，能力由 Skills 决定且可无限扩展；支持 Ollama 本地大模型完全离线运行，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = all
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "修复监督者二进制查找路径(app/bin 实际安装至 target/bin); 重装自动按版本钉恢复 2.3.0b2"
+changelog                  = "安全整改: 内核安装版本参数改 argv 直传(消除 Shell 注入), 桥接增加方法白名单与同源校验(405/403), Token 全生命周期 0600, 收回 docker 组与未用文件权限; 稳定性: 改端口/重置认证失败回滚, 版本钉元数据核实后原子写入, pip 安装纳入停止/卸载回收, 日志尾部读取与轮转, FPK 白名单打包+构建后审计, CI 增加 Rust test/clippy/build 门禁与执行位检查"

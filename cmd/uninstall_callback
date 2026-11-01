@@ -1,6 +1,6 @@
 #!/bin/bash
 # 飞牛卸载回调脚本：对齐 DSH 安全数据治理标准
-set -e
+# 不用 set -e（工程铁律）；停止走统一 supervisor.pid 口径（旧 qwenpaw.pid 已废弃）
 
 APPNAME="qwenpaw"
 WORKING_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
@@ -10,7 +10,6 @@ SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
 [ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/vol2/@appshare/qwenpaw"
 
 LOG_FILE="${PKGVAR}/qwenpaw-uninstall.log"
-PID_FILE="${PKGVAR}/qwenpaw.pid"
 KEEP_DATA="${wizard_keep_data:-keep}"
 
 log_msg() {
@@ -20,14 +19,16 @@ log_msg() {
 
 log_msg "开始执行 QwenPaw 卸载流程..."
 
-# 1. 停止运行中的进程
+# 1. 停止运行中的进程:统一 supervisor.pid 口径(监督者 TERM 会级联停内核并
+#    回收安装中的 pip;旧 qwenpaw.pid 从未被当前版本写入,仅为兼容清理)
+PID_FILE="${PKGVAR}/supervisor.pid"
 if [ -f "${PID_FILE}" ]; then
     pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
     if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-        log_msg "正在终止服务进程 PID: ${pid}..."
+        log_msg "正在终止监督者 PID: ${pid}(级联停内核)..."
         kill -TERM "${pid}" 2>/dev/null || true
         count=0
-        while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
+        while kill -0 "${pid}" 2>/dev/null && [ $count -lt 15 ]; do
             sleep 1
             count=$((count + 1))
         done
@@ -35,6 +36,7 @@ if [ -f "${PID_FILE}" ]; then
     fi
     rm -f "${PID_FILE}" 2>/dev/null || true
 fi
+rm -f "${PKGVAR}/qwenpaw.pid" 2>/dev/null || true
 
 # 2. 根据用户向导选择处理数据
 case "${KEEP_DATA}" in

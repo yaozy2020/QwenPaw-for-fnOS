@@ -3,7 +3,8 @@
 PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
 PORT_FILE="${PKGVAR}/service_port"
 
-current_port="19091"
+# 默认端口与 install_callback/lib.sh 的全局默认一致(18088;19091 是历史冲突口)
+current_port="18088"
 if [ -f "${PORT_FILE}" ]; then
     p=$(head -n 1 "${PORT_FILE}" | tr -d '[:space:]')
     [ -n "$p" ] && current_port="$p"

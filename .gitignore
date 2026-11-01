@@ -18,3 +18,6 @@ app/www/public/
 
 # Rust 构建产物
 supervisor/target/
+
+# Python 字节码缓存(曾误入仓库)
+__pycache__/

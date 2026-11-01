@@ -5,35 +5,52 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      # action 一律固定到提交 SHA(可变 tag 是供应链风险;SHA 与 tag 对应关系见注释)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - name: Preflight (version SSOT + repo hygiene)
+      - name: Verify git exec bits (CGI/生命周期脚本必须 100755)
         run: |
-          chmod +x scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
-          bash scripts/preflight.sh
+          fail=0
+          for f in app/ui/api.cgi app/ui/index.cgi cmd/main cmd/install_init \
+                   cmd/install_callback cmd/upgrade_init cmd/upgrade_callback \
+                   cmd/uninstall_init cmd/uninstall_callback cmd/config_init \
+                   cmd/config_callback build.sh scripts/lint.sh scripts/preflight.sh \
+                   scripts/sync-upstream.sh scripts/update-qwenpaw.sh scripts/audit-fpk.sh \
+                   tools/fnpack; do
+            mode=$(git ls-files -s "$f" | awk '{print $1}')
+            if [ "$mode" != "100755" ]; then
+              echo "::error::$f 的 git 模式是 ${mode:-缺失},应为 100755"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Preflight (version SSOT + repo hygiene)
+        run: bash scripts/preflight.sh
 
       - name: Verify AUDIT_REPORT.md is up-to-date
         run: python3 scripts/gen-audit.py --check
 
-      - name: Setup web toolchain (esbuild,lint 第 5 层依赖)
-        run: npm install --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+      - name: Setup web toolchain (npm ci,锁文件一致性)
+        run: npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
 
-      - name: Lint (五层:bash -n + shellcheck + 桥接 JSON 门禁 + esbuild 编译)
-        run: |
-          chmod +x scripts/lint.sh scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
-          bash scripts/lint.sh
+      - name: Lint (bash -n + shellcheck + 桥接 JSON 门禁 + 桥安全门禁 + esbuild 编译)
+        run: bash scripts/lint.sh
 
       - name: Console build + artifact sanity (web/src 经 esbuild 出单文件)
         run: |
@@ -42,5 +59,35 @@ jobs:
           grep -q "QwenPaw 控制台" web/dist/index.html
           grep -q "api.cgi" web/dist/index.html
           grep -q "statusCardMount" web/dist/index.html
-          test -f app/ui/index.cgi
-          test -f app/ui/api.cgi
+          test -x app/ui/index.cgi
+          test -x app/ui/api.cgi
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: supervisor
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Show toolchain (ubuntu runner 预装 rust;缺失时此步即失败)
+        run: |
+          cargo --version
+          rustc --version
+
+      # 监督者是安全修复的主战场:测试与 lint 必须真实执行,不允许静默 skip
+      - name: cargo test --locked
+        run: cargo test --locked
+
+      - name: cargo clippy --locked (warnings = errors)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo build --locked --release
+        run: cargo build --locked --release
+
+      - name: Binary sanity
+        run: |
+          test -x target/release/qwenpaw-supervisor
+          file target/release/qwenpaw-supervisor
+          sha256sum target/release/qwenpaw-supervisor

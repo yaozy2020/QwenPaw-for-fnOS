@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-2.0.0-11-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-12-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
@@ -82,7 +82,20 @@ QwenPaw-for-fnOS/
 
 ## 版本历史
 
-### v2.0.0-11（当前）
+### v2.0.0-12（当前）
+
+- **安全(P0)**:内核安装的版本参数不再拼进 `bash -c` —— 改为渠道枚举(latest/beta/精确版本)+ PEP 440 字符白名单 + argv 直传 pip,消除 Shell 命令注入;版本钉入口同一白名单
+- **安全(P0)**:桥接 api.cgi 增加方法白名单(读=GET/变更=POST,违规 405)与 Origin/Referer 同源校验(403),未知 action 404;lint 新增 405/403/404 回归用例
+- **安全(P0)**:supervisor-token 全生命周期 0600(新建即 0600、启动收敛、写入后复核);随机源不可用拒绝启动,不再静默生成弱 Token
+- **安全(P0)**:收回无用权限 —— 不再加入 docker 组;删除零调用的 trim.file.* API scope
+- **稳定性**:改端口与重置认证改事务式 —— 失败回滚旧端口/恢复认证备份并以健康检查(进程存活+端口可达)为准,不再假报成功;`spawn().unwrap_or(0)` 清除
+- **稳定性**:版本钉仅在 pip 成功且 venv 元数据版本核实一致后原子写入(0600);pip 失败/元数据不符绝不污染可用版本钉
+- **稳定性**:SIGTERM 先取消安装(整组回收 pip)再停内核;监督者重启凭 install.pid 清理孤儿 pip;生命周期脚本统一 supervisor.pid 口径(旧 qwenpaw.pid 死引用清除)
+- **发布完整性**:git 执行位修复(CGI/生命周期脚本/构建脚本 100755);build.sh 改 staging 白名单(supervisor/target 不再入包)+ 构建后自动审计(audit-fpk.sh);cargo 构建失败终止出包且先删陈旧产物
+- **CI**:新增 rust job(cargo test/clippy -D warnings/build --locked);git 执行位检查;action 固定提交 SHA;npm ci 锁文件一致
+- **治理**:/logs 与 pip 日志尾部窗口读取;启动时大日志单代轮转;docs/backend-design.md 标注为历史文档
+
+### v2.0.0-11
 
 - 第二轮独立审计整改：安装失败自愈在裸线程直调 tokio spawn 必 panic 并毒化日志锁 → kernel spawn 改 `std::process::Command`（任意线程安全，收尾线程回收僵尸并落退出日志）
 - 升级日志渲染误加 `.catch` 于 void 调用（历史版本链路死亡）→ 删除；install 终态双 emit 修复

@@ -1,6 +1,15 @@
 #!/bin/bash
 # QwenPaw for fnOS 极简 Launcher 打包脚本 (对齐 DSH 零构建架构)
 # 用法: bash build.sh
+#
+# 发布完整性纪律(P0/P1,勿回退):
+#   1. cargo 构建失败必须终止出包 —— `cargo build 2>&1 | tail -1` 会吞掉退出码,
+#      且陈旧二进制会被当成"本次构建结果"入包(先删产物再构建,存在即可信)。
+#   2. staging 白名单复制 —— 不再 tar 整个项目目录;supervisor/target、web 源、
+#      构建工具等绝不入包(audit-fpk.sh 兜底校验)。
+#   3. 构建后自动审计 FPK 内容与执行位。
+
+set -o pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$PROJ_DIR/build/staging"
@@ -33,15 +42,23 @@ fi
 # [1b/4] 构建监督者(release 单二进制;无 cargo 时复用已有产物)
 SUP_BIN_SRC="$PROJ_DIR/supervisor/target/release/qwenpaw-supervisor"
 if command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then
-  echo "[1b/4] 构建监督者 (cargo release) ..."
-  (cd "$PROJ_DIR/supervisor" && cargo build --release 2>&1 | tail -1)
+  echo "[1b/4] 构建监督者 (cargo release --locked) ..."
+  # 先删旧产物:构建结束若文件存在,即是"本次构建"的产出(防止陈旧二进制冒充)
+  rm -f "$SUP_BIN_SRC"
+  # 不用管道收尾(2>&1|tail 会吞退出码);失败必须终止出包
+  (cd "$PROJ_DIR/supervisor" && cargo build --locked --release) || {
+    echo -e "${RED}ERROR: 监督者 cargo 构建失败,终止出包${NC}"
+    exit 1
+  }
 elif [ -x "$SUP_BIN_SRC" ]; then
-  echo "[1b/4] 无 cargo,复用已有监督者产物"
+  echo -e "${YELLOW}[1b/4] 无 cargo,复用已有监督者产物(注意:无法保证为最新构建)${NC}"
 fi
 if [ ! -x "$SUP_BIN_SRC" ]; then
   echo -e "${RED}ERROR: 监督者二进制缺失(supervisor/target/release/qwenpaw-supervisor)${NC}"
   exit 1
 fi
+SUP_SHA256=$(sha256sum "$SUP_BIN_SRC" | awk '{print $1}')
+echo "  监督者 SHA256: ${SUP_SHA256}"
 
 # [2a/4] 编译控制台(esbuild:web/src → 单文件 dist/index.html,app/www 运行时契约不变)
 echo "[2a/4] 编译控制台 (esbuild) ..."
@@ -54,9 +71,12 @@ if [ -z "$NODE_BIN" ]; then
   exit 1
 fi
 if [ ! -x "$PROJ_DIR/web/node_modules/.bin/esbuild" ]; then
-  echo "  esbuild 未安装,执行 npm install (npmmirror) ..."
+  echo "  esbuild 未安装,执行 npm ci (npmmirror) ..."
   (cd "$PROJ_DIR/web" && env PATH="$(dirname "$NODE_BIN"):$PATH" \
-    npm install --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -1)
+    npm ci --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -1) || {
+    echo -e "${RED}ERROR: npm ci 失败${NC}"
+    exit 1
+  }
 fi
 BUILD_ID="r$(git -C "$PROJ_DIR" rev-list --count HEAD 2>/dev/null || echo 0)"
 export BUILD_ID
@@ -65,26 +85,30 @@ export BUILD_ID
   exit 1
 }
 
-# [2/4] 准备纯净 staging (排除源码，仅保留外壳、控制台、向导与脚本)
-echo "[2/4] 准备 staging 纯净目录树 ..."
+# [2/4] staging 白名单复制(不再 tar 整个项目 —— supervisor/target、构建工具、
+#       源码、CI 配置等运行时无关文件此前会随整目录复制进入包内)
+echo "[2/4] staging 白名单目录树 ..."
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-tar -cf - -C "$PROJ_DIR" \
-  --exclude='build' \
-  --exclude='.git' \
-  --exclude='.github' \
-  --exclude='scripts' \
-  --exclude='web' \
-  --exclude='ui-fndesign' \
-  --exclude='AUDIT_REPORT.md' \
-  --exclude='*.fpk' \
-  --exclude='*.sha256' \
-  --exclude='app/qwenpaw' \
-  --exclude='app/www/*.png' \
-  --exclude='app/www/*.jpg' \
-  --exclude='app/www/public' \
-  . | tar -xf - -C "$STAGE"
+# 顶层白名单:清单/许可/图标 + 运行时目录
+cp "$PROJ_DIR/manifest" "$STAGE/manifest"
+cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE"
+cp "$PROJ_DIR/ICON.PNG" "$PROJ_DIR/ICON_256.PNG" "$STAGE/"
+cp -a "$PROJ_DIR/app" "$STAGE/app"
+cp -a "$PROJ_DIR/cmd" "$STAGE/cmd"
+cp -a "$PROJ_DIR/config" "$STAGE/config"
+cp -a "$PROJ_DIR/wizard" "$STAGE/wizard"
+
+# app 内非运行时内容:www 下的设计期图片不入包(与旧版 exclude 行为一致)
+rm -f "$STAGE/app/www/"*.png "$STAGE/app/www/"*.jpg
+rm -rf "$STAGE/app/www/public" "$STAGE/app/qwenpaw"
+rm -rf "${STAGE:?}/"*/__pycache__
+
+# staging 阶段统一执行位:Git 模式之外再设一道(压缩包/特殊文件系统构建时可能丢位)
+chmod +x "$STAGE"/app/ui/*.cgi "$STAGE"/cmd/* 2>/dev/null || true
+chmod -x "$STAGE/cmd/lib.sh" 2>/dev/null || true  # 仅被 source,不需执行位
+chmod 644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE"/ICON*.PNG 2>/dev/null || true
 
 # 监督者二进制入包(app/bin/,运行时位于 /var/apps/qwenpaw/app/bin/)
 mkdir -p "$STAGE/app/bin"
@@ -134,7 +158,10 @@ if [ -z "$FNPACK_BIN" ]; then
   exit 1
 fi
 echo "  fnpack: ${FNPACK_BIN}"
-"$FNPACK_BIN" build -d .
+"$FNPACK_BIN" build -d . || {
+  echo -e "${RED}ERROR: fnpack 构建失败${NC}"
+  exit 1
+}
 
 FPK_IN_STAGE=$(ls "$STAGE"/*.fpk 2>/dev/null | head -1)
 if [ -z "$FPK_IN_STAGE" ] || [ ! -f "$FPK_IN_STAGE" ]; then
@@ -142,6 +169,14 @@ if [ -z "$FPK_IN_STAGE" ] || [ ! -f "$FPK_IN_STAGE" ]; then
   exit 1
 fi
 mv "$FPK_IN_STAGE" "$OUTPUT"
+
+# [3b/4] FPK 内容审计(白名单/执行位/构建残留) —— 失败即出包失败
+echo "[3b/4] FPK 内容审计 ..."
+bash "$PROJ_DIR/scripts/audit-fpk.sh" "$OUTPUT" || {
+  echo -e "${RED}ERROR: FPK 审计未通过,产物已拒绝(见上方审计输出)${NC}"
+  rm -f "$OUTPUT"
+  exit 1
+}
 
 # [4/4] 计算 SHA256 与归档
 echo "[4/4] 计算签名与收尾 ..."
