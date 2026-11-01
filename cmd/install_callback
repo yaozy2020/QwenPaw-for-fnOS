@@ -41,10 +41,14 @@ log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
 if [ -x "${VENV_DIR}/bin/python3" ] && "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
     CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
     log_msg "检测到运行环境与内核（${CUR_VER:-?}）均健在，跳过内核重装（双轨制：内核升级请走控制台版本管理）"
-    if [ -n "${CUR_VER}" ]; then
-        echo "${CUR_VER}" > "${VAR_DIR}/qwenpaw-version"
-        log_msg "已刷新内核版本钉: ${CUR_VER}"
+    if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
+        if write_version_pin "${CUR_VER}"; then
+            log_msg "已刷新内核版本钉: ${CUR_VER}"
+        else
+            log_msg "WARN: 版本钉写入失败(目录权限?)"
+        fi
     fi
+    secure_var_perms
     log_msg "QwenPaw 外壳升级完成（内核未变更）！"
     exit 0
 fi
@@ -88,17 +92,24 @@ log_msg "正在升级虚拟环境 pip..."
 python3 -m pip install --upgrade pip $PIP_OPTS
 log_msg "虚拟环境 pip 升级成功"
 
-# 内核版本来源（修复路径）：版本钉优先，精确恢复用户选择的版本
+# 内核版本来源（修复路径）：版本钉优先，精确恢复用户选择的版本。
+# 钉值必须过白名单 —— 它会拼成 `qwenpaw=={pin}` 进 pip 参数,被篡改的钉文件
+# 不得注入附加 pip 选项
 VERSION_PIN="$(tr -d '[:space:]' < "${VAR_DIR}/qwenpaw-version" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
-if [ -n "${VERSION_PIN}" ]; then
+if [ -n "${VERSION_PIN}" ] && valid_version_pin "${VERSION_PIN}"; then
     TARGET_PKG="qwenpaw==${VERSION_PIN}"
     log_msg "检测到内核版本钉，按其精确恢复: ${TARGET_PKG}"
 else
+    if [ -n "${VERSION_PIN}" ]; then
+        log_msg "WARN: 版本钉内容非法(${VERSION_PIN})，忽略并按首次安装处理"
+        rm -f "${VAR_DIR}/qwenpaw-version" 2>/dev/null || true
+    fi
     # 首次安装不预装内核（对齐 DSH 模式）：由用户打开控制台「版本更新」自选版本安装
     log_msg "首次安装完成（外壳）。内核未预装——请打开 QwenPaw 控制台，在「版本更新」中选择版本安装。"
     log_msg "提示: 内核 wheel 约 40MB，控制台安装时从所选 PyPI 镜像下载。"
     chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
     chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+    secure_var_perms
     log_msg "QwenPaw 安装成功！（内核待控制台安装）"
     exit 0
 fi
@@ -119,10 +130,14 @@ cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
 rm -f "${PIP_LOG}"
 
 # 记录内核版本钉：fpk 升级若重建 venv，按此版本恢复，不追踪最新
+# （先经元数据读出实际版本,再原子写入 —— 与监督者安装路径同一纪律）
 CUR_VER="$(python3 -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
-if [ -n "${CUR_VER}" ]; then
-    echo "${CUR_VER}" > "${VAR_DIR}/qwenpaw-version"
-    log_msg "已记录内核版本钉: ${CUR_VER}"
+if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
+    if write_version_pin "${CUR_VER}"; then
+        log_msg "已记录内核版本钉: ${CUR_VER}"
+    else
+        log_msg "WARN: 版本钉写入失败(目录权限?),venv 重建时可能回退旧版本"
+    fi
 fi
 
 log_msg "正在初始化 QwenPaw..."
@@ -132,8 +147,9 @@ chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || tr
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}" 2>/dev/null || true
 chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
-chmod -R 755 "${TRIM_PKGVAR}" 2>/dev/null || true
-chmod -R 755 "${TRIM_PKGETC}" 2>/dev/null || true
+# VAR_DIR 收敛为最小权限(目录 750/文件 640/Token 600),不再递归 755
+secure_var_perms
+chmod 755 "${TRIM_PKGETC}" 2>/dev/null || true
 
 log_msg "QwenPaw 安装成功！"
 exit 0

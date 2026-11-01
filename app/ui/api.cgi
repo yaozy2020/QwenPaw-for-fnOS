@@ -1,6 +1,14 @@
 #!/bin/bash
 # 瘦桥:旧 action API → 监督者 HTTP(127.0.0.1:19090)。
 # 职责仅剩:token 读取 + 路径映射 + 旧响应形状兼容;全部业务逻辑在监督者。
+#
+# 安全(P0,勿回退):
+#   1. 方法白名单 —— 读操作只许 GET,变更操作只许 POST;违规回 405 + Allow。
+#      历史版本对方法不设限,GET 即可触发 stop/reset_auth/upgrade。
+#   2. 同源校验(CSRF)—— 浏览器对一切 POST(fetch/sendBeacon/表单)都会携带
+#      Origin;缺席或与 Host 不符即跨站/伪造,回 403。非浏览器客户端本就无
+#      fnOS 会话凭据,拒绝无副作用。注意:不信任 X-Trim-Userid 等可被客户端
+#      伪造的头,管理鉴权仍依赖 fnOS 网关的应用授权(disable_authorization_path=false)。
 
 SUP="${QWENPAW_SUP_URL:-http://127.0.0.1:19090}"  # 可注入假地址供 lint 测兜底路径
 VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
@@ -19,6 +27,72 @@ qget() {  # $1=key → 输出值
 }
 
 action=$(echo "$QUERY_STRING" | tr '&' '\n' | grep '^action=' | head -1 | cut -d= -f2-)
+
+REQUEST_METHOD="${REQUEST_METHOD:-GET}"
+
+# ── 方法白名单:读=GET,变更=POST ──
+case "$action" in
+    status|logs|version_list|get_mirror|upgrade_status|upgrade_logs) want_method="GET" ;;
+    start|stop|restart|clear_logs|upgrade|reset_auth|change_port|set_mirror) want_method="POST" ;;
+    *)
+        echo "Status: 404 Not Found"
+        echo "Content-Type: application/json"
+        echo ""
+        echo '{"success":false,"message":"未知操作"}'
+        exit 0
+        ;;
+esac
+if [ "$REQUEST_METHOD" != "$want_method" ]; then
+    echo "Status: 405 Method Not Allowed"
+    echo "Allow: $want_method"
+    echo "Content-Type: application/json"
+    echo ""
+    printf '{"success":false,"message":"此操作仅允许 %s 请求"}\n' "$want_method"
+    exit 0
+fi
+
+# ── 同源校验:仅约束变更类(POST)操作 ──
+# origin_authority: 从 Origin/Referer 提取 host[:port],与 Host 对齐比较。
+# 默认端口(80/443)两侧都可能省略,统一剥掉后再比,避免 https 反代误报。
+origin_authority() {
+    local s="$1"
+    s="${s#http://}"; s="${s#https://}"
+    s="${s%%/*}"          # Referer 去路径
+    s="${s%,}"            # 防御:末尾杂散逗号
+    printf '%s' "$s"
+}
+strip_default_port() {
+    local s="$1"
+    case "$s" in
+        *":80")  s="${s%:80}" ;;
+        *":443") s="${s%:443}" ;;
+    esac
+    printf '%s' "$s"
+}
+csrf_rejected() {
+    local host origin referer want got
+    host="${HTTP_HOST:-}"
+    [ -n "$host" ] || return 0        # 无 Host 非正常 HTTP 上下文,拒绝
+    origin="${HTTP_ORIGIN:-}"
+    referer="${HTTP_REFERER:-}"
+    if [ -n "$origin" ]; then
+        got="$(origin_authority "$origin")"
+    elif [ -n "$referer" ]; then
+        got="$(origin_authority "$referer")"
+    else
+        return 0                       # 浏览器必发 Origin;缺席即非浏览器伪造
+    fi
+    want="$(strip_default_port "$host")"
+    got="$(strip_default_port "$got")"
+    [ "$got" != "$want" ]
+}
+if [ "$REQUEST_METHOD" = "POST" ] && csrf_rejected; then
+    echo "Status: 403 Forbidden"
+    echo "Content-Type: application/json"
+    echo ""
+    echo '{"success":false,"message":"请求来源校验失败,请从 QwenPaw 控制台操作"}'
+    exit 0
+fi
 
 method="GET"
 path="/status"
@@ -90,8 +164,8 @@ case "$action" in
         body="{\"port\":${newp}}"
         ;;
     set_mirror)
-        # 下载源落盘:mirror 会进入监督者的 bash -c pip 命令串,必须白名单字符集
-        # (仅 http(s) URL 安全字符),杜绝 shell 注入(独立审计"shell 拼 JSON"同源风险)
+        # 下载源落盘:mirror 会进监督者的 pip --index-url 参数,必须白名单字符集
+        # (仅 http(s) URL 安全字符),纵深防御直连调用方(独立审计"shell 拼 JSON"同源风险)
         m=$(qget mirror)
         ok=1
         case "$m" in
@@ -119,12 +193,6 @@ case "$action" in
         echo "Content-Type: application/json"
         echo ""
         printf '{"success":true,"mirror":"%s"}\n' "$m"
-        exit 0
-        ;;
-    backup_download|check_tunnel)
-        echo "Content-Type: application/json"
-        echo ""
-        echo "{\"success\":false,\"message\":\"功能迁移中,后续版本恢复\"}"
         exit 0
         ;;
 esac

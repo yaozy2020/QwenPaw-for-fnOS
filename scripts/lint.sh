@@ -228,15 +228,28 @@ json_field() {  # $1=payload $2=python表达式 → 输出求值结果
     printf '%s' "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)" 2>/dev/null
 }
 
-bridge_run() {  # $1=QUERY_STRING $2=SUP_URL → 输出尾行(JSON 体)
+bridge_run() {  # $1=METHOD $2=QUERY_STRING $3=SUP_URL [$4=Origin(带 Host 模拟浏览器)] → 输出尾行(JSON 体)
     local out
-    out="$(QWENPAW_SUP_URL="$2" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
-        QUERY_STRING="$1" REQUEST_METHOD=GET "$BR")"
+    if [ -n "${4:-}" ]; then
+        out="$(QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
+            QUERY_STRING="$2" REQUEST_METHOD="$1" \
+            HTTP_HOST="127.0.0.1:9999" HTTP_ORIGIN="$4" "$BR")"
+    else
+        out="$(env -u HTTP_ORIGIN -u HTTP_REFERER -u HTTP_HOST \
+            QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
+            QUERY_STRING="$2" REQUEST_METHOD="$1" "$BR")"
+    fi
     printf '%s\n' "$out" | tail -n 1
 }
 
+bridge_status() {  # $1=METHOD $2=QUERY_STRING → 输出桥声明的 HTTP 状态行(CGI Status: 头)
+    env -u HTTP_ORIGIN -u HTTP_REFERER -u HTTP_HOST \
+        QWENPAW_SUP_URL="http://127.0.0.1:1" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
+        QUERY_STRING="$2" REQUEST_METHOD="$1" "$BR" | head -n 1
+}
+
 # T1 非 JSON 防御:上游回纯文本,桥必须替换为兜底对象而非透传
-t1="$(bridge_run "action=status" "http://127.0.0.1:${FAKE_PORT}")"
+t1="$(bridge_run GET "action=status" "http://127.0.0.1:${FAKE_PORT}")"
 if [ "$(json_field "$t1" "d.get('success')")" = "False" ] \
     && [ "$(json_field "$t1" "'监督者' in d.get('message','')")" = "True" ]; then
     echo "  [  OK ] 非 JSON 上游 → 兜底对象(不透传)"
@@ -247,7 +260,7 @@ fi
 
 # T2 version_list:形状转换 + 语义排序(2.10.0>2.9.9,稳定>预发布)+ latest_stable
 # 推导(假监督者故意回旧值 2.2.2.post1,桥必须推出 2.10.0,不信 PyPI info.version)
-t2="$(bridge_run "action=version_list" "http://127.0.0.1:${FAKE_PORT}")"
+t2="$(bridge_run GET "action=version_list" "http://127.0.0.1:${FAKE_PORT}")"
 if [ "$(json_field "$t2" "d.get('success')")" = "True" ] \
     && [ "$(json_field "$t2" "d['versions'][0]['version']")" = "2.10.0" ] \
     && [ "$(json_field "$t2" "d['versions'][0]['is_beta']")" = "False" ] \
@@ -262,7 +275,7 @@ else
 fi
 
 # T3 监督者不可达:兜底对象必须是合法 JSON
-t3="$(bridge_run "action=status" "http://127.0.0.1:1")"
+t3="$(bridge_run GET "action=status" "http://127.0.0.1:1")"
 if [ "$(json_field "$t3" "d.get('success')")" = "False" ]; then
     echo "  [  OK ] 监督者不可达 → 合法兜底 JSON"
 else
@@ -272,7 +285,7 @@ fi
 
 # T4 upgrade_logs 透传完整性:转义职责已下沉监督者(Rust),桥必须原样转发
 # 含引号/反斜杠的 JSON 而不破坏结构(该路径曾裸拼产出非法 JSON,审计 major)
-t4="$(bridge_run "action=upgrade_logs" "http://127.0.0.1:${FAKE_PORT}")"
+t4="$(bridge_run GET "action=upgrade_logs" "http://127.0.0.1:${FAKE_PORT}")"
 if [ "$(json_field "$t4" "d.get('success')")" = "True" ] \
     && [ "$(json_field "$t4" "len(d.get('logs', []))")" = "2" ] \
     && [ "$(json_field "$t4" "chr(34) + 'qwenpaw' + chr(34) in d['logs'][0]")" = "True" ]; then
@@ -283,7 +296,7 @@ else
 fi
 
 # T5 version_list 上游失败:必须 success:false + 错误透传,绝不伪装"检查完成"
-t5="$(bridge_run "action=version_list" "http://127.0.0.1:${FAIL_PORT}")"
+t5="$(bridge_run GET "action=version_list" "http://127.0.0.1:${FAIL_PORT}")"
 if [ "$(json_field "$t5" "d.get('success')")" = "False" ] \
     && [ "$(json_field "$t5" "'查询 PyPI 失败' in d.get('message','')")" = "True" ]; then
     echo "  [  OK ] version_list 上游失败如实降级"
@@ -294,8 +307,8 @@ fi
 
 # T6 set_mirror:合法 URL 落盘;注入载荷(%3B → ';')被字符白名单拒绝 ——
 # mirror 会进监督者的 bash -c pip 串,这里必须挡死
-t6="$(bridge_run "action=set_mirror&mirror=https://pypi.tuna.tsinghua.edu.cn/simple" "http://127.0.0.1:1")"
-t6bad="$(bridge_run "action=set_mirror&mirror=https%3A%2F%2Fx.test%2F%3Brm" "http://127.0.0.1:1")"
+t6="$(bridge_run POST "action=set_mirror&mirror=https://pypi.tuna.tsinghua.edu.cn/simple" "http://127.0.0.1:1" "http://127.0.0.1:9999")"
+t6bad="$(bridge_run POST "action=set_mirror&mirror=https%3A%2F%2Fx.test%2F%3Brm" "http://127.0.0.1:1" "http://127.0.0.1:9999")"
 if [ "$(json_field "$t6" "d.get('success')")" = "True" ] \
     && [ "$(cat "$FAKE_TOKEN_DIR/pip-mirror")" = "https://pypi.tuna.tsinghua.edu.cn/simple" ] \
     && [ "$(json_field "$t6bad" "d.get('success')")" = "False" ]; then
@@ -306,7 +319,7 @@ else
 fi
 
 # T7 upgrade 未带 mirror → 桥必须把已存下载源注入请求体
-t7="$(bridge_run "action=upgrade&version=2.3.0b2" "http://127.0.0.1:${FAKE_PORT}")"
+t7="$(bridge_run POST "action=upgrade&version=2.3.0b2" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999")"
 if [ "$(json_field "$t7" "d.get('success')")" = "True" ] \
     && grep -qF '/kernel/install {"version": "2.3.0b2", "mirror": "https://pypi.tuna.tsinghua.edu.cn/simple"}' "$WORK/reqlog"; then
     echo "  [  OK ] upgrade 请求体携带已存下载源"
@@ -316,12 +329,57 @@ else
 fi
 
 # T8 upgrade 显式 mirror=(空,控制台选官方)→ 覆盖已存文件值
-t8="$(bridge_run "action=upgrade&version=2.2.2.post1&mirror=" "http://127.0.0.1:${FAKE_PORT}")"
+t8="$(bridge_run POST "action=upgrade&version=2.2.2.post1&mirror=" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999")"
 if [ "$(json_field "$t8" "d.get('success')")" = "True" ] \
     && grep -qF '/kernel/install {"version": "2.2.2.post1", "mirror": ""}' "$WORK/reqlog"; then
     echo "  [  OK ] upgrade 显式 mirror= 覆盖文件值"
 else
     echo "  [FAIL] 显式 mirror= 未生效: ${t8:0:120}"
+    fail=1
+fi
+
+# ── [4b/5] 桥安全门禁:方法白名单 + 同源校验(P0 回归,勿删) ──
+echo "[4b/5] 桥安全门禁(405/403/404)..."
+
+# T9 读操作之外的 action 用 GET 触发 → 必须 405 + Allow: POST(历史版本 GET 即可停服)
+s9="$(bridge_status GET "action=stop")"
+t9="$(bridge_run GET "action=stop" "http://127.0.0.1:${FAKE_PORT}")"
+if printf '%s' "$s9" | grep -q "405" \
+    && [ "$(json_field "$t9" "d.get('success')")" = "False" ]; then
+    echo "  [  OK ] GET 触发变更操作 → 405 拒绝"
+else
+    echo "  [FAIL] GET 变更操作未被 405 拒绝: status=${s9} body=${t9:0:120}"
+    fail=1
+fi
+
+# T10 POST 缺 Origin/Referer(跨站/直连伪造形态)→ 403,且请求不得到达监督者
+t10a="$(bridge_run POST "action=stop" "http://127.0.0.1:${FAKE_PORT}")"
+t10b="$(bridge_run POST "action=stop" "http://127.0.0.1:${FAKE_PORT}" "http://evil.test:80")"
+if [ "$(json_field "$t10a" "d.get('success')")" = "False" ] \
+    && [ "$(json_field "$t10b" "d.get('success')")" = "False" ] \
+    && ! grep -q '^/stop' "$WORK/reqlog"; then
+    echo "  [  OK ] 无 Origin/异源 POST → 403 且未透传监督者"
+else
+    echo "  [FAIL] CSRF 校验失效: no-origin=${t10a:0:100} evil=${t10b:0:100}"
+    fail=1
+fi
+
+# T11 同源 POST 正常透传(放行路径,防止校验误伤合法控制台)
+t11="$(bridge_run POST "action=start" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999")"
+if [ "$(json_field "$t11" "d.get('success')")" = "True" ] \
+    && grep -q '^/start' "$WORK/reqlog"; then
+    echo "  [  OK ] 同源 POST 正常放行"
+else
+    echo "  [FAIL] 同源 POST 被误拒: ${t11:0:120}"
+    fail=1
+fi
+
+# T12 未知 action → 404(白名单外不落到 /status 兜底)
+s12="$(bridge_status GET "action=unknown_action")"
+if printf '%s' "$s12" | grep -q "404"; then
+    echo "  [  OK ] 未知 action → 404"
+else
+    echo "  [FAIL] 未知 action 未返回 404: ${s12}"
     fail=1
 fi
 

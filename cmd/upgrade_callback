@@ -16,24 +16,12 @@ log_msg "开始升级 QwenPaw 外壳（Launcher 模式，不改变内核版本�
 
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
-chmod -R 755 "${ETC_DIR}" 2>/dev/null || true
-chmod -R 755 "${VAR_DIR}" 2>/dev/null || true
+chmod 755 "${ETC_DIR}" 2>/dev/null || true
+# VAR_DIR 收敛为最小权限(目录 750/文件 640/Token 600),不再递归 755
+secure_var_perms
 
-PID_FILE="${VAR_DIR}/qwenpaw.pid"
-if [ -f "${PID_FILE}" ]; then
-    log_msg "正在停止 QwenPaw 旧进程..."
-    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-        kill -TERM "${pid}" 2>/dev/null || true
-        count=0
-        while kill -0 "${pid}" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        kill -KILL "${pid}" 2>/dev/null || true
-    fi
-    rm -f "${PID_FILE}"
-fi
+# 停止旧监督者(统一 supervisor.pid 口径;监督者 TERM 会级联停内核并回收 pip)
+stop_supervisor
 
 if [ ! -d "${VENV_DIR}" ]; then
     log_msg "venv 缺失，重建虚拟环境 ${VENV_DIR}..."
@@ -51,11 +39,15 @@ if [ ! -d "${VENV_DIR}" ]; then
         PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
     fi
 
-    # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）
+    # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）。
+    # 钉值必须过白名单 —— 它会拼成 `qwenpaw=={pin}` 进 pip 参数
     VERSION_PIN="$(tr -d '[:space:]' < "${PIN_FILE}" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
-    if [ -n "${VERSION_PIN}" ]; then
+    if [ -n "${VERSION_PIN}" ] && valid_version_pin "${VERSION_PIN}"; then
         TARGET_PKG="qwenpaw==${VERSION_PIN}"
         log_msg "按版本钉恢复内核: ${TARGET_PKG}"
+    elif [ -n "${VERSION_PIN}" ]; then
+        TARGET_PKG="qwenpaw"
+        log_msg "WARN: 版本钉内容非法(${VERSION_PIN})，按向导渠道安装"
     else
         TARGET_PKG="qwenpaw"
         if [ "${wizard_channel:-stable}" = "beta" ]; then
@@ -78,18 +70,21 @@ else
     log_msg "venv 已存在，内核版本保持不变（升级内核请在控制台「版本管理」中显式操作）"
 fi
 
-# 刷新版本钉：记录 venv 中当前实际内核版本
+# 刷新版本钉：记录 venv 中当前实际内核版本(白名单校验 + 原子写入)
 CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
-if [ -n "${CUR_VER}" ]; then
-    mkdir -p "${VAR_DIR}" 2>/dev/null || true
-    echo "${CUR_VER}" > "${PIN_FILE}"
-    log_msg "当前内核版本: ${CUR_VER}（版本钉已更新）"
+if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
+    if write_version_pin "${CUR_VER}"; then
+        log_msg "当前内核版本: ${CUR_VER}（版本钉已更新）"
+    else
+        log_msg "WARN: 版本钉写入失败: ${CUR_VER}"
+    fi
 fi
 
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
 chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+secure_var_perms
 
 log_msg "QwenPaw 外壳升级完成！"
 exit 0

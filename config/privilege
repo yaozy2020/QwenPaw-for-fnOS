@@ -1,8 +1,5 @@
 {
     "defaults": {
         "run-as": "package"
-    },
-    "join-groups": [
-        "docker"
-    ]
+    }
 }

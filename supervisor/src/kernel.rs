@@ -132,13 +132,10 @@ impl KernelManager {
         let log_path = self.cfg.log_file.clone();
         std::thread::spawn(move || {
             use std::io::Write as _;
-            match child.wait() {
-                Ok(st) => {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-                        let _ = writeln!(f, "[kernel] pid exited: {st}");
-                    }
+            if let Ok(st) = child.wait() {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                    let _ = writeln!(f, "[kernel] pid exited: {st}");
                 }
-                Err(_) => {}
             }
         });
         {
@@ -149,6 +146,25 @@ impl KernelManager {
             st.cache_at = Some(Instant::now());
         }
         Ok(pid)
+    }
+
+    /// 启动后健康检查:进程存活且内核端口可建立 TCP 连接才算"服务已就绪"。
+    /// "进程已创建"不等于"服务成功" —— 改端口/重置认证的成功判定以此为准,
+    /// 失败路径据此回滚(超时视为失败,由调用方处理)。
+    /// 阻塞式:调用方(axum 处理器)须经 spawn_blocking 包裹。
+    pub fn wait_healthy(&self, timeout: Duration) -> bool {
+        let pid = self.state.lock().unwrap().tracked;
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if pid <= 0 || !procfs::process_alive(pid) {
+                return false; // 进程已死,等下去只会假超时
+            }
+            if std::net::TcpStream::connect(("127.0.0.1", self.port())).is_ok() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        false
     }
 
     /// 三段式停止:组 TERM(宽限 10s)→ 单 KILL → 组 KILL 清扫。
@@ -225,7 +241,7 @@ impl KernelManager {
             && st.cache_pid != 0
             && procfs::process_alive(st.cache_pid);
         let mut adopted = false;
-        let mut pid = st.tracked;
+        let pid;
         if !cache_valid {
             let all = procfs::rediscover_all(self.port(), st.tracked);
             let best = all.iter().copied().max().unwrap_or(0);
