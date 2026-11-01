@@ -185,6 +185,11 @@
           <div id="kernelInstallTip" style="display:none; margin-bottom:10px; padding:10px 12px; background:var(--primary-bg, rgba(59,130,246,0.12)); border:1px solid rgba(59,130,246,0.25); border-radius:8px; font-size:12px; line-height:1.6; color:var(--text-main);">
             📦 <strong>QwenPaw 内核尚未安装</strong>。请在下方选择一个版本，点击按钮完成安装（首次建议 Stable 稳定版）。安装需从 PyPI 下载约 40MB，请耐心等待。
           </div>
+          <!-- 后端已有安装任务进行中(重开控制台/换设备进入时恢复现场):
+               点击进入附加模式查看进度,而不是再次创建任务 -->
+          <div id="installRunningTip" style="display:none; margin-bottom:10px; padding:10px 12px; background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.35); border-radius:8px; font-size:12px; line-height:1.6; color:var(--text-main); cursor:pointer;" onclick="attachRunningInstall()">
+            ⏳ <strong>检测到安装任务正在进行中</strong>（NAS 后端独立执行，与本页面无关）。点击查看实时进度，请勿重复发起安装。
+          </div>
           <!-- 下载源选择:自定义下拉(原生 select 在移动端弹系统白框,与主题割裂);
                落盘服务端(VAR_DIR/pip-mirror),升级内核时生效;向导选择的源作为初始默认 -->
           <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px; font-size:12px;">

@@ -10,7 +10,10 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::Path,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -110,6 +113,32 @@ fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// 单行落盘(超限排水)。stdout/stderr 两个线程各自持有 append 句柄调用。
+fn append_line(log: &mut Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &str) {
+    if let Some(f) = log.as_mut() {
+        let mut t = total.lock().unwrap();
+        if *t >= LOG_TOTAL_CAP {
+            return;
+        }
+        let mut owned = raw.to_string();
+        if owned.len() > LOG_LINE_CAP {
+            owned.truncate(LOG_LINE_CAP);
+            owned.push('…');
+        }
+        if f.write_all(owned.as_bytes()).is_ok() && f.write_all(b"\n").is_ok() {
+            *t += owned.len() as u64 + 1;
+        }
+    }
+}
+
+/// 刷新看门狗活动时间戳(自任务启动起的毫秒数)
+fn touch_activity(last: &AtomicU64, start: &std::time::Instant) {
+    last.store(
+        start.elapsed().as_millis() as u64,
+        Ordering::Relaxed,
+    );
+}
+
 #[derive(Clone, Debug)]
 pub struct InstallSnapshot {
     pub phase: Phase,
@@ -143,6 +172,12 @@ pub struct InstallState {
 const LOG_LINE_CAP: usize = 4096;
 /// 单次任务日志总量上限(超过后仅排水不再落盘)
 const LOG_TOTAL_CAP: u64 = 1024 * 1024;
+/// 看门狗:无输出超过 15 分钟视为镜像失联/任务卡死。慢镜像单文件下载间隙
+/// 远小于此(pip 自身 socket 超时 15s + 重试),真挂起会长期静默。
+/// 若无看门狗,running 永久为 true,后续安装被 busy 永久拒绝(手机端表现为一直转圈)。
+const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// 看门狗:任务总时长上限(40MB 内核 + 依赖在慢链路下的宽裕上限)
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 impl InstallState {
     pub fn new(
@@ -270,24 +305,6 @@ impl InstallState {
                 .open(&pip_log)
                 .ok();
             let total = Arc::new(Mutex::new(0u64));
-            let write_line = |log: &Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &str| {
-                if let Some(mut f) = log.as_ref() {
-                    let mut t = total.lock().unwrap();
-                    if *t >= LOG_TOTAL_CAP {
-                        return;
-                    }
-                    let mut owned = raw.to_string();
-                    if owned.len() > LOG_LINE_CAP {
-                        owned.truncate(LOG_LINE_CAP);
-                        owned.push('…');
-                    }
-                    if f.write_all(owned.as_bytes()).is_ok()
-                        && f.write_all(b"\n").is_ok()
-                    {
-                        *t += owned.len() as u64 + 1;
-                    }
-                }
-            };
 
             let spawned = cmd.spawn();
             match spawned {
@@ -301,81 +318,136 @@ impl InstallState {
                         .unwrap_or_default();
                     let _ = std::fs::write(&pid_file, format!("{}\n", pid));
 
-                    // stderr 并行排水线程:与 stdout 各持 append 句柄,O_APPEND 逐行落盘
+                    // 看门狗共享状态:任一输出线程每落一行就刷新活动时间戳
+                    let started = Arc::new(std::time::Instant::now());
+                    let last_activity = Arc::new(AtomicU64::new(0));
+
+                    // stdout/stderr 各自独立排水线程(持 append 句柄逐行落盘)。
+                    // 主线程不再阻塞读日志,改为看门狗轮询 —— 否则无输出超时无法实现
+                    let mut readers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
                     if let Some(err) = child.stderr.take() {
                         let log2 = log.as_ref().and_then(|f| f.try_clone().ok());
                         let total2 = Arc::clone(&total);
-                        std::thread::spawn(move || {
+                        let act2 = Arc::clone(&last_activity);
+                        let start2 = Arc::clone(&started);
+                        readers.push(std::thread::spawn(move || {
+                            let mut logf = log2;
                             let r = BufReader::new(err);
                             for line in r.split(b'\n') {
                                 match line {
                                     Ok(b) => {
+                                        touch_activity(&act2, &start2);
                                         let s = String::from_utf8_lossy(&b);
-                                        let mut t = total2.lock().unwrap();
-                                        if *t >= LOG_TOTAL_CAP {
-                                            continue;
-                                        }
-                                        let mut owned = s.trim_end_matches(['\r']).to_string();
-                                        if owned.len() > LOG_LINE_CAP {
-                                            owned.truncate(LOG_LINE_CAP);
-                                            owned.push('…');
-                                        }
-                                        if let Some(mut f) = log2.as_ref() {
-                                            if f.write_all(owned.as_bytes()).is_ok()
-                                                && f.write_all(b"\n").is_ok()
-                                            {
-                                                *t += owned.len() as u64 + 1;
-                                            }
+                                        append_line(&mut logf, &total2, s.trim_end_matches(['\r']));
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        }));
+                    }
+
+                    if let Some(out) = child.stdout.take() {
+                        let this_r = this.clone();
+                        let log1 = log.as_ref().and_then(|f| f.try_clone().ok());
+                        let total1 = Arc::clone(&total);
+                        let act1 = Arc::clone(&last_activity);
+                        let start1 = Arc::clone(&started);
+                        readers.push(std::thread::spawn(move || {
+                            let mut logf = log1;
+                            let mut reader = BufReader::new(out);
+                            let mut buf: Vec<u8> = Vec::new();
+                            loop {
+                                buf.clear();
+                                // read_until + lossy:pip 吐非法 UTF-8 时逐行降级而不是
+                                // Err 中断(曾导致日志从此截断、进度消息冻结)
+                                match reader.read_until(b'\n', &mut buf) {
+                                    Ok(0) => break,
+                                    Ok(_) => {
+                                        touch_activity(&act1, &start1);
+                                        let owned = String::from_utf8_lossy(&buf);
+                                        let l = owned.trim_end();
+                                        append_line(&mut logf, &total1, l);
+                                        if l.starts_with("Collecting ") {
+                                            let pkg = l
+                                                .strip_prefix("Collecting ")
+                                                .unwrap_or("")
+                                                .split(' ')
+                                                .next()
+                                                .unwrap_or("")
+                                                .to_string();
+                                            this_r.set(|g| {
+                                                g.fetched += 1;
+                                                g.message = format!("获取 {pkg}");
+                                            });
+                                        } else if l.starts_with("Downloading ") {
+                                            this_r.set(|g| g.message = "下载中".into());
+                                        } else if l.starts_with("Successfully installed ") {
+                                            // 进入真实安装阶段(此前 Installing 变体从未
+                                            // 被构造,前端只能凭 message 猜)
+                                            this_r.set(|g| {
+                                                g.phase = Phase::Installing;
+                                                g.message = "安装依赖包".into();
+                                            });
                                         }
                                     }
                                     Err(_) => break,
                                 }
                             }
-                        });
+                        }));
                     }
 
-                    // pip 的进度走 stdout:逐行读取 → 落盘 + 解析(dsh consumeNpmOutput 模式)
-                    if let Some(out) = child.stdout.take() {
-                        let mut reader = BufReader::new(out);
-                        let mut buf: Vec<u8> = Vec::new();
-                        loop {
-                            buf.clear();
-                            // read_until + lossy:pip 吐非法 UTF-8 时逐行降级而不是
-                            // Err 中断(曾导致日志从此截断、进度消息冻结)
-                            match reader.read_until(b'\n', &mut buf) {
-                                Ok(0) => break,
-                                Ok(_) => {
-                                    let owned = String::from_utf8_lossy(&buf);
-                                    let l = owned.trim_end();
-                                    write_line(&log, &total, l);
-                                    if l.starts_with("Collecting ") {
-                                        let pkg = l
-                                            .strip_prefix("Collecting ")
-                                            .unwrap_or("")
-                                            .split(' ')
-                                            .next()
-                                            .unwrap_or("")
-                                            .to_string();
-                                        this.set(|g| {
-                                            g.fetched += 1;
-                                            g.message = format!("获取 {pkg}");
-                                        });
-                                    } else if l.starts_with("Downloading ") {
-                                        this.set(|g| g.message = "下载中".into());
-                                    } else if l.starts_with("Successfully installed ") {
-                                        // 进入真实安装阶段(此前 Installing 变体从未
-                                        // 被构造,前端只能凭 message 猜)
-                                        this.set(|g| {
-                                            g.phase = Phase::Installing;
-                                            g.message = "安装依赖包".into();
-                                        });
-                                    }
-                                }
-                                Err(_) => break,
+                    // 看门狗主循环:进程退出/无输出超时/总时长超限三出口。
+                    // 超时整组终止(组 TERM → 宽限 → 组 KILL),防 busy 永久锁死
+                    let mut exit_ok = false;
+                    let mut wait_err: Option<String> = None;
+                    let mut timeout_reason = String::new();
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(st)) => {
+                                exit_ok = st.success();
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                wait_err = Some(e.to_string());
+                                break;
                             }
                         }
+                        let elapsed = started.elapsed();
+                        let idle_ms =
+                            elapsed.as_millis() as u64 - last_activity.load(Ordering::Relaxed);
+                        if idle_ms > NO_OUTPUT_TIMEOUT.as_millis() as u64 {
+                            timeout_reason = format!(
+                                "安装超时: 无输出超过 {} 分钟,已终止(下载源可能失联,请换源重试)",
+                                NO_OUTPUT_TIMEOUT.as_secs() / 60
+                            );
+                            break;
+                        }
+                        if elapsed > TOTAL_TIMEOUT {
+                            timeout_reason = format!(
+                                "安装超时: 总时长超过 {} 分钟,已终止",
+                                TOTAL_TIMEOUT.as_secs() / 60
+                            );
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(500));
                     }
-                    let exit_ok = child.wait().map(|s| s.success()).unwrap_or(false);
+                    if !timeout_reason.is_empty() {
+                        unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+                        for _ in 0..10 {
+                            if child.try_wait().map(|s| s.is_some()).unwrap_or(true) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                        let _ = child.wait();
+                    }
+                    // 等两个排水线程随管道 EOF 退出,避免它们写终态后的日志文件句柄
+                    for h in readers {
+                        let _ = h.join();
+                    }
                     let cancelled = {
                         let g = this.inner.lock().unwrap();
                         g.cancelled
@@ -387,6 +459,10 @@ impl InstallState {
                     let mut ok = exit_ok && !cancelled;
                     let mut reason = if cancelled {
                         "安装已被停止".to_string()
+                    } else if !timeout_reason.is_empty() {
+                        timeout_reason
+                    } else if let Some(e) = wait_err {
+                        format!("pip 进程等待异常: {e}")
                     } else if !exit_ok {
                         "pip 安装失败,详见日志".to_string()
                     } else {

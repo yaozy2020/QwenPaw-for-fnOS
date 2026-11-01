@@ -316,10 +316,16 @@ async fn kernel_install(
         sanitize_mirror(&req.mirror)
     };
     // 忙检查必须在停内核之前:重入时只拒绝,绝不停掉正在陪跑 pip 的内核
-    // (-7 回归:stop 级联修真后,忙路径曾先杀内核再被 try_start 拒绝)
+    // (-7 回归:stop 级联修真后,忙路径曾先杀内核再被 try_start 拒绝)。
+    // busy 响应携带当前 seq:前端据此识别"这次点击没接到单",不再开转圈弹窗
     if state.install.snapshot().running {
-        return Json(json!({"ok": true, "success": false, "message": "安装正在进行中,请等待完成后再试"}))
-            .into_response();
+        let cur = state.install.snapshot();
+        return Json(json!({
+            "ok": true, "success": false,
+            "message": "安装正在进行中,请等待完成后再试",
+            "seq": cur.seq, "running": true,
+        }))
+        .into_response();
     }
     // 安装期间先停内核(pip 换包需停服);装完由安装线程自动拉起(on_success)
     state.kernel.stop().await;
@@ -334,8 +340,11 @@ async fn kernel_install(
         format!("{}/qwenpaw-version", state.var_dir),
     );
     if started {
+        let seq = state.install.snapshot().seq;
         state.events.publish(render_snapshot(&state));
-        Json(json!({"ok": true, "success": true, "message": "安装已开始"})).into_response()
+        // seq 随受理响应返回:前端由此确认"后端已接单",替代 sendBeacon 的盲发
+        Json(json!({"ok": true, "success": true, "message": "安装已开始", "seq": seq}))
+            .into_response()
     } else {
         err_json(StatusCode::CONFLICT, "安装正在进行中")
     }
@@ -379,6 +388,9 @@ async fn install_status(
         "success": true,
         "upgrading": s.running,
         "phase": match s.phase { crate::install::Phase::Idle => "idle", crate::install::Phase::Downloading => "downloading", crate::install::Phase::Installing => "installing", crate::install::Phase::Done => "done", crate::install::Phase::Failed => "failed" },
+        // seq 供弹窗按任务跟踪:触发前取基线,seq 变化 = 本次任务已被受理,
+        // 终态 + seq 匹配才算本次结果(修复"首拍已是终态"的漏判)
+        "seq": s.seq,
         "fetched": s.fetched,
         "message": s.message,
         "error": s.error,

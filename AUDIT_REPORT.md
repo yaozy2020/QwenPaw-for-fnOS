@@ -5,7 +5,7 @@
 
 ## 当前版本：v2.0.0-12
 
-- **生成时间**：2026-11-01 12:52:07 +0800
+- **生成时间**：2026-11-01 14:35:44 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -16,7 +16,7 @@
 
 | 项目 | 数据 |
 |:-----|:-----|
-| 生命周期脚本 | 10 个 |
+| 生命周期脚本 | 11 个 |
 | 向导清单 | 4 个 |
 | 上游 Python 文件 | 0 个，0 行 |
 | 上游 Plugins | 0 个 .py |
@@ -32,6 +32,7 @@
 | `cmd/install_init` | 安装前环境检查 |
 | `cmd/lib.sh` | - |
 | `cmd/main` | 应用启动 / stop / status 入口 |
+| `cmd/supervisor_ctl.sh` | - |
 | `cmd/uninstall_callback` | 卸载完成回调 |
 | `cmd/uninstall_init` | 卸载前清理 |
 | `cmd/upgrade_callback` | 升级完成回调 |

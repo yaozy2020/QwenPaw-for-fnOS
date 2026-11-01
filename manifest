@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "安全整改: 内核安装版本参数改 argv 直传(消除 Shell 注入), 桥接增加方法白名单与同源校验(405/403), Token 全生命周期 0600, 收回 docker 组与未用文件权限; 稳定性: 改端口/重置认证失败回滚, 版本钉元数据核实后原子写入, pip 安装纳入停止/卸载回收, 日志尾部读取与轮转, FPK 白名单打包+构建后审计, CI 增加 Rust test/clippy/build 门禁与执行位检查"
+changelog                  = "安全整改: 内核安装版本参数改 argv 直传(消除 Shell 注入), 桥接增加方法白名单与同源校验(405/403), Token 全生命周期 0600, 收回 docker 组与未用文件权限; 稳定性: 改端口/重置认证失败回滚, 版本钉元数据核实后原子写入, pip 安装纳入停止/卸载回收, 日志尾部读取与轮转, FPK 白名单打包+构建后审计, CI 增加 Rust test/clippy/build 门禁与执行位检查 移动端安装修复: 触发后确认后端受理(seq), 弹窗按任务跟踪不再漏判完成, 重开控制台可恢复查看进行中任务, pip 看门狗超时自动回收不永久锁死"

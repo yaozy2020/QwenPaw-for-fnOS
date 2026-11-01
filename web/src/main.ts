@@ -12,7 +12,12 @@ const API_BASE = (function() {
     let upgradePollTimer = null;
     let upgradeStartedAt = 0;
     let upPollLastAt = 0;
-    let upgradeSeenPhase = null;
+    // 任务跟踪:不再靠"phase 是否跳变"猜结果(首拍已是终态会漏判),按 seq 归属
+    let upgradeSeenPhase = null;          // 首拍 phase(变化检测)
+    let upgradeFirstPollTerminal = false; // 首拍即终态(附加模式秒完成判据)
+    let upgradeBaselineSeq = null;        // 触发前的 seq(null=未知,退回旧行为)
+    let upgradeTaskSeq = null;            // 已确认归属本会话的任务 seq
+    let upgradeAttachMode = false;        // 附加模式:查看已在后端运行的任务
 
     let rawVersionList = [];
     let selectedVersion = "2.3.0b1";
@@ -187,6 +192,14 @@ const API_BASE = (function() {
         } else {
           const tip = document.getElementById("kernelInstallTip");
           if (tip) tip.style.display = "none";
+        }
+
+        // 后端安装任务进行中(重开控制台/换设备):恢复现场入口。
+        // 弹窗已打开时不重复提示;点击进入附加模式而非再次创建任务
+        const runTip = document.getElementById("installRunningTip");
+        if (runTip) {
+          const modalOpen = document.getElementById("upgradeModal")?.classList.contains("active");
+          runTip.style.display = (data.install && data.install.running && !modalOpen) ? "block" : "none";
         }
 
         if (!notInstalled && data.running) {
@@ -468,7 +481,7 @@ const API_BASE = (function() {
       }
     }
 
-    // 升级执行与专属流式终端 (第 0 毫秒置顶秒开)
+    // 升级执行与专属流式终端
     async function checkOrUpgrade() {
       const isDowngrade = isDowngradeOf(currentRunningVersion, selectedVersion);
       let ok = false;
@@ -492,35 +505,92 @@ const API_BASE = (function() {
       }
       if (!ok) return;
 
-      openUpgradeModal();
-      upgradeStartedAt = Date.now();
-      upgradeSeenPhase = null;
-
-      // 触发即忘:sendBeacon 由浏览器保证页面卸载/切后台时仍尽力送达 ——
-      // iOS 切后台曾把 fetch 连人带请求杀掉,升级指令从未到达监督者(取证:
-      // supervisor.log 无任何 install 事件)。busy 竞争由监督者单槽兜底,
-      // 是否送达由弹窗对 install.phase 的轮询与 10s 启动确认守卫呈现。
-      const url = `${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}&mirror=${encodeURIComponent(currentMirror())}`;
-      let sent = false;
+      // 触发前取基线:seq + 是否已有任务在跑。已有任务直接附加查看,禁止重复创建
+      let baseline = null;
       try {
-        sent = Boolean(navigator.sendBeacon && navigator.sendBeacon(url));
-      } catch (e) { sent = false; }
-      if (!sent) {
-        try {
-          await fetch(url, { method: "POST", keepalive: true });
-        } catch (e) { /* 送达与否交给弹窗轮询判断 */ }
+        const sres = await fetch(`${API_BASE}?action=upgrade_status&_t=${Date.now()}`);
+        if (sres.ok) {
+          const s = await sres.json();
+          if (s.upgrading) {
+            showToast("已有安装任务正在进行中,已切换到进度查看");
+            attachRunningInstall();
+            return;
+          }
+          if (typeof s.seq === "number") baseline = s.seq;
+        }
+      } catch (e) { /* 基线未知时轮询退回 phase 跳变判定 */ }
+
+      openUpgradeModal(false, baseline);
+
+      // 触发安装:fetch(keepalive) 为主 —— 能读到受理响应(成功 seq / busy 提示),
+      // 失败才退回 sendBeacon(浏览器保证尽力送达,但响应不可读)。
+      // 后端接单与页面生死解耦:墓碑只中断界面,NAS 侧任务照常执行
+      const url = `${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}&mirror=${encodeURIComponent(currentMirror())}`;
+      let accepted = false;
+      try {
+        const res = await fetch(url, { method: "POST", keepalive: true });
+        const d = await res.json().catch(() => null);
+        if (d && d.success === false) {
+          if (d.running) {
+            // 触发瞬间别人已建任务:自动转入附加模式,不重复创建
+            showToast(d.message || "已有安装任务进行中,已切换到进度查看");
+            openUpgradeModal(true, d.seq);
+            return;
+          }
+          showToast("安装未开始: " + (d.message || "后端拒绝"));
+          closeUpgradeModal();
+          return;
+        }
+        if (d && typeof d.seq === "number") {
+          upgradeTaskSeq = d.seq; // 受理确认:后端已接单
+        }
+        accepted = true;
+      } catch (e) {
+        // fetch 失败(切后台/网络抖动):退回 sendBeacon,送达与否交给弹窗对 seq 的轮询
+        try { accepted = Boolean(navigator.sendBeacon && navigator.sendBeacon(url)); } catch (e2) { accepted = false; }
+      }
+      if (!accepted) {
+        document.getElementById("upSubTitle").innerText = "触发请求可能未送达,正在确认...";
       }
     }
 
-    function openUpgradeModal() {
+    // 重开控制台/换设备进入时恢复现场:后端任务独立运行,直接附加查看
+    async function attachRunningInstall() {
+      try {
+        const res = await fetch(`${API_BASE}?action=upgrade_status&_t=${Date.now()}`);
+        if (!res.ok) { showToast("无法读取安装状态: HTTP " + res.status); return; }
+        const s = await res.json();
+        if (!s.upgrading) {
+          showToast("当前没有进行中的安装任务");
+          fetchStatus();
+          return;
+        }
+        openUpgradeModal(true, typeof s.seq === "number" ? s.seq : null);
+      } catch (e) {
+        showToast("无法连接后端: " + e.message);
+      }
+    }
+
+    function openUpgradeModal(attach, baselineSeq) {
       const modal = document.getElementById("upgradeModal");
       if (!modal) return;
-      document.getElementById("upTitle").innerText = `QwenPaw 正在更新至 v${selectedVersion}...`;
-      document.getElementById("upSubTitle").innerText = "正在执行 pip 下载与环境重构，期间服务将自动重启";
+      // 跟踪状态统一在此初始化(先于首次轮询,避免竞态)
+      upgradeAttachMode = Boolean(attach);
+      upgradeBaselineSeq = (baselineSeq === undefined || baselineSeq === null) ? null : baselineSeq;
+      upgradeTaskSeq = upgradeAttachMode && upgradeBaselineSeq !== null ? upgradeBaselineSeq : null;
+      upgradeSeenPhase = null;
+      upgradeFirstPollTerminal = false;
+      upgradeStartedAt = Date.now();
+      document.getElementById("upTitle").innerText = upgradeAttachMode
+        ? "正在查看进行中的安装任务..."
+        : `QwenPaw 正在更新至 v${selectedVersion}...`;
+      document.getElementById("upSubTitle").innerText = upgradeAttachMode
+        ? "NAS 后端独立执行中,与本页面是否在线无关"
+        : "正在执行 pip 下载与环境重构，期间服务将自动重启";
       document.getElementById("upSpinner").style.display = "inline-block";
       document.getElementById("upDoneIcon").style.display = "none";
       document.getElementById("btnUpClose").style.display = "none";
-      document.getElementById("upTerminal").innerHTML = "正在启动升级进程并拉取实时日志流...\n";
+      document.getElementById("upTerminal").innerHTML = "正在获取实时安装状态...\n";
       modal.classList.add("active");
 
       if (upgradePollTimer) clearInterval(upgradePollTimer);
@@ -535,6 +605,9 @@ const API_BASE = (function() {
         clearInterval(upgradePollTimer);
         upgradePollTimer = null;
       }
+      upgradeAttachMode = false;
+      upgradeTaskSeq = null;
+      upgradeBaselineSeq = null;
       fetchStatus();
       fetchLogs();
     }
@@ -564,21 +637,30 @@ const API_BASE = (function() {
 
         if (statusRes.ok) {
           const sdata = await statusRes.json();
-          const terminalText = document.getElementById("upTerminal").innerText;
-          // v2 完成判据 = 桥转发的 install.phase(done/failed);v1 靠日志文本找
-          // 中文标记在 v2 的 pip 流水里永不出现,弹窗曾永转(独立审计 major)
-          // phase 必须在本轮会话内发生跳变才判定完成 —— 防止上次安装遗留的
-          // 终态 + 本次指令未送达 造成"秒完成"假象
-          if (upgradeSeenPhase === null) upgradeSeenPhase = sdata.phase;
+          const terminalPhase = sdata.phase === "done" || sdata.phase === "failed";
+          if (upgradeSeenPhase === null) {
+            upgradeSeenPhase = sdata.phase;
+            upgradeFirstPollTerminal = terminalPhase;
+          }
           const phaseChanged = sdata.phase !== upgradeSeenPhase;
-          const isDone = (phaseChanged && (sdata.phase === "done" || sdata.phase === "failed"))
-            || terminalText.includes("升级成功") || terminalText.includes("升级失败");
-          const isFailed = (phaseChanged && sdata.phase === "failed") || terminalText.includes("升级失败");
 
-          // 启动确认:10s 后仍无任何 phase 跳变且未在升级 → 指令未送达(切后台被杀)
-          const pending = !sdata.upgrading && !phaseChanged
-            && (sdata.phase === "idle" || sdata.phase === "done" || sdata.phase === "failed"
-              || sdata.success === false); // 新桥+旧监督者过渡态:兜底响应也算未送达
+          // 任务归属:受理响应给出的 seq,或基线之后的 seq 变化 = 本次任务已接单;
+          // 附加模式直接跟随当前任务。首拍即终态 + seq 已归属 = 秒完成(修复漏判)
+          if (!upgradeTaskSeq && typeof sdata.seq === "number") {
+            if (upgradeAttachMode) {
+              upgradeTaskSeq = sdata.seq;
+            } else if (upgradeBaselineSeq !== null && sdata.seq !== upgradeBaselineSeq) {
+              upgradeTaskSeq = sdata.seq;
+            }
+          }
+          const ours = upgradeAttachMode || upgradeTaskSeq !== null || upgradeBaselineSeq === null;
+          const isDone = ours && terminalPhase && (phaseChanged || upgradeFirstPollTerminal);
+          const isFailed = ours && sdata.phase === "failed" && (phaseChanged || upgradeFirstPollTerminal);
+
+          // 未送达守卫:非附加、任务未确认接单、后端无任务在跑 —— 指令没到达
+          // (切后台被杀/网络断)。10s 后如实呈现,不再永久转圈
+          const pending = !upgradeAttachMode && upgradeTaskSeq === null && !sdata.upgrading
+            && (sdata.phase === "idle" || terminalPhase || sdata.success === false);
           if (pending && Date.now() - upgradeStartedAt > 10000) {
             clearInterval(upgradePollTimer);
             upgradePollTimer = null;
@@ -717,5 +799,5 @@ const API_BASE = (function() {
       checkOrUpgrade, checkOnlineVersions, pickVersion, toggleHistoryDropdown,
       saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
       closeUpgradeModal, logGoPrev, logGoNext, logGoLatest,
-      toggleMirrorDropdown, pickMirror,
+      toggleMirrorDropdown, pickMirror, attachRunningInstall,
     });
