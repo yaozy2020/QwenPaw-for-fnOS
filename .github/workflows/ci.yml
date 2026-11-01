@@ -27,15 +27,20 @@ jobs:
       - name: Verify AUDIT_REPORT.md is up-to-date
         run: python3 scripts/gen-audit.py --check
 
-      - name: Lint (bash -n + shellcheck + 内嵌 spawn 脚本展开验证)
+      - name: Setup web toolchain (esbuild,lint 第 5 层依赖)
+        run: npm install --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+
+      - name: Lint (五层:bash -n + shellcheck + 桥接 JSON 门禁 + esbuild 编译)
         run: |
           chmod +x scripts/lint.sh scripts/preflight.sh scripts/sync-version.py scripts/gen-audit.py
           bash scripts/lint.sh
 
-      - name: Console artifact sanity (零构建架构，控制台为提交产物)
+      - name: Console build + artifact sanity (web/src 经 esbuild 出单文件)
         run: |
-          test -f app/www/index.html
-          grep -q "QwenPaw 控制台" app/www/index.html
-          grep -q "api.cgi" app/www/index.html
+          (cd web && BUILD_ID=ci node build.mjs)
+          test -f web/dist/index.html
+          grep -q "QwenPaw 控制台" web/dist/index.html
+          grep -q "api.cgi" web/dist/index.html
+          grep -q "statusCardMount" web/dist/index.html
           test -f app/ui/index.cgi
           test -f app/ui/api.cgi
