@@ -80,23 +80,14 @@ secure_var_perms() {
     return 0
 }
 
+# ── 监督者身份校验/安全停止/状态判定（P1-01：与 cmd/main、卸载回调共用
+#    同一实现，禁止再内联 kill 循环）──
+# shellcheck source=cmd/supervisor_ctl.sh
+. "$(dirname "$0")/supervisor_ctl.sh"
+
 # ── 停止监督者（统一 PID 口径 supervisor.pid；旧 qwenpaw.pid 已废弃只清理）──
 stop_supervisor() {
-    local pid_file="${VAR_DIR}/supervisor.pid"
-    if [ -r "${pid_file}" ]; then
-        local pid
-        pid=$(head -n 1 "${pid_file}" | tr -d '[:space:]')
-        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-            kill -TERM "${pid}" 2>/dev/null || true
-            local count=0
-            while kill -0 "${pid}" 2>/dev/null && [ ${count} -lt 15 ]; do
-                sleep 1
-                count=$((count + 1))
-            done
-            kill -KILL "${pid}" 2>/dev/null || true
-        fi
-        rm -f "${pid_file}"
-    fi
+    supervisor_safe_stop "${VAR_DIR}/supervisor.pid"
     rm -f "${VAR_DIR}/qwenpaw.pid" 2>/dev/null || true
     return 0
 }

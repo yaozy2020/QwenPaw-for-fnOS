@@ -1,5 +1,5 @@
 #!/bin/bash
-# lint.sh — 语法与静态检查门禁（五层）
+# lint.sh — 语法与静态检查门禁（六层）
 #   [1/5] bash -n 全量
 #   [2/5] shellcheck（error 级为门禁，warning 仅报告；本地无二进制时自动下载 pinned 版本）
 #   [3/5] 内嵌 spawn 脚本展开验证 —— api.cgi 中以 nohup bash -c "..." / local cmd="..."
@@ -9,6 +9,8 @@
 #   [4/5] api.cgi 桥接输出 JSON 有效性 —— 控制台所有动态渲染依赖 res.json() 成功；
 #         桥接只要吐出一段非 JSON（历史事故：echo "${resp:-{...}}" 默认词里的 }
 #         提前终止参数展开，输出 "{...}}"），前端就全体静默失效停在静态默认值。
+#   [6/6] 监督者生命周期回归（scripts/test-lifecycle.sh）：陈旧/复用 PID 不得误杀
+#         无关进程（P1-01）、外部停止宽限覆盖内部最坏清理（P1-03）。
 # 用法: bash scripts/lint.sh
 # 注意: 不用 set -e（工程铁律），失败显式 exit 1
 
@@ -46,7 +48,7 @@ if [ -z "$SC_BIN" ]; then
 fi
 if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then
     # 活跃脚本；scripts/update-qwenpaw.sh 为遗留脚本不参与门禁
-    TARGETS=(cmd/main cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback app/ui/api.cgi app/ui/index.cgi build.sh)
+    TARGETS=(cmd/main cmd/supervisor_ctl.sh cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback app/ui/api.cgi app/ui/index.cgi build.sh scripts/test-lifecycle.sh)
     if "$SC_BIN" -S error "${TARGETS[@]/#/"$ROOT/"}" 2>&1; then
         echo "  [  OK ] error 级问题为 0（warning 级见上方输出，不拦截）"
     else
@@ -403,6 +405,15 @@ if [ -f "$WEB_DIR/src/main.ts" ] && [ -f "$WEB_DIR/src/index.html" ]; then
     fi
 else
     echo "  [SKIP] web/src 缺失"
+fi
+
+# ── [6/6] 监督者生命周期身份校验回归（P1-01/P1-03，勿删）──
+echo "[6/6] 监督者生命周期回归 ..."
+if bash "$ROOT/scripts/test-lifecycle.sh"; then
+    echo "  [  OK ] 身份校验/安全停止/停止宽限回归通过"
+else
+    echo "  [FAIL] 监督者生命周期回归失败（陈旧 PID 误杀或宽限不足）"
+    fail=1
 fi
 
 echo "========================================="

@@ -24,6 +24,22 @@ pub enum Phase {
     Installing,
     Done,
     Failed,
+    /// 任务在生效前被停止(停止/卸载路径的 cancel)。与 Failed 区分的意义:
+    /// Failed 会触发自愈重启(main.rs on_change),Cancelled 绝不 —— 取消只
+    /// 发生在关停流程中,自动拉起内核会对抗关停(P1-04)。
+    Cancelled,
+}
+
+/// 线上 phase 字符串(与旧桥/控制台兼容):取消也归入 failed —— 控制台只认
+/// done/failed 终态,"已被停止"的细节走 message/error 字段,不扩协议。
+pub fn phase_wire(p: &Phase) -> &'static str {
+    match p {
+        Phase::Idle => "idle",
+        Phase::Downloading => "downloading",
+        Phase::Installing => "installing",
+        Phase::Done => "done",
+        Phase::Failed | Phase::Cancelled => "failed",
+    }
 }
 
 /// 安装渠道:latest / beta / 精确版本。精确版本经 PEP 440 字符白名单校验后
@@ -166,6 +182,22 @@ pub struct InstallState {
     inner: Arc<Mutex<Inner>>,
     on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
     on_success: Arc<dyn Fn() + Send + Sync>,
+    /// pip 启动器:生产即 Command::spawn;测试注入可阻塞 spawner,
+    /// 精确复现"运行态已建立、PID 未登记"的取消窗口(P1-04)。
+    spawner: Arc<dyn PipSpawner>,
+}
+
+/// pip 启动器抽象。
+trait PipSpawner: Send + Sync {
+    fn spawn(&self, cmd: &mut std::process::Command) -> std::io::Result<std::process::Child>;
+}
+
+struct RealSpawner;
+
+impl PipSpawner for RealSpawner {
+    fn spawn(&self, cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        cmd.spawn()
+    }
 }
 
 /// 单行日志上限:pip 行内含长 URL/异常栈,超长截断防日志膨胀与前端卡顿
@@ -184,6 +216,14 @@ impl InstallState {
         on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
         on_success: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
+        Self::with_spawner(Arc::new(RealSpawner), on_change, on_success)
+    }
+
+    fn with_spawner(
+        spawner: Arc<dyn PipSpawner>,
+        on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
+        on_success: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 phase: Phase::Idle,
@@ -197,6 +237,7 @@ impl InstallState {
             })),
             on_change,
             on_success,
+            spawner,
         }
     }
 
@@ -233,14 +274,23 @@ impl InstallState {
     }
 
     /// 取消进行中的安装:进程组 TERM → 宽限 → 组 KILL。
-    /// 只在任务运行时执行;实际状态转换仍由安装线程在 wait 返回后完成。
+    /// 实际状态转换仍由安装线程在 wait 返回后完成(终态唯一写入者)。
     /// PID 复用窗口极小且组信号对无关组是 ESRCH 空操作,可接受(勿凭 PID 乱杀)。
+    ///
+    /// P1-04:任务已建立运行态但 pip 尚未 spawn(pid=0)时同样必须记录取消
+    /// 意图 —— 否则停止/卸载调用 cancel 后,安装线程仍会拉起 pip 继续改 venv,
+    /// 只能指望下次启动的孤儿清理。安装线程在 spawn 前后各核对一次该标志。
     pub fn cancel(&self) {
         let (running, pid) = {
             let g = self.inner.lock().unwrap();
             (g.running, g.pid)
         };
-        if !running || pid == 0 {
+        if !running {
+            return;
+        }
+        if pid == 0 {
+            // 尚无进程可杀:先落取消标志,安装线程稍后自行中止/回收
+            self.set(|g| g.cancelled = true);
             return;
         }
         let pgid = pid as i32;
@@ -253,6 +303,30 @@ impl InstallState {
         }
         unsafe { libc::kill(-pgid, libc::SIGKILL) };
         self.set(|g| g.cancelled = true);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.inner.lock().unwrap().cancelled
+    }
+
+    /// 取消终态:不写版本钉、不自动拉起内核(区别于 Failed 的自愈重启)。
+    fn finish_cancelled(&self) {
+        self.set(|g| {
+            g.running = false;
+            g.pid = 0;
+            g.phase = Phase::Cancelled;
+            g.error = "安装已被停止".into();
+        });
+    }
+
+    /// spawn 前核对取消标志;已取消则落终态并返回 true(调用方直接结束任务)。
+    fn abort_if_cancelled(&self) -> bool {
+        if self.cancelled() {
+            self.finish_cancelled();
+            true
+        } else {
+            false
+        }
     }
 
     /// 运行 pip 安装(独立进程组 + 专用阻塞线程;终态唯一写入者是安装线程)。
@@ -306,7 +380,11 @@ impl InstallState {
                 .ok();
             let total = Arc::new(Mutex::new(0u64));
 
-            let spawned = cmd.spawn();
+            // spawn 前核对取消标志(P1-04):cancel 在 PID 登记前到达时,绝不拉起 pip
+            if this.abort_if_cancelled() {
+                return;
+            }
+            let spawned = this.spawner.spawn(&mut cmd);
             match spawned {
                 Ok(mut child) => {
                     let pid = child.id();
@@ -317,6 +395,21 @@ impl InstallState {
                         .map(|p| p.join("install.pid"))
                         .unwrap_or_default();
                     let _ = std::fs::write(&pid_file, format!("{}\n", pid));
+
+                    // P1-04:spawn 与登记之间到达的取消在此落地 —— cancel 当时看到
+                    // pid=0 只落了标志,这里复核后整组回收(组 TERM → 短宽限 → 组
+                    // KILL),再走正常收尾(wait 立即返回,终态 Cancelled)
+                    if this.cancelled() {
+                        let cpgid = pid as i32;
+                        unsafe { libc::kill(-cpgid, libc::SIGTERM) };
+                        for _ in 0..8 {
+                            if !crate::procfs::process_alive(cpgid) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        unsafe { libc::kill(-cpgid, libc::SIGKILL) };
+                    }
 
                     // 看门狗共享状态:任一输出线程每落一行就刷新活动时间戳
                     let started = Arc::new(std::time::Instant::now());
@@ -455,11 +548,16 @@ impl InstallState {
                     let _ = std::fs::remove_file(&pid_file);
                     this.set(|g| g.pid = 0);
 
+                    if cancelled {
+                        // 取消终态(P1-04):不写版本钉、不触发自愈重启,
+                        // 与 Failed(真实 pip 失败,需要拉回旧内核)分流
+                        this.finish_cancelled();
+                        return;
+                    }
+
                     // 终态前必须核实:venv 元数据里实际装到的版本
-                    let mut ok = exit_ok && !cancelled;
-                    let mut reason = if cancelled {
-                        "安装已被停止".to_string()
-                    } else if !timeout_reason.is_empty() {
+                    let mut ok = exit_ok;
+                    let mut reason = if !timeout_reason.is_empty() {
                         timeout_reason
                     } else if let Some(e) = wait_err {
                         format!("pip 进程等待异常: {e}")
@@ -658,5 +756,160 @@ mod tests {
         assert!(version_matches("2.3.0", "v2.3.0"));
         assert!(!version_matches("2.3.0", "2.3.1"));
         assert!(!version_matches("2.3.0b1", "2.3.0b2"));
+    }
+
+    #[test]
+    fn cancelled_phase_maps_to_failed_on_wire() {
+        // 线上协议不扩新终态:控制台只认 done/failed,"已被停止"走 message/error
+        assert_eq!(phase_wire(&Phase::Cancelled), "failed");
+        assert_eq!(phase_wire(&Phase::Failed), "failed");
+        assert_eq!(phase_wire(&Phase::Done), "done");
+        assert_eq!(phase_wire(&Phase::Idle), "idle");
+        assert_eq!(phase_wire(&Phase::Downloading), "downloading");
+        assert_eq!(phase_wire(&Phase::Installing), "installing");
+    }
+
+    type OnChangeCb = Arc<dyn Fn(InstallSnapshot) + Send + Sync>;
+    type OnSuccessCb = Arc<dyn Fn() + Send + Sync>;
+    fn noop_callbacks() -> (OnChangeCb, OnSuccessCb) {
+        (Arc::new(|_: InstallSnapshot| {}), Arc::new(|| {}))
+    }
+
+    #[test]
+    fn cancel_records_intent_when_pid_not_yet_registered() {
+        // P1-04:running=true、pid=0(运行态已建立、pip 未 spawn)时,
+        // cancel 必须记录取消意图,而不是静默返回
+        let (oc, os) = noop_callbacks();
+        let st = InstallState::new(oc, os);
+        st.set(|g| {
+            g.running = true;
+            g.phase = Phase::Downloading;
+        });
+        st.cancel();
+        assert!(
+            st.inner.lock().unwrap().cancelled,
+            "PID 未登记时取消意图必须被记录"
+        );
+    }
+
+    #[test]
+    fn pre_spawn_cancel_aborts_without_running_pip() {
+        // spawn 前核对取消标志:直接落 Cancelled 终态,不拉起任何进程
+        let (oc, os) = noop_callbacks();
+        let st = InstallState::new(oc, os);
+        st.set(|g| {
+            g.running = true;
+            g.cancelled = true;
+        });
+        assert!(st.abort_if_cancelled());
+        let snap = st.snapshot();
+        assert_eq!(snap.phase, Phase::Cancelled);
+        assert!(!snap.running);
+        // 未取消时不得误触发
+        let (oc, os) = noop_callbacks();
+        let st2 = InstallState::new(oc, os);
+        st2.set(|g| g.running = true);
+        assert!(!st2.abort_if_cancelled());
+    }
+
+    /// 可阻塞 spawner:进入 spawn 后挂起等待放行,测试在挂起期间调用 cancel(),
+    /// 精确复现"运行态已建立、PID 未登记"的窗口(P1-04)
+    struct GatedSpawner {
+        entered: Arc<AtomicU64>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        spawned_pids: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl PipSpawner for GatedSpawner {
+        fn spawn(&self, _cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+            use std::os::unix::process::CommandExt;
+            self.entered.store(1, Ordering::SeqCst);
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(20));
+            // 真实子进程替身 pip:独立进程组,存活期间可被组信号回收
+            let mut c = std::process::Command::new("/bin/sleep");
+            c.arg("30").process_group(0);
+            let child = c.spawn()?;
+            self.spawned_pids.lock().unwrap().push(child.id());
+            Ok(child)
+        }
+    }
+
+    #[test]
+    fn cancel_in_pid_registration_window_kills_pip_and_lands_cancelled() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let entered = Arc::new(AtomicU64::new(0));
+        let pids: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let success_calls = Arc::new(AtomicU64::new(0));
+        let sc = Arc::clone(&success_calls);
+        let on_success: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            sc.fetch_add(1, Ordering::SeqCst);
+        });
+        let st = InstallState::with_spawner(
+            Arc::new(GatedSpawner {
+                entered: Arc::clone(&entered),
+                release: Mutex::new(rx),
+                spawned_pids: Arc::clone(&pids),
+            }),
+            Arc::new(|_: InstallSnapshot| {}),
+            on_success,
+        );
+        let dir = std::env::temp_dir().join(format!("qwenpaw-inst-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pip_log = dir.join("pip.log").to_string_lossy().to_string();
+        let pin = dir.join("pin").to_string_lossy().to_string();
+
+        assert!(st.try_start(
+            "/nonexistent-venv".into(),
+            InstallChannel::Latest,
+            String::new(),
+            pip_log.clone(),
+            pin.clone(),
+        ));
+        // 等安装线程进入 spawn:此刻 running=true、pid=0(竞态窗口)
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while entered.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(entered.load(Ordering::SeqCst), 1, "安装线程未进入 spawn");
+        // 窗口内取消:pid 尚未登记,取消意图必须先落标志
+        st.cancel();
+        tx.send(()).ok(); // 放行 spawn
+
+        // 等终态:必须是 Cancelled(旧实现此处会一路跑成 Done 并触发 on_success)
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while st.snapshot().running && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let snap = st.snapshot();
+        assert_eq!(snap.phase, Phase::Cancelled, "终态应为 Cancelled");
+        assert!(!snap.running);
+
+        // pip 替身(sleep 30)必须已被整组回收,而不是留成 30s 孤儿
+        let spawned = pids.lock().unwrap().clone();
+        assert!(!spawned.is_empty(), "替身 pip 未被 spawn");
+        for p in &spawned {
+            assert!(
+                !crate::procfs::process_alive(*p as i32),
+                "pip 替身 pid={} 在取消后仍存活",
+                p
+            );
+        }
+        // 不得写版本钉、不得触发安装成功自动拉起、install.pid 必须清理
+        assert!(!std::path::Path::new(&pin).exists(), "取消任务不得写版本钉");
+        assert_eq!(
+            success_calls.load(Ordering::SeqCst),
+            0,
+            "取消不得触发 on_success"
+        );
+        let install_pid = std::path::Path::new(&pip_log)
+            .parent()
+            .unwrap()
+            .join("install.pid");
+        assert!(!install_pid.exists(), "install.pid 未清理");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

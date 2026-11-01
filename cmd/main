@@ -1,8 +1,13 @@
 #!/bin/bash
 # fnOS 生命周期入口:本脚本只管理监督者进程;内核生命周期由监督者负责。
 # start → 拉起监督者(监督者自动收养/拉起内核)
-# stop  → TERM 监督者(监督者收到信号级联停内核)→ 宽限 → KILL
+# stop  → 身份核对后 TERM 监督者(监督者收到信号级联停内核)→ 宽限 → KILL
 # status→ 监督者存活即应用运行(退出码 0/3,官方约定)
+# start/stop/status 统一走 supervisor_ctl.sh(P1-01:PID 复用时凭 kill -0
+# 发信号会误杀无关进程,已动态复现;三处停止入口共用同一实现防漂移)。
+
+# shellcheck source=cmd/supervisor_ctl.sh
+. "$(dirname "$0")/supervisor_ctl.sh"
 
 SUP_BIN_CANDIDATES=(
     "${TRIM_APPDEST}/bin/qwenpaw-supervisor"
@@ -22,46 +27,37 @@ for c in "${SUP_BIN_CANDIDATES[@]}"; do
 done
 
 start_process() {
-    if status; then
+    if supervisor_status "${PID_FILE}"; then
         return 0
     fi
     if [ -z "$SUP_BIN" ]; then
         echo "supervisor binary not found" >&2
         return 1
     fi
+    # VAR_DIR 先建:日志重定向与 PID 落盘都依赖它(全新安装时平台可能尚未创建)
+    mkdir -p "${VAR_DIR}" 2>/dev/null || true
     # TRIM_* 环境变量由平台注入本脚本,子进程继承;监督者据此定位数据目录
     nohup "$SUP_BIN" >> "${LOG_FILE}" 2>&1 &
-    echo $! > "${PID_FILE}"
+    # 记录 PID + starttime 戳:stop/status 据此核对进程身份(P1-01)。
+    # 监督者启动后自会覆写 PID 文件(同进程,戳仍有效)。
+    supervisor_register_start "$!" "${PID_FILE}" || {
+        echo "warn: cannot write ${PID_FILE}" >&2
+    }
+    # 身份核对依赖 /proc/<pid>/exe;fork→exec 之间的极短窗口内 exe 还不是
+    # 监督者二进制,status 会误报未运行,平台可能因此重复 start(双实例)。
+    # 最多等 2s;超时不阻断 —— 进程可能确实启动慢,以 status 最终结果为准,
+    # 且监督者启动后自会覆写 PID 文件自愈。
+    local waited=0
+    while ! supervisor_status "${PID_FILE}" && [ "$waited" -lt 20 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
     return 0
 }
 
 stop_process() {
-    if [ -r "${PID_FILE}" ]; then
-        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-            # 监督者收到 TERM 会级联停内核(设计 D4),宽限 15s(内核安装进行中时会先完成清扫)
-            kill -TERM "${pid}" 2>/dev/null || true
-            count=0
-            while kill -0 "${pid}" 2>/dev/null && [ $count -lt 15 ]; do
-                sleep 1
-                count=$((count + 1))
-            done
-            kill -KILL "${pid}" 2>/dev/null || true
-        fi
-        rm -f "${PID_FILE}"
-    fi
+    supervisor_safe_stop "${PID_FILE}"
     return 0
-}
-
-status() {
-    if [ -r "${PID_FILE}" ]; then
-        pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-            return 0
-        fi
-        rm -f "${PID_FILE}"
-    fi
-    return 3
 }
 
 case $1 in
@@ -72,7 +68,7 @@ stop)
     stop_process
     ;;
 status)
-    if status; then
+    if supervisor_status "${PID_FILE}"; then
         exit 0
     else
         exit 3

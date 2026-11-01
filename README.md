@@ -94,6 +94,7 @@ QwenPaw-for-fnOS/
 - **发布完整性**:git 执行位修复(CGI/生命周期脚本/构建脚本 100755);build.sh 改 staging 白名单(supervisor/target 不再入包)+ 构建后自动审计(audit-fpk.sh);cargo 构建失败终止出包且先删陈旧产物
 - **CI**:新增 rust job(cargo test/clippy -D warnings/build --locked);git 执行位检查;action 固定提交 SHA;npm ci 锁文件一致
 - **治理**:/logs 与 pip 日志尾部窗口读取;启动时大日志单代轮转;docs/backend-design.md 标注为历史文档
+- **P1 生命周期审计整改**:监督者停止三处入口(main/lib.sh/卸载回调)统一为 `supervisor_ctl.sh` 身份核对安全停止 —— PID 文件只是提示,发信号前核对 `/proc/<pid>/exe` + starttime 戳,PID 复用/陈旧 PID 绝不误杀无关进程(可动态复现的缺陷);外部停止宽限 15s→30s(原值小于监督者内部最坏清理 ~16.5s,会在后代清扫完成前强杀,留下孤儿);取消安装新增 Cancelled 终态(注入式测试复现"运行态已建立、PID 未登记"窗口,取消绝不拉起 pip、不写版本钉、不触发自愈重启);改端口/重置认证的回滚闭环 —— 先停止失败的新实例再恢复配置,恢复本身也要过健康检查,写回失败如实上报
 - **移动端安装闭环**:安装触发改为可读响应的 POST(受理 seq 确认接单,sendBeacon 仅作切后台兜底);busy 响应如实展示并自动转入进度查看;弹窗按任务 seq 跟踪,修复"首拍已终态被误判为未送达"的漏判;重开控制台/换设备时检测到进行中任务直接附加查看,不再重复创建;pip 看门狗(无输出 15 分钟/总时长 60 分钟)整组回收,安装不再可能永久锁死 busy 槽
 
 ### v2.0.0-11

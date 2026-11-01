@@ -19,22 +19,17 @@ log_msg() {
 
 log_msg "开始执行 QwenPaw 卸载流程..."
 
-# 1. 停止运行中的进程:统一 supervisor.pid 口径(监督者 TERM 会级联停内核并
+# 1. 停止运行中的进程:统一走 supervisor_ctl.sh 的身份核对安全停止
+#    (P1-01:PID 复用时绝不凭 kill -0 发信号;监督者 TERM 会级联停内核并
 #    回收安装中的 pip;旧 qwenpaw.pid 从未被当前版本写入,仅为兼容清理)
+# shellcheck source=cmd/supervisor_ctl.sh
+. "$(dirname "$0")/supervisor_ctl.sh"
 PID_FILE="${PKGVAR}/supervisor.pid"
-if [ -f "${PID_FILE}" ]; then
-    pid=$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')
-    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-        log_msg "正在终止监督者 PID: ${pid}(级联停内核)..."
-        kill -TERM "${pid}" 2>/dev/null || true
-        count=0
-        while kill -0 "${pid}" 2>/dev/null && [ $count -lt 15 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        kill -KILL "${pid}" 2>/dev/null || true
-    fi
-    rm -f "${PID_FILE}" 2>/dev/null || true
+if supervisor_status "${PID_FILE}"; then
+    log_msg "发现监督者(身份已核对),执行安全停止(级联停内核)..."
+    supervisor_safe_stop "${PID_FILE}"
+else
+    log_msg "监督者未运行(陈旧 PID 文件已清理,未发信号)"
 fi
 rm -f "${PKGVAR}/qwenpaw.pid" 2>/dev/null || true
 

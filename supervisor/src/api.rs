@@ -18,7 +18,7 @@ use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::{
     events::Events,
-    install::{sanitize_mirror, InstallChannel, InstallState},
+    install::{phase_wire, sanitize_mirror, InstallChannel, InstallState},
     kernel::KernelManager,
 };
 
@@ -101,7 +101,8 @@ pub fn render_snapshot(state: &AppState) -> String {
         "cpu": st.cpu_percent,
         "memKB": st.rss_kb,
         "install": {
-            "phase": format!("{:?}", inst.phase).to_lowercase(),
+            // phase_wire:取消(Cancelled)在线上归入 failed,控制台协议不扩新终态
+            "phase": phase_wire(&inst.phase),
             "fetched": inst.fetched,
             "message": inst.message,
             "error": inst.error,
@@ -387,7 +388,7 @@ async fn install_status(
     Json(json!({
         "success": true,
         "upgrading": s.running,
-        "phase": match s.phase { crate::install::Phase::Idle => "idle", crate::install::Phase::Downloading => "downloading", crate::install::Phase::Installing => "installing", crate::install::Phase::Done => "done", crate::install::Phase::Failed => "failed" },
+        "phase": phase_wire(&s.phase),
         // seq 供弹窗按任务跟踪:触发前取基线,seq 变化 = 本次任务已被受理,
         // 终态 + seq 匹配才算本次结果(修复"首拍已是终态"的漏判)
         "seq": s.seq,
@@ -488,21 +489,47 @@ async fn kernel_reset_auth(
         healthy = wait_healthy_blocking(&state).await;
     }
     if healthy {
-        // 重启成功才真正删除备份
-        let _ = std::fs::remove_file(&backup);
+        // 重启成功才真正删除备份;删除失败必须告知(备份里留着旧口令哈希)
+        let backup_removed = std::fs::remove_file(&backup);
         state.events.publish(render_snapshot(&state));
-        Json(json!({"ok": true, "success": true, "message": "管理员密码已重置,服务已重启"}))
-            .into_response()
+        let msg = match backup_removed {
+            Ok(_) => "管理员密码已重置,服务已重启".to_string(),
+            Err(e) => format!(
+                "管理员密码已重置,服务已重启;但备份删除失败({e}),残留于 {}",
+                backup.display()
+            ),
+        };
+        Json(json!({"ok": true, "success": true, "message": msg})).into_response()
     } else {
-        // 恢复备份,尽力拉回旧配置的内核;错误如实上报
-        let _ = std::fs::rename(&backup, &auth);
-        let _ = state.kernel.spawn();
+        // 回滚(P1-02):先停止失败的新实例 —— 它可能仍存活只是不健康,
+        // 不停则恢复后旧实例 spawn 会撞 "already running",回滚静默失效
+        state.kernel.stop().await;
+        // 恢复认证文件;失败必须如实上报(备份仍在,不丢认证)
+        let restore = std::fs::rename(&backup, &auth);
+        let respawn = state.kernel.spawn();
+        // 旧实例同样要通过健康检查,才允许宣称"已恢复"
+        let respawn_healthy = if respawn.is_ok() {
+            wait_healthy_blocking(&state).await
+        } else {
+            false
+        };
         state.events.publish(render_snapshot(&state));
         let detail = match spawn_result {
             Err(e) => format!("服务重启失败: {e}"),
             Ok(_) => "服务重启后健康检查未通过".to_string(),
         };
-        err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("{detail},已恢复原认证文件"))
+        let restore_msg = match (&restore, &respawn, respawn_healthy) {
+            (Err(e), _, _) => {
+                format!("认证文件恢复失败({e}),备份保留在 {}", backup.display())
+            }
+            (_, Err(e), _) => format!("已恢复原认证文件,但旧实例重启失败: {e},请手动启动服务"),
+            (_, _, false) => "已恢复原认证文件,但旧实例健康检查未通过,请检查内核日志".to_string(),
+            (_, _, true) => "已恢复原认证文件".to_string(),
+        };
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("{detail};{restore_msg}"),
+        )
     }
 }
 
@@ -582,27 +609,36 @@ async fn port(
         }))
         .into_response()
     } else {
-        // 3) 回滚:恢复旧端口配置并重启旧实例
-        let _ = std::fs::write(&port_file, format!("{}\n", old_port));
+        // 回滚(P1-02):先停止失败的新实例 —— 它可能仍存活只是不健康,
+        // 不停则旧实例 spawn 会撞 "already running",回滚静默失效
+        state.kernel.stop().await;
+        // 恢复旧端口配置;写回失败必须如实上报,不得宣称"已回滚"
+        let restore = std::fs::write(&port_file, format!("{}\n", old_port));
         state.kernel.set_port(old_port);
         let rollback = state.kernel.spawn();
+        // 旧实例同样要通过健康检查,才允许宣称"已回滚"(与正向路径同一标准)
+        let rolled_healthy = if rollback.is_ok() {
+            wait_healthy_blocking(&state).await
+        } else {
+            false
+        };
         state.events.publish(render_snapshot(&state));
         let detail = match spawn_result {
             Err(e) => format!("新端口启动失败: {e}"),
             Ok(_) => "新端口启动后健康检查未通过(端口冲突或内核异常)".to_string(),
         };
-        let roll_msg = match rollback {
-            Ok(_) => "已回滚至原端口",
-            Err(e) => {
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("{detail};回滚失败: {e},请手动启动服务"),
-                )
-            }
+        let roll_msg = match (&restore, &rollback, rolled_healthy) {
+            (Err(e), _, _) => format!(
+                "旧端口配置写回失败({e}),服务暂按原端口 {old_port} 运行,重启后将回到新端口,请修复 {} 后重试",
+                port_file
+            ),
+            (_, Err(e), _) => format!("回滚启动失败: {e},请手动启动服务"),
+            (_, _, false) => "旧实例已启动但健康检查未通过,请检查内核日志".to_string(),
+            (_, _, true) => "已回滚至原端口".to_string(),
         };
         err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("{detail};{roll_msg}",),
+            &format!("{detail};{roll_msg}"),
         )
     }
 }

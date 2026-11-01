@@ -107,7 +107,7 @@ rm -rf "${STAGE:?}/"*/__pycache__
 
 # staging 阶段统一执行位:Git 模式之外再设一道(压缩包/特殊文件系统构建时可能丢位)
 chmod +x "$STAGE"/app/ui/*.cgi "$STAGE"/cmd/* 2>/dev/null || true
-chmod -x "$STAGE/cmd/lib.sh" 2>/dev/null || true  # 仅被 source,不需执行位
+chmod -x "$STAGE/cmd/lib.sh" "$STAGE/cmd/supervisor_ctl.sh" 2>/dev/null || true  # 仅被 source,不需执行位
 chmod 644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE"/ICON*.PNG 2>/dev/null || true
 
 # 监督者二进制入包(app/bin/,运行时位于 /var/apps/qwenpaw/app/bin/)
