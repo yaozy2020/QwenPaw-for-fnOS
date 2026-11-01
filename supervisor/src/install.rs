@@ -191,7 +191,6 @@ impl InstallState {
                     g.error = "pip 安装失败,详见日志".into();
                 }
             });
-            this.emit(this.snapshot());
             if ok {
                 // 安装成功自动拉起内核(装完即用,无需手动重启)
                 (on_success)();

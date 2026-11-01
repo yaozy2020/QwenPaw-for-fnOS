@@ -85,17 +85,17 @@ fn main() {
     );
 
     // token:0600,缺失则生成;cgi 与监督者同读
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 0600 每次启动都执行:存量文件可能是旧版以宽松权限预置的(审计 M3)
+        let _ = std::fs::set_permissions(&cfg.token_file, std::fs::Permissions::from_mode(0o600));
+    }
     let token = match std::fs::read_to_string(&cfg.token_file) {
         Ok(t) if t.trim().len() >= 32 => t.trim().to_string(),
         _ => {
             let t = random_token();
             let _ = std::fs::write(&cfg.token_file, &t);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perm = std::fs::Permissions::from_mode(0o600);
-                let _ = std::fs::set_permissions(&cfg.token_file, perm);
-            }
             t
         }
     };

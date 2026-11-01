@@ -391,8 +391,7 @@ const API_BASE = (function() {
       if (!container) return;
 
 
-      renderVersionCards(latestBetaVer, latestStableVer, selectedVersion, pickVersion, container)
-        .catch(e => console.error("renderVersionCards err:", e));
+      renderVersionCards(latestBetaVer, latestStableVer, selectedVersion, pickVersion, container);
 
       if (historyDrop) {
         const historyList = rawVersionList.filter(v => v.version !== latestBetaVer && v.version !== latestStableVer);

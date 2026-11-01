@@ -17,7 +17,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use tokio::process::Command;
 
 use crate::procfs;
 
@@ -98,7 +97,10 @@ impl KernelManager {
             return Err("kernel not installed".into());
         }
         let port = self.port();
-        let mut cmd = Command::new(&bin);
+        // std::process::Command:spawn 可从任意线程调用(安装线程的失败自愈/
+        // on_success 都在裸线程上,tokio Command 在无 runtime 上下文会 panic ——
+        // 审计 B2 实测:panic + 日志锁毒化,一次 pip 失败砖死安装子系统)
+        let mut cmd = std::process::Command::new(&bin);
         cmd.args(["-m", "qwenpaw", "app", "--host", "0.0.0.0", "--port", &port.to_string()])
             .current_dir(&self.cfg.share_dir)
             .env("HOME", &self.cfg.etc_dir)
@@ -112,23 +114,32 @@ impl KernelManager {
                 "PATH",
                 "/var/apps/nodejs_v24/target/bin:/usr/local/bin:/usr/bin:/bin",
             )
-            .process_group(0) // 独立进程组:停止时组信号可连带浏览器/MCP 子进程
-            .kill_on_drop(false);
+            .process_group(0); // 独立进程组:停止时组信号可连带浏览器/MCP 子进程
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.cfg.log_file)
             .map_err(|e| format!("open kernel log: {e}"))?;
-        let log_err = log.try_clone().map_err(|e| format!("clone kernel log: {e}"))?;
-        use std::os::unix::io::{FromRawFd, IntoRawFd};
-        cmd.stdout(unsafe { std::fs::File::from_raw_fd(log.into_raw_fd()) });
-        cmd.stderr(unsafe { std::fs::File::from_raw_fd(log_err.into_raw_fd()) });
+        cmd.stdout(std::process::Stdio::from(
+            log.try_clone().map_err(|e| format!("clone kernel log: {e}"))?,
+        ));
+        cmd.stderr(std::process::Stdio::from(log));
         let mut child = cmd.spawn().map_err(|e| format!("spawn kernel: {e}"))?;
-        let pid = child.id().unwrap_or(0) as i32;
+        let pid = child.id() as i32;
         let _ = std::fs::write(&self.cfg.pid_file, format!("{pid}\n"));
-        // 后台进程:交由内核自身管理生命周期;退出后 tokio 孤儿回收器收尸
+        // 收尾线程:wait() 回收僵尸并落退出日志;std Child drop 不杀进程,
+        // 内核生命周期仍由自身管理(与原 kill_on_drop(false) 语义一致)
+        let log_path = self.cfg.log_file.clone();
         std::thread::spawn(move || {
-            let _ = child.wait();
+            use std::io::Write as _;
+            match child.wait() {
+                Ok(st) => {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                        let _ = writeln!(f, "[kernel] pid exited: {st}");
+                    }
+                }
+                Err(_) => {}
+            }
         });
         {
             let mut st = self.state.lock().unwrap();
