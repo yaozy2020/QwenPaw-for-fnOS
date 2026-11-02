@@ -322,6 +322,7 @@ const API_BASE = (function() {
             startAt: null,
             cpu: null,
             memKB: null,
+            degraded: true, // 如实显示"状态不可达",不得伪装成"内核未安装"
           }, cardMount);
         }
         const valVersion = document.getElementById("valVersion");
@@ -647,7 +648,7 @@ const API_BASE = (function() {
 
       const isDowngrade = isDowngradeOf(currentRunningVersion, selectedVersion);
       if (isDowngrade) {
-        btn.innerText = `⚠️ 降级至 v${selectedVersion}`;
+        btn.innerText = `降级至 v${selectedVersion}`;
         btn.className = "btn btn-danger btn-sm";
         if (warnBar) warnBar.style.display = "block";
       } else {
@@ -664,7 +665,7 @@ const API_BASE = (function() {
       if (!currentRunningVersion) {
         // 初装分支: 内核尚未安装,明确使用"安装"语义,绝不误提示为升级/降级
         ok = await showModal({
-          title: "📦 安装内核确认",
+          title: "安装内核确认",
           message: `即将为您下载并部署 QwenPaw v${selectedVersion} 核心运行环境，首次安装约需 1~3 分钟。确认开始？`,
           type: "primary",
           confirmText: "开始安装",
@@ -680,7 +681,7 @@ const API_BASE = (function() {
         });
       } else if (isDowngradeOf(currentRunningVersion, selectedVersion)) {
         ok = await showModal({
-          title: "⚠️ 降级风险警告",
+          title: "降级风险警告",
           message: `你正准备将 QwenPaw 降级至旧版本 v${selectedVersion}（当前运行为 v${currentRunningVersion}）。\n\n【已知风险】跨版本反向降级可能导致新版配置文件、会话记忆结构不兼容或依赖库冲突，甚至引起服务启动异常！\n\n如无明确排障需求，建议保持现状或升级。是否确认强行降级？`,
           type: "danger",
           confirmText: "已知风险，强行降级",

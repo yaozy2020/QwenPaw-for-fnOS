@@ -8,6 +8,7 @@ export interface StatusData {
   startAt: number | null; // epoch 秒
   cpu: number | null; // 占总 CPU 百分比(监督者 300ms 采样)
   memKB: number | null; // RSS
+  degraded?: boolean; // true = 后端不可达(502/网络错误/会话过期),非"未安装"
 }
 
 export function formatUptime(seconds: number | null): string {
