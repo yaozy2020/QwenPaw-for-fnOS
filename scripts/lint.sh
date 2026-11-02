@@ -49,12 +49,18 @@ echo "[2/5] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"
 [ -z "$SC_BIN" ] && [ -x /tmp/shellcheck ] && SC_BIN=/tmp/shellcheck
 if [ -z "$SC_BIN" ]; then
-    TARBALL="/tmp/shellcheck-${SHELLCHECK_VER}.tar.xz"
-    if curl -sL --max-time 120 -o "$TARBALL" \
-        "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VER}/shellcheck-v${SHELLCHECK_VER}.linux.x86_64.tar.xz" \
-        && tar -xJf "$TARBALL" -C /tmp "shellcheck-v${SHELLCHECK_VER}/shellcheck" 2>/dev/null; then
-        mv "/tmp/shellcheck-v${SHELLCHECK_VER}/shellcheck" /tmp/shellcheck
-        SC_BIN=/tmp/shellcheck
+    CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/qwenpaw-build"
+    mkdir -p "$CACHE_DIR"
+    SC_BIN="$CACHE_DIR/shellcheck"
+    if [ ! -x "$SC_BIN" ]; then
+        TARBALL="$CACHE_DIR/shellcheck-${SHELLCHECK_VER}.tar.xz"
+        if curl -sL --max-time 120 -o "$TARBALL" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VER}/shellcheck-v${SHELLCHECK_VER}.linux.x86_64.tar.xz" \
+            && tar -xJf "$TARBALL" -C "$CACHE_DIR" "shellcheck-v${SHELLCHECK_VER}/shellcheck" 2>/dev/null; then
+            mv "$CACHE_DIR/shellcheck-v${SHELLCHECK_VER}/shellcheck" "$SC_BIN"
+            chmod +x "$SC_BIN"
+            rm -f "$TARBALL"
+        fi
     fi
 fi
 if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then
@@ -67,7 +73,12 @@ if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then
         fail=1
     fi
 else
-    echo "  [SKIP] shellcheck 不可用（网络/二进制缺失），跳过本层"
+    if [ "${STRICT_CI:-0}" = "1" ]; then
+        echo "  [FAIL] STRICT_CI 模式下不允许跳过 shellcheck 门禁"
+        fail=1
+    else
+        echo "  [SKIP] shellcheck 不可用（网络/二进制缺失），跳过本层"
+    fi
 fi
 
 # ── [3/4] 内嵌 spawn 脚本展开验证 ──
@@ -430,10 +441,20 @@ if [ -f "$WEB_DIR/src/main.ts" ] && [ -f "$WEB_DIR/src/index.html" ]; then
             fail=1
         fi
     else
-        echo "  [SKIP] esbuild 不可用(缺 node 或 web/node_modules,先 npm install)"
+        if [ "${STRICT_CI:-0}" = "1" ]; then
+            echo "  [FAIL] STRICT_CI 模式下不允许跳过 esbuild 前端编译门禁"
+            fail=1
+        else
+            echo "  [SKIP] esbuild 不可用(缺 node 或 web/node_modules,先 npm install)"
+        fi
     fi
 else
-    echo "  [SKIP] web/src 缺失"
+    if [ "${STRICT_CI:-0}" = "1" ]; then
+        echo "  [FAIL] STRICT_CI 模式下 web/src 缺失"
+        fail=1
+    else
+        echo "  [SKIP] web/src 缺失"
+    fi
 fi
 
 # ── [6/6] 监督者生命周期身份校验回归（P1-01/P1-03，勿删）──

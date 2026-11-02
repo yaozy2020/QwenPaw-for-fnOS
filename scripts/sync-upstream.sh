@@ -78,13 +78,10 @@ fi
 
 echo "    上游内容: $(du -sh "$SRC_DIR" | cut -f1)"
 
-# 保留本地构建产物不被 --delete 抹掉
-PRESERVE=""
-[ -d "$CODE_DIR/src/qwenpaw/console" ] && PRESERVE="$PRESERVE --exclude=src/qwenpaw/console"
-
+# 同步上游源码（干净覆盖，不保留本地陈旧构建产物）
 echo "==> 覆盖 ${CODE_DIR}"
 mkdir -p "$CODE_DIR"
-rsync -a --delete $PRESERVE "$SRC_DIR"/ "$CODE_DIR"/ || {
+rsync -a --delete "$SRC_DIR"/ "$CODE_DIR"/ || {
   echo -e "${RED}ERROR: rsync 失败（rsync 是否可用？）${NC}" >&2
   exit 1
 }
