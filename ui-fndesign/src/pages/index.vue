@@ -60,7 +60,7 @@ const qwenpawUrl = computed(() => {
   if (typeof window !== 'undefined') {
     return `http://${window.location.hostname}:19091`
   }
-  return 'http://localhost:19091'
+  return 'http://127.0.0.1:18088'
 })
 
 const isRestarting = ref(false)

@@ -16,7 +16,7 @@ STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 # 输出路径可被环境变量覆盖（CI 用 FPK_OUT=$GITHUB_WORKSPACE）；
 # 默认仍是本机下载目录，本地用法不变。
-FPK_OUT="${FPK_OUT:-/vol2/1000/下载}"
+FPK_OUT="${FPK_OUT:-${PROJ_DIR}/build/output}"
 mkdir -p "$FPK_OUT"
 OUTPUT="${FPK_OUT}/qwenpaw_v${VERSION}.fpk"
 
@@ -39,22 +39,24 @@ else
   echo "[1/4] preflight 跳过（SKIP_GATES=1，已在宿主侧完成）"
 fi
 
-# [1b/4] 构建监督者(release 单二进制;无 cargo 时复用已有产物)
+# [1b/4] 构建监督者(release 单二进制; Release 必须干净编译)
 SUP_BIN_SRC="$PROJ_DIR/supervisor/target/release/qwenpaw-supervisor"
 if command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then
   echo "[1b/4] 构建监督者 (cargo release --locked) ..."
-  # 先删旧产物:构建结束若文件存在,即是"本次构建"的产出(防止陈旧二进制冒充)
   rm -f "$SUP_BIN_SRC"
-  # 不用管道收尾(2>&1|tail 会吞退出码);失败必须终止出包
   (cd "$PROJ_DIR/supervisor" && cargo build --locked --release) || {
     echo -e "${RED}ERROR: 监督者 cargo 构建失败,终止出包${NC}"
     exit 1
   }
-elif [ -x "$SUP_BIN_SRC" ]; then
-  echo -e "${YELLOW}[1b/4] 无 cargo,复用已有监督者产物(注意:无法保证为最新构建)${NC}"
+elif [ "${ALLOW_STALE_BINARY:-0}" = "1" ] && [ -x "$SUP_BIN_SRC" ]; then
+  echo -e "${YELLOW}[1b/4] 警告: 启用 ALLOW_STALE_BINARY=1,复用已有监督者产物(非全新构建)${NC}"
+else
+  echo -e "${RED}ERROR: 未找到 cargo 工具链。发布构建必须通过 cargo 编译最新产物。${NC}"
+  echo -e "${RED}       若在本地调试且确需复用已有二进制,请显式设置 ALLOW_STALE_BINARY=1${NC}"
+  exit 1
 fi
 if [ ! -x "$SUP_BIN_SRC" ]; then
-  echo -e "${RED}ERROR: 监督者二进制缺失(supervisor/target/release/qwenpaw-supervisor)${NC}"
+  echo -e "${RED}ERROR: 监督者二进制缺失或不可执行($SUP_BIN_SRC)${NC}"
   exit 1
 fi
 SUP_SHA256=$(sha256sum "$SUP_BIN_SRC" | awk '{print $1}')
@@ -78,7 +80,8 @@ if [ ! -x "$PROJ_DIR/web/node_modules/.bin/esbuild" ]; then
     exit 1
   }
 fi
-BUILD_ID="r$(git -C "$PROJ_DIR" rev-list --count HEAD 2>/dev/null || echo 0)"
+GIT_SHA="$(git -C "$PROJ_DIR" rev-parse --short HEAD 2>/dev/null || echo "${SOURCE_COMMIT:-unknown}")"
+BUILD_ID="v${VERSION}+${GIT_SHA}"
 export BUILD_ID
 (cd "$PROJ_DIR/web" && "$NODE_BIN" build.mjs) || {
   echo -e "${RED}ERROR: 控制台编译失败(语法/引用错误在 web/src 中)${NC}"
@@ -95,15 +98,15 @@ mkdir -p "$STAGE"
 cp "$PROJ_DIR/manifest" "$STAGE/manifest"
 cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE"
 cp "$PROJ_DIR/ICON.PNG" "$PROJ_DIR/ICON_256.PNG" "$STAGE/"
-cp -a "$PROJ_DIR/app" "$STAGE/app"
 cp -a "$PROJ_DIR/cmd" "$STAGE/cmd"
 cp -a "$PROJ_DIR/config" "$STAGE/config"
 cp -a "$PROJ_DIR/wizard" "$STAGE/wizard"
 
-# app 内非运行时内容:www 下的设计期图片不入包(与旧版 exclude 行为一致)
-rm -f "$STAGE/app/www/"*.png "$STAGE/app/www/"*.jpg
-rm -rf "$STAGE/app/www/public" "$STAGE/app/qwenpaw"
-rm -rf "${STAGE:?}/"*/__pycache__
+# app 目录严禁整目录浅拷贝，严格按运行时白名单物化:
+mkdir -p "$STAGE/app/ui" "$STAGE/app/www" "$STAGE/app/bin"
+cp "$PROJ_DIR/app/ui/api.cgi" "$STAGE/app/ui/api.cgi"
+cp "$PROJ_DIR/app/ui/index.cgi" "$STAGE/app/ui/index.cgi"
+cp "$PROJ_DIR/app/ui/config" "$STAGE/app/ui/config"
 
 # staging 阶段统一执行位:Git 模式之外再设一道(压缩包/特殊文件系统构建时可能丢位)
 chmod +x "$STAGE"/app/ui/*.cgi "$STAGE"/cmd/* 2>/dev/null || true
@@ -143,33 +146,19 @@ elif command -v gzip >/dev/null 2>&1; then
   gzip -9 -c "$CONSOLE_HTML" > "$CONSOLE_HTML.gz" && echo "    预压缩: 无 node，仅生成 index.html.gz"
 fi
 
-# [3/4] fnpack 快速封装
-echo "[3/4] fnpack 极速构建 ..."
-cd "$STAGE" || exit 1
-
-# fnpack 可执行文件探测：环境变量显式指定优先（CI 用仓库内 vendor 的静态二进制），
-# 其次本机约定路径 / command -v，最后常见路径浅层查找（找不到时显式报错）
-FNPACK_BIN="${FNPACK_BIN:-$(command -v fnpack 2>/dev/null || true)}"
-if [ -z "$FNPACK_BIN" ]; then
-  FNPACK_BIN="$(find /usr/local/bin /usr/bin /opt /app / -maxdepth 2 -type f \( -name 'fnpack' -o -name 'fnpackup' \) -perm -u+x 2>/dev/null | head -1)"
-fi
-if [ -z "$FNPACK_BIN" ]; then
-  echo -e "${RED}ERROR: 未找到 fnpack 可执行文件（command -v / 常见路径均无）${NC}"
-  exit 1
-fi
-echo "  fnpack: ${FNPACK_BIN}"
-"$FNPACK_BIN" build -d . || {
-  echo -e "${RED}ERROR: fnpack 构建失败${NC}"
+# [3/4] 调用 fpkstudio 引擎打包 (https://github.com/shuangji66/fpkstudio)
+echo "[3/4] fpkstudio 极速构建打包 (Unix Socket 引擎) ..."
+export FPK_OUT
+python3 "$PROJ_DIR/tools/fpkstudio-pack.py" || {
+  echo -e "${RED}ERROR: fpkstudio 构建打包失败${NC}"
   exit 1
 }
 
-FPK_IN_STAGE=$(ls "$STAGE"/*.fpk 2>/dev/null | head -1)
-if [ -z "$FPK_IN_STAGE" ] || [ ! -f "$FPK_IN_STAGE" ]; then
-  echo -e "${RED}ERROR: fnpack 构建失败，未产出 fpk 文件${NC}"
+OUTPUT="$(ls -t "${FPK_OUT}"/qwenpaw*.fpk 2>/dev/null | head -1)"
+if [ -z "$OUTPUT" ] || [ ! -f "$OUTPUT" ]; then
+  echo -e "${RED}ERROR: 未找到产出的 fpk 文件${NC}"
   exit 1
 fi
-mv "$FPK_IN_STAGE" "$OUTPUT"
-
 # [3b/4] FPK 内容审计(白名单/执行位/构建残留) —— 失败即出包失败
 echo "[3b/4] FPK 内容审计 ..."
 bash "$PROJ_DIR/scripts/audit-fpk.sh" "$OUTPUT" || {

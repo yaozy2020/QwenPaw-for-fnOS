@@ -21,3 +21,32 @@ supervisor/target/
 
 # Python 字节码缓存(曾误入仓库)
 __pycache__/
+
+# 本地环境文件
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# 本地运行与调试数据
+.runtime/
+var/
+*.log
+*.pid
+*.starttime
+
+# 本地编辑器与辅助工具目录
+.trae/
+.vscode/
+.idea/
+
+# 其他构建与测试缓存
+dist/
+build/output/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# fpkstudio 二进制 (大文件由构建环境按需获取)
+tools/fpkstudio-bin/
+

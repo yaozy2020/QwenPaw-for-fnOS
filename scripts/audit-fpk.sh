@@ -99,6 +99,21 @@ else
         fi
     fi
 
+    # ── 3b. app.tgz 白名单结构审计 ──
+    # 严格确保 app.tgz 内仅包含预期文件，绝不混入本地配置文件、源映射或无关垃圾
+    unexpected_files=$(find "$WORK/appx" -type f \
+        ! -path "$WORK/appx/bin/qwenpaw-supervisor" \
+        ! -path "$WORK/appx/ui/api.cgi" ! -path "$WORK/appx/ui/index.cgi" ! -path "$WORK/appx/ui/config" \
+        ! -path "$WORK/appx/config/resource" ! -path "$WORK/appx/config/privilege" \
+        ! -path "$WORK/appx/www/index.html" ! -path "$WORK/appx/www/index.html.gz" ! -path "$WORK/appx/www/index.html.br" 2>/dev/null)
+    if [ -n "$unexpected_files" ]; then
+        fail "app.tgz 发现非白名单文件:"
+        printf '%s
+' "$unexpected_files" | sed 's/^/        /'
+    else
+        ok "app.tgz 内容 100% 符合运行时纯净白名单"
+    fi
+
     # ── 4. 构建残留黑名单 ──
     residue=$(find "$WORK" \( -name 'target' -o -name 'node_modules' -o -name '.git' \
         -o -name '__pycache__' -o -name '*.rlib' -o -name '*.d' -o -name '*.log' \

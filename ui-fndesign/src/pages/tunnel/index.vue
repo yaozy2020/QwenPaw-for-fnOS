@@ -32,7 +32,7 @@ const getDefaultService = (): string => {
     const hostname = window.location.hostname
     return `http://${hostname}:19091`
   }
-  return 'http://localhost:19091'
+  return 'http://127.0.0.1:18088'
 }
 
 const checkTunnelInstalled = async () => {

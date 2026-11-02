@@ -388,7 +388,7 @@ fi
 # T11 合法 token → 放行。★实捕回放★:环境头逐字取自 2.0.0-13 插桩捕获的
 # 网关真实请求(Host=localhost / Origin=NAS:15666 / SCRIPT_NAME=安装路径),
 # 在此形态下加配对 cookie+头必须放行 —— 这正是当初被误杀的合法控制台请求。
-t11="$(envrun "action=start"     HTTP_HOST="localhost"     HTTP_ORIGIN="http://192.168.10.236:15666"     HTTP_REFERER="http://192.168.10.236:15666/cgi/ThirdParty/qwenpaw/index.cgi/"     SCRIPT_NAME="/var/apps/qwenpaw"     HTTP_COOKIE="qwenpaw_csrf=tok" HTTP_X_CSRF_TOKEN="tok")"
+t11="$(envrun "action=start"     HTTP_HOST="localhost"     HTTP_ORIGIN="http://192.0.2.10:15666"     HTTP_REFERER="http://192.0.2.10:15666/cgi/ThirdParty/qwenpaw/index.cgi/"     SCRIPT_NAME="/var/apps/qwenpaw"     HTTP_COOKIE="qwenpaw_csrf=tok" HTTP_X_CSRF_TOKEN="tok")"
 if [ "$(json_field "$t11" "d.get('success')")" = "True" ]     && grep -q '^/start' "$WORK/reqlog"; then
     echo "  [  OK ] 实捕网关形态 + 合法 token → 放行(Host=localhost 不再误杀)"
 else
