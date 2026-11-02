@@ -18,7 +18,7 @@ use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::{
     events::Events,
-    install::{phase_wire, sanitize_mirror, InstallChannel, InstallState},
+    install::{phase_wire, sanitize_mirror, truncate_utf8, InstallChannel, InstallState},
     kernel::KernelManager,
 };
 
@@ -245,23 +245,7 @@ fn tail_lines(path: &std::path::Path, max: usize, window: u64) -> Vec<String> {
     let text = String::from_utf8_lossy(&buf);
     let mut lines: Vec<String> = text
         .lines()
-        .map(|l| {
-            // 窗口起点可能切在多字节字符中间:丢弃非法段由 lossy 兜底,
-            // 单行超长截断
-            if l.len() > LINE_CAP {
-                // 安全 UTF-8 字符边界截断 (P1-3: 避免直接字节截断导致多字节中文/emoji 发生 Panic)
-                let truncate_idx = l.char_indices()
-                    .map(|(idx, _)| idx)
-                    .take_while(|&idx| idx <= LINE_CAP)
-                    .last()
-                    .unwrap_or(0);
-                let mut s = l[..truncate_idx].to_string();
-                s.push('…');
-                s
-            } else {
-                l.to_string()
-            }
-        })
+        .map(|l| truncate_utf8(l, LINE_CAP))
         .collect();
     // 起点切在行中间时,首行是残行;窗口未覆盖全文件才可能发生
     if start > 0 && !lines.is_empty() {
@@ -367,6 +351,7 @@ async fn kernel_install(
     state.kernel.stop().await;
     let started = state.install.try_start(
         format!("{}/venv", state.home_dir),
+        state.kernel.port(),
         channel,
         mirror,
         // 与 app/ui/api.cgi 的 upgrade_logs 读取路径一致 —— 三方文件名曾各不相同,

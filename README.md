@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-2.0.0-16-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
@@ -82,8 +82,10 @@ QwenPaw-for-fnOS/
 
 ## 版本历史
 
-### v2.0.0-16（当前）
+### v2.0.0-rc.1（当前，FPK 版本 2.0.0-1）
 
+- **发布候选安装状态机**: 新增 `Starting` 非终态，健康检查与版本钉写入成功后才进入 `Done`；健康检查使用实际配置端口并精确匹配目标版本，启动失败、健康超时和版本钉失败均如实上报；
+- **日志与质量门禁**: 运行日志和 pip 日志共用 UTF-8 安全截断，覆盖中文与 emoji 边界；Rust 12 项回归测试与 Clippy 严格检查通过；
 - **构建系统重构升级**: 打包流水线改用 `shuangji66/fpkstudio`（Unix Socket 管道架构），实现强沙箱隔离物化与 100% 运行时纯净白名单审计，杜绝开发机任何未跟踪文件混入；
 - **桌面入口与图标闭环**: 补全桌面必需的 4 项图标（`console_64/256` 与 `icon_64/256`），主对话入口切换为独立标签页直连；
 - **安全与 CORS 治理**: 彻底收紧跨域通配符，杜绝任意 Origin 反射与 Credentials 组合风险；

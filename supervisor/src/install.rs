@@ -22,6 +22,7 @@ pub enum Phase {
     Idle,
     Downloading,
     Installing,
+    Starting,
     Done,
     Failed,
     /// 任务在生效前被停止(停止/卸载路径的 cancel)。与 Failed 区分的意义:
@@ -37,6 +38,7 @@ pub fn phase_wire(p: &Phase) -> &'static str {
         Phase::Idle => "idle",
         Phase::Downloading => "downloading",
         Phase::Installing => "installing",
+        Phase::Starting => "starting",
         Phase::Done => "done",
         Phase::Failed | Phase::Cancelled => "failed",
     }
@@ -57,9 +59,7 @@ impl InstallChannel {
         match v {
             "latest" => Some(InstallChannel::Latest),
             "beta" | "pre" => Some(InstallChannel::Beta),
-            other if is_safe_exact_version(other) => {
-                Some(InstallChannel::Exact(other.to_string()))
-            }
+            other if is_safe_exact_version(other) => Some(InstallChannel::Exact(other.to_string())),
             _ => None,
         }
     }
@@ -129,6 +129,19 @@ fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+pub fn truncate_utf8(raw: &str, max_bytes: usize) -> String {
+    if raw.len() <= max_bytes {
+        return raw.to_string();
+    }
+    let end = raw
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= max_bytes)
+        .last()
+        .unwrap_or(0);
+    format!("{}…", &raw[..end])
+}
+
 /// 单行落盘(超限排水)。stdout/stderr 两个线程各自持有 append 句柄调用。
 fn append_line(log: &mut Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &str) {
     if let Some(f) = log.as_mut() {
@@ -136,11 +149,7 @@ fn append_line(log: &mut Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &s
         if *t >= LOG_TOTAL_CAP {
             return;
         }
-        let mut owned = raw.to_string();
-        if owned.len() > LOG_LINE_CAP {
-            owned.truncate(LOG_LINE_CAP);
-            owned.push('…');
-        }
+        let owned = truncate_utf8(raw, LOG_LINE_CAP);
         if f.write_all(owned.as_bytes()).is_ok() && f.write_all(b"\n").is_ok() {
             *t += owned.len() as u64 + 1;
         }
@@ -149,10 +158,7 @@ fn append_line(log: &mut Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &s
 
 /// 刷新看门狗活动时间戳(自任务启动起的毫秒数)
 fn touch_activity(last: &AtomicU64, start: &std::time::Instant) {
-    last.store(
-        start.elapsed().as_millis() as u64,
-        Ordering::Relaxed,
-    );
+    last.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
 }
 
 #[derive(Clone, Debug)]
@@ -181,7 +187,7 @@ struct Inner {
 pub struct InstallState {
     inner: Arc<Mutex<Inner>>,
     on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
-    on_success: Arc<dyn Fn() + Send + Sync>,
+    on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     /// pip 启动器:生产即 Command::spawn;测试注入可阻塞 spawner,
     /// 精确复现"运行态已建立、PID 未登记"的取消窗口(P1-04)。
     spawner: Arc<dyn PipSpawner>,
@@ -214,7 +220,7 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 impl InstallState {
     pub fn new(
         on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
-        on_success: Arc<dyn Fn() + Send + Sync>,
+        on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     ) -> Self {
         Self::with_spawner(Arc::new(RealSpawner), on_change, on_success)
     }
@@ -222,7 +228,7 @@ impl InstallState {
     fn with_spawner(
         spawner: Arc<dyn PipSpawner>,
         on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
-        on_success: Arc<dyn Fn() + Send + Sync>,
+        on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -336,6 +342,7 @@ impl InstallState {
     pub fn try_start(
         &self,
         venv_dir: String,
+        kernel_port: u16,
         channel: InstallChannel,
         mirror: String,
         pip_log: String,
@@ -371,7 +378,7 @@ impl InstallState {
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
             use std::os::unix::process::CommandExt;
             cmd.process_group(0); // 独立进程组:失败/取消可整组清扫
-            // 每次任务截断重开,不跨任务追加(避免 pip 日志无限膨胀)
+                                  // 每次任务截断重开,不跨任务追加(避免 pip 日志无限膨胀)
             let log = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -564,7 +571,11 @@ impl InstallState {
                     } else if !exit_ok {
                         let mut msg = "pip 安装失败,详见日志".to_string();
                         if let Ok(content) = std::fs::read_to_string(&pip_log) {
-                            if let Some(err_line) = content.lines().rev().find(|l| l.contains("ERROR:") || l.contains("403 Forbidden") || l.contains("from versions: none")) {
+                            if let Some(err_line) = content.lines().rev().find(|l| {
+                                l.contains("ERROR:")
+                                    || l.contains("403 Forbidden")
+                                    || l.contains("from versions: none")
+                            }) {
                                 msg = format!("pip 安装失败: {}", err_line.trim());
                             }
                         }
@@ -588,69 +599,59 @@ impl InstallState {
                         }
                     }
 
-                    this.set(|g| {
-                        g.running = false;
-                        if ok {
-                            g.phase = Phase::Done;
-                            g.message = if actual.is_empty() {
-                                "安装完成".into()
-                            } else {
-                                format!("安装完成 v{actual}")
-                            };
-                        } else {
+                    if !ok {
+                        this.set(|g| {
+                            g.running = false;
                             g.phase = Phase::Failed;
                             g.error = reason;
-                        }
+                        });
+                        return;
+                    }
+
+                    this.set(|g| {
+                        g.phase = Phase::Starting;
+                        g.message = format!("内核包已安装 v{actual}，等待服务就绪");
                     });
-                    if ok {
-                        // 安装/升级成功，先拉起内核进程
-                        (on_success)();
-
-                        // 端到端健康检查门禁: 等待内核进程就绪并真实响应 /api/version
-                        let mut health_ok = false;
-                        let target_v = actual.clone();
-                        for _ in 0..30 {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            use std::io::{Read, Write};
-                            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-                                &std::net::SocketAddr::from(([127, 0, 0, 1], 18088)),
-                                std::time::Duration::from_millis(500),
-                            ) {
-                                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-                                let req = "GET /api/version HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nConnection: close\r\n\r\n";
-                                if stream.write_all(req.as_bytes()).is_ok() {
-                                    let mut buf = Vec::new();
-                                    if stream.read_to_end(&mut buf).is_ok() {
-                                        let s = String::from_utf8_lossy(&buf);
-                                        if s.contains("200 OK") {
-                                            if let Some(body_idx) = s.find("\r\n\r\n") {
-                                                let body = &s[body_idx + 4..];
-                                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-                                                    if let Some(v) = val.get("version").and_then(|v| v.as_str()) {
-                                                        if target_v.is_empty() || v == target_v || v.starts_with(&target_v) {
-                                                            health_ok = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                    let spawn_result = (on_success)();
+                    let health_ok =
+                        spawn_result.is_ok() && wait_for_version(kernel_port, &actual, 30);
+                    if !health_ok {
+                        let error = match spawn_result {
+                            Err(e) => format!("内核启动失败 (spawn_failed): {e}"),
+                            Ok(_) => {
+                                "内核包已安装，但在宽限期内启动健康检查超时 (health_timeout)".into()
                             }
-                        }
+                        };
+                        this.set(|g| {
+                            g.running = false;
+                            g.phase = Phase::Failed;
+                            g.error = error;
+                        });
+                        return;
+                    }
 
-                        if health_ok {
-                            if !actual.is_empty() {
-                                if let Err(e) = atomic_write_0600(&pin_path, &format!("{actual}\n")) {
-                                    eprintln!("[Supervisor] write version pin: {e}");
-                                }
-                            }
-                        } else {
-                            ok = false;
+                    let pin_result = if actual.is_empty() {
+                        Ok(())
+                    } else {
+                        atomic_write_0600(&pin_path, &format!("{actual}\n"))
+                    };
+                    match pin_result {
+                        Ok(()) => {
                             this.set(|g| {
+                                g.running = false;
+                                g.phase = Phase::Done;
+                                g.message = if actual.is_empty() {
+                                    "安装完成，服务已就绪".into()
+                                } else {
+                                    format!("安装完成 v{actual}，服务已就绪")
+                                };
+                            });
+                        }
+                        Err(e) => {
+                            this.set(|g| {
+                                g.running = false;
                                 g.phase = Phase::Failed;
-                                g.error = "内核包已安装，但在宽限期内启动健康检查超时 (health_timeout)".into();
+                                g.error = format!("版本钉写入失败 (pin_write_failed): {e}");
                             });
                         }
                     }
@@ -668,10 +669,52 @@ impl InstallState {
     }
 }
 
+fn wait_for_version(port: u16, target_version: &str, attempts: usize) -> bool {
+    use std::io::{Read, Write};
+    for _ in 0..attempts {
+        std::thread::sleep(Duration::from_millis(500));
+        let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(500),
+        ) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let request = format!(
+            "GET /api/version HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        );
+        if stream.write_all(request.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = Vec::new();
+        if stream.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        let response = String::from_utf8_lossy(&buf);
+        if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+            continue;
+        }
+        let Some(body_idx) = response.find("\r\n\r\n") else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&response[body_idx + 4..])
+        else {
+            continue;
+        };
+        if payload.get("version").and_then(|v| v.as_str()) == Some(target_version) {
+            return true;
+        }
+    }
+    false
+}
+
 /// 用 venv 内 python 读已安装内核版本(importlib.metadata)
 fn metadata_version(python: &Path) -> String {
     std::process::Command::new(python)
-        .args(["-c", "import importlib.metadata as m; print(m.version('qwenpaw'))"])
+        .args([
+            "-c",
+            "import importlib.metadata as m; print(m.version('qwenpaw'))",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -714,10 +757,7 @@ mod tests {
             "--index-url",
             "",
         ] {
-            assert!(
-                InstallChannel::parse(bad).is_none(),
-                "必须拒绝: {bad:?}"
-            );
+            assert!(InstallChannel::parse(bad).is_none(), "必须拒绝: {bad:?}");
         }
         // 白名单字符集本身也要卡死元字符
         for bad in ["1.0;", "1.0|", "$(x)", "`x`", "a/b", "a\\b", "a b", "a~b"] {
@@ -797,6 +837,55 @@ mod tests {
     }
 
     #[test]
+    fn utf8_truncation_preserves_character_boundaries() {
+        let input = "汉".repeat(1001);
+        assert_eq!(
+            truncate_utf8(&input, 2000),
+            format!("{}…", "汉".repeat(666))
+        );
+        assert_eq!(truncate_utf8("a😀b", 4), "a…");
+        assert_eq!(truncate_utf8("短日志", 2000), "短日志");
+    }
+
+    #[test]
+    fn health_check_uses_the_configured_port_and_exact_version() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = r#"{"version":"9.9.9"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        assert!(wait_for_version(port, "9.9.9", 1));
+        server.join().unwrap();
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = r#"{"version":"9.9.90"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        assert!(!wait_for_version(port, "9.9.9", 1));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn version_pin_matches() {
         assert!(version_matches("2.3.0b2", "2.3.0b2"));
         assert!(version_matches("2.3.0B2", "2.3.0b2"));
@@ -814,12 +903,13 @@ mod tests {
         assert_eq!(phase_wire(&Phase::Idle), "idle");
         assert_eq!(phase_wire(&Phase::Downloading), "downloading");
         assert_eq!(phase_wire(&Phase::Installing), "installing");
+        assert_eq!(phase_wire(&Phase::Starting), "starting");
     }
 
     type OnChangeCb = Arc<dyn Fn(InstallSnapshot) + Send + Sync>;
-    type OnSuccessCb = Arc<dyn Fn() + Send + Sync>;
+    type OnSuccessCb = Arc<dyn Fn() -> Result<i32, String> + Send + Sync>;
     fn noop_callbacks() -> (OnChangeCb, OnSuccessCb) {
-        (Arc::new(|_: InstallSnapshot| {}), Arc::new(|| {}))
+        (Arc::new(|_: InstallSnapshot| {}), Arc::new(|| Ok(0)))
     }
 
     #[test]
@@ -892,8 +982,9 @@ mod tests {
         let pids: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let success_calls = Arc::new(AtomicU64::new(0));
         let sc = Arc::clone(&success_calls);
-        let on_success: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync> = Arc::new(move || {
             sc.fetch_add(1, Ordering::SeqCst);
+            Ok(0)
         });
         let st = InstallState::with_spawner(
             Arc::new(GatedSpawner {
@@ -911,6 +1002,7 @@ mod tests {
 
         assert!(st.try_start(
             "/nonexistent-venv".into(),
+            18088,
             InstallChannel::Latest,
             String::new(),
             pip_log.clone(),

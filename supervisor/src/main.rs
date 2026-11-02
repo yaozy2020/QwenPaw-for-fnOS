@@ -83,11 +83,7 @@ fn main() {
         },
         {
             let kernel = Arc::clone(&kernel);
-            Arc::new(move || {
-                if let Err(e) = kernel.spawn() {
-                    eprintln!("[Supervisor] autostart after install: {e}");
-                }
-            })
+            Arc::new(move || kernel.spawn())
         },
     );
 
