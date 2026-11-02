@@ -44,6 +44,17 @@ else
     echo "  [  OK ] 无硬编码 /vol* 删除"
 fi
 
+# 产物签名门禁：.sha256 内必须是纯文件名。
+# 历史事故：build.sh 用 sha256sum <绝对路径> 生成签名，哈希值对但文件名部分
+# 带上了构建机的绝对路径，用户下载后 `sha256sum -c` 因该路径不存在而失败。
+echo "  [gate] build.sh 的 .sha256 必须携带纯文件名 ..."
+if grep -qE 'sha256sum[[:space:]]+"\$OUTPUT"' "$ROOT/build.sh"; then
+    echo "  [FAIL] build.sh 直接对 \$OUTPUT(绝对路径) 调用 sha256sum，签名里会带构建机路径"
+    fail=1
+else
+    echo "  [  OK ] .sha256 以纯文件名生成"
+fi
+
 # ── [2/3] shellcheck（error 级门禁；warning 仅报告不拦截） ──
 echo "[2/5] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"

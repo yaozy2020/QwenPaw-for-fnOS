@@ -194,7 +194,9 @@ bash "$PROJ_DIR/scripts/audit-fpk.sh" "$OUTPUT" || {
 
 # [4/4] 计算 SHA256 与归档
 echo "[4/4] 计算签名与收尾 ..."
-sha256sum "$OUTPUT" > "${OUTPUT}.sha256"
+# 以纯文件名写入 .sha256:sha256sum 会把传入路径原样写进输出,
+# 用绝对路径会让用户下载后 `sha256sum -c` 因该路径不存在而失败。
+( cd "$(dirname "$OUTPUT")" && sha256sum "$(basename "$OUTPUT")" ) > "${OUTPUT}.sha256"
 rm -rf "$STAGE"
 
 echo ""
