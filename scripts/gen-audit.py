@@ -72,15 +72,20 @@ def list_workflows() -> list[str]:
 
 
 def recent_tags(n: int = 5) -> list[tuple[str, str]]:
-    """读取最近 n 个 git tag（按版本号降序）。"""
+    """读取最近 n 个已发布历史 git tag（按版本号降序，排除当前正在构建的 tag）。"""
     if os.environ.get("AUDIT_NO_GIT") == "1":
         return []
+    exclude_tag = os.environ.get("RELEASE_TAG", "")
+    if not exclude_tag:
+        ref = os.environ.get("GITHUB_REF", "")
+        if ref.startswith("refs/tags/"):
+            exclude_tag = ref[len("refs/tags/"):]
     try:
         out = subprocess.check_output(
             ["git", "tag", "-l"],
             cwd=ROOT, encoding="utf-8", stderr=subprocess.DEVNULL,
         )
-        tags = [t.strip() for t in out.splitlines() if t.strip()]
+        tags = [t.strip() for t in out.splitlines() if t.strip() and t.strip() != exclude_tag]
         # 按版本号降序排序
         def key(t):
             try:

@@ -70,6 +70,8 @@ jobs:
 
       # [4] 静态检查与门禁
       - name: Preflight + AUDIT + Unit Tests
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
