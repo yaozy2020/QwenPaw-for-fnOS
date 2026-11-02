@@ -15,7 +15,7 @@ PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 # 输出路径可被环境变量覆盖（CI 用 FPK_OUT=$GITHUB_WORKSPACE）；
-# 默认仍是本机下载目录，本地用法不变。
+# 默认是 build/output 目录。
 FPK_OUT="${FPK_OUT:-${PROJ_DIR}/build/output}"
 mkdir -p "$FPK_OUT"
 OUTPUT="${FPK_OUT}/qwenpaw_v${VERSION}.fpk"
@@ -88,77 +88,100 @@ export BUILD_ID
   exit 1
 }
 
-# [2/4] staging 白名单复制(不再 tar 整个项目 —— supervisor/target、构建工具、
-#       源码、CI 配置等运行时无关文件此前会随整目录复制进入包内)
-echo "[2/4] staging 白名单目录树 ..."
+# [2/4] staging 唯一权威白名单目录树与权限归一化
+echo "[2/4] staging 唯一权威白名单物化与权限归一化 ..."
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-# 顶层白名单:清单/许可/图标 + 运行时目录
+# 顶层纯净白名单:清单/许可/图标 (mode 0644)
 cp "$PROJ_DIR/manifest" "$STAGE/manifest"
 cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE"
 cp "$PROJ_DIR/ICON.PNG" "$PROJ_DIR/ICON_256.PNG" "$STAGE/"
-cp -a "$PROJ_DIR/cmd" "$STAGE/cmd"
-cp -a "$PROJ_DIR/config" "$STAGE/config"
-cp -a "$PROJ_DIR/wizard" "$STAGE/wizard"
+chmod 0644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE/ICON.PNG" "$STAGE/ICON_256.PNG"
 
-# app 目录严禁整目录浅拷贝，严格按运行时白名单物化:
-mkdir -p "$STAGE/app/ui" "$STAGE/app/www" "$STAGE/app/bin"
+# cmd 目录白名单精准物化 (严禁任何未跟踪的测试/.pid残留入包)
+mkdir -p "$STAGE/cmd"
+for f in main install_init install_callback upgrade_init upgrade_callback uninstall_init uninstall_callback config_init config_callback; do
+  cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f"
+  chmod 0755 "$STAGE/cmd/$f"
+done
+for f in lib.sh supervisor_ctl.sh; do
+  cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f"
+  chmod 0644 "$STAGE/cmd/$f"
+done
+
+# config 目录白名单精准物化 (mode 0644)
+mkdir -p "$STAGE/config"
+cp "$PROJ_DIR/config/privilege" "$STAGE/config/privilege"
+cp "$PROJ_DIR/config/resource" "$STAGE/config/resource"
+chmod 0644 "$STAGE/config/privilege" "$STAGE/config/resource"
+
+# wizard 目录白名单精准物化 (mode 0644)
+mkdir -p "$STAGE/wizard"
+for f in install upgrade config uninstall; do
+  [ -f "$PROJ_DIR/wizard/$f" ] && cp "$PROJ_DIR/wizard/$f" "$STAGE/wizard/$f" && chmod 0644 "$STAGE/wizard/$f"
+done
+
+# app 运行时白名单精准物化 (包含 4 个桌面图标)
+mkdir -p "$STAGE/app/ui/images" "$STAGE/app/www" "$STAGE/app/bin"
 cp "$PROJ_DIR/app/ui/api.cgi" "$STAGE/app/ui/api.cgi"
 cp "$PROJ_DIR/app/ui/index.cgi" "$STAGE/app/ui/index.cgi"
+chmod 0755 "$STAGE/app/ui/api.cgi" "$STAGE/app/ui/index.cgi"
+
 cp "$PROJ_DIR/app/ui/config" "$STAGE/app/ui/config"
+chmod 0644 "$STAGE/app/ui/config"
 
-# staging 阶段统一执行位:Git 模式之外再设一道(压缩包/特殊文件系统构建时可能丢位)
-chmod +x "$STAGE"/app/ui/*.cgi "$STAGE"/cmd/* 2>/dev/null || true
-chmod -x "$STAGE/cmd/lib.sh" "$STAGE/cmd/supervisor_ctl.sh" 2>/dev/null || true  # 仅被 source,不需执行位
-chmod 644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE"/ICON*.PNG 2>/dev/null || true
+# 复制 4 个桌面入口图标 (P1-2 修复)
+for icon in console_64.png console_256.png icon_64.png icon_256.png; do
+  if [ -f "$PROJ_DIR/app/ui/images/$icon" ]; then
+    cp "$PROJ_DIR/app/ui/images/$icon" "$STAGE/app/ui/images/$icon"
+    chmod 0644 "$STAGE/app/ui/images/$icon"
+  else
+    echo -e "${RED}ERROR: 必需桌面图标缺失: app/ui/images/$icon${NC}"
+    exit 1
+  fi
+done
 
-# 监督者二进制入包(app/bin/,运行时位于 /var/apps/qwenpaw/app/bin/)
-mkdir -p "$STAGE/app/bin"
+# 监督者二进制入包 (mode 0755)
 cp "$SUP_BIN_SRC" "$STAGE/app/bin/qwenpaw-supervisor"
-chmod +x "$STAGE/app/bin/qwenpaw-supervisor"
+chmod 0755 "$STAGE/app/bin/qwenpaw-supervisor"
 
-# 控制台以编译产物覆盖(app/www/index.html 已迁移为 web/src 源,仓库不存生成物)
+# 控制台以编译产物覆盖并生成预压缩兄弟文件
 if [ ! -f "$PROJ_DIR/web/dist/index.html" ]; then
   echo -e "${RED}ERROR: web/dist/index.html 缺失,控制台编译未执行${NC}"
   exit 1
 fi
-cp "$PROJ_DIR/web/dist/index.html" "$STAGE/app/www/index.html"
-
-# 关键校验
-if [ ! -f "$STAGE/app/www/index.html" ] || [ ! -f "$STAGE/cmd/install_callback" ]; then
-  echo -e "${RED}ERROR: staging 缺少核心控制台或生命周期脚本${NC}"
-  exit 1
-fi
-
-# [2b/4] 生成控制台预压缩兄弟文件（app/ui/index.cgi 按 Accept-Encoding 协商发送，
-#        51KB 的控制台经 brotli 后约 13KB；生成失败仅回退未压缩，不致命）
 CONSOLE_HTML="$STAGE/app/www/index.html"
-NODE_BIN="$(command -v node 2>/dev/null || true)"
-if [ -z "$NODE_BIN" ] && [ -x /var/apps/nodejs_v24/target/bin/node ]; then
-  NODE_BIN=/var/apps/nodejs_v24/target/bin/node
-fi
+cp "$PROJ_DIR/web/dist/index.html" "$CONSOLE_HTML"
+chmod 0644 "$CONSOLE_HTML"
+
 if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ]; then
   "$NODE_BIN" -e 'const {readFileSync,writeFileSync}=require("fs"),{gzipSync,brotliCompressSync,constants}=require("zlib");const f=process.argv[1],b=readFileSync(f);writeFileSync(f+".gz",gzipSync(b,{level:9}));writeFileSync(f+".br",brotliCompressSync(b,{params:{[constants.BROTLI_PARAM_QUALITY]:11}}))' "$CONSOLE_HTML" \
+    && chmod 0644 "$CONSOLE_HTML.gz" "$CONSOLE_HTML.br" \
     && echo "    预压缩: index.html.gz/.br 已生成" \
     || echo -e "${YELLOW}    警告: 预压缩生成失败，运行时回退未压缩${NC}"
 elif command -v gzip >/dev/null 2>&1; then
-  gzip -9 -c "$CONSOLE_HTML" > "$CONSOLE_HTML.gz" && echo "    预压缩: 无 node，仅生成 index.html.gz"
+  gzip -9 -c "$CONSOLE_HTML" > "$CONSOLE_HTML.gz" && chmod 0644 "$CONSOLE_HTML.gz" && echo "    预压缩: 无 node，仅生成 index.html.gz"
 fi
 
-# [3/4] 调用 fpkstudio 引擎打包 (https://github.com/shuangji66/fpkstudio)
+# 统一所有目录为 0755 (P1-3 权限归一化)
+find "$STAGE" -type d -exec chmod 0755 {} +
+
+# [3/4] 调用 fpkstudio 引擎基于 staging 封装 (单一真实物料链)
 echo "[3/4] fpkstudio 极速构建打包 (Unix Socket 引擎) ..."
 export FPK_OUT
-python3 "$PROJ_DIR/tools/fpkstudio-pack.py" || {
+PACK_OUT="$(python3 "$PROJ_DIR/tools/fpkstudio-pack.py" "$STAGE")" || {
   echo -e "${RED}ERROR: fpkstudio 构建打包失败${NC}"
   exit 1
 }
+echo "$PACK_OUT"
 
-OUTPUT="$(ls -t "${FPK_OUT}"/qwenpaw*.fpk 2>/dev/null | head -1)"
+OUTPUT="$(echo "$PACK_OUT" | grep '^FPK_OUTPUT_PATH=' | cut -d'=' -f2-)"
 if [ -z "$OUTPUT" ] || [ ! -f "$OUTPUT" ]; then
   echo -e "${RED}ERROR: 未找到产出的 fpk 文件${NC}"
   exit 1
 fi
+
 # [3b/4] FPK 内容审计(白名单/执行位/构建残留) —— 失败即出包失败
 echo "[3b/4] FPK 内容审计 ..."
 bash "$PROJ_DIR/scripts/audit-fpk.sh" "$OUTPUT" || {

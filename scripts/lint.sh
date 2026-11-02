@@ -47,7 +47,6 @@ fi
 # ── [2/3] shellcheck（error 级门禁；warning 仅报告不拦截） ──
 echo "[2/5] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"
-[ -z "$SC_BIN" ] && [ -x /tmp/shellcheck ] && SC_BIN=/tmp/shellcheck
 if [ -z "$SC_BIN" ]; then
     CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/qwenpaw-build"
     mkdir -p "$CACHE_DIR"

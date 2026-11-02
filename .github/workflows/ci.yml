@@ -50,7 +50,7 @@ jobs:
         run: npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
 
       - name: Lint (bash -n + shellcheck + 桥接 JSON 门禁 + 桥安全门禁 + esbuild 编译)
-        run: bash scripts/lint.sh
+        run: STRICT_CI=1 bash scripts/lint.sh
 
       - name: Console build + artifact sanity (web/src 经 esbuild 出单文件)
         run: |

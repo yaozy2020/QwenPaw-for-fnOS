@@ -35,6 +35,23 @@ for f in manifest cmd/main cmd/install_callback cmd/uninstall_callback config/pr
     fi
 done
 
+# 顶层全白名单审计 (P1-4: 严禁任何本地未追踪/未声明文件污染包顶层)
+unexpected_top=$(find "$WORK" -maxdepth 2 -type f \
+    ! -path "$WORK/manifest" ! -path "$WORK/LICENSE" ! -path "$WORK/ICON.PNG" ! -path "$WORK/ICON_256.PNG" \
+    ! -path "$WORK/app.tgz" ! -path "$WORK/config/privilege" ! -path "$WORK/config/resource" \
+    ! -path "$WORK/wizard/install" ! -path "$WORK/wizard/upgrade" ! -path "$WORK/wizard/config" ! -path "$WORK/wizard/uninstall" \
+    ! -path "$WORK/cmd/main" ! -path "$WORK/cmd/lib.sh" ! -path "$WORK/cmd/supervisor_ctl.sh" \
+    ! -path "$WORK/cmd/install_init" ! -path "$WORK/cmd/install_callback" \
+    ! -path "$WORK/cmd/upgrade_init" ! -path "$WORK/cmd/upgrade_callback" \
+    ! -path "$WORK/cmd/uninstall_init" ! -path "$WORK/cmd/uninstall_callback" \
+    ! -path "$WORK/cmd/config_init" ! -path "$WORK/cmd/config_callback" 2>/dev/null)
+if [ -n "$unexpected_top" ]; then
+    fail "顶层发现非白名单文件:"
+    printf '%s\n' "$unexpected_top" | sed 's/^/        /'
+else
+    ok "顶层文件 100% 符合纯净白名单"
+fi
+
 # ── 2. 执行位 ──
 for f in "$WORK"/cmd/main "$WORK"/cmd/install_init "$WORK"/cmd/install_callback \
          "$WORK"/cmd/upgrade_init "$WORK"/cmd/upgrade_callback \
@@ -101,9 +118,20 @@ else
 
     # ── 3b. app.tgz 白名单结构审计 ──
     # 严格确保 app.tgz 内仅包含预期文件，绝不混入本地配置文件、源映射或无关垃圾
+    # 显式断言 4 个桌面入口图标存在且非空 (P1-2)
+    for icon in console_64.png console_256.png icon_64.png icon_256.png; do
+        if [ -s "$WORK/appx/ui/images/$icon" ]; then
+            ok "桌面图标存在: ui/images/$icon"
+        else
+            fail "桌面图标缺失或为空: ui/images/$icon"
+        fi
+    done
+
     unexpected_files=$(find "$WORK/appx" -type f \
         ! -path "$WORK/appx/bin/qwenpaw-supervisor" \
         ! -path "$WORK/appx/ui/api.cgi" ! -path "$WORK/appx/ui/index.cgi" ! -path "$WORK/appx/ui/config" \
+        ! -path "$WORK/appx/ui/images/console_64.png" ! -path "$WORK/appx/ui/images/console_256.png" \
+        ! -path "$WORK/appx/ui/images/icon_64.png" ! -path "$WORK/appx/ui/images/icon_256.png" \
         ! -path "$WORK/appx/config/resource" ! -path "$WORK/appx/config/privilege" \
         ! -path "$WORK/appx/www/index.html" ! -path "$WORK/appx/www/index.html.gz" ! -path "$WORK/appx/www/index.html.br" 2>/dev/null)
     if [ -n "$unexpected_files" ]; then
