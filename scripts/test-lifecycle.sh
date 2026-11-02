@@ -104,8 +104,8 @@ wait "$victim" 2>/dev/null
 
 # ── [2] 真实替身（exe basename 命中监督者特征）：status 可识别，stop 可停止，
 #        starttime 戳一并登记 ──
-cp /bin/sleep "${T}/qwenpaw-supervisor"
-"${T}/qwenpaw-supervisor" 300 &
+cp /bin/bash "${T}/qwenpaw-supervisor"
+"${T}/qwenpaw-supervisor" -c 'while :; do sleep 1; done' &
 fake=$!
 supervisor_register_start "$fake" "${T}/supervisor.pid" >/dev/null || bad "register_start 失败"
 if supervisor_status "${T}/supervisor.pid"; then
@@ -125,7 +125,7 @@ fi
     && bad "停止后 PID/戳文件未清理" || ok "停止后 PID/戳文件已清理"
 
 # ── [3] starttime 戳不匹配：即使 exe 同名也拒绝（防"复用 PID 恰好同名"）──
-"${T}/qwenpaw-supervisor" 300 &
+"${T}/qwenpaw-supervisor" -c 'while :; do sleep 1; done' &
 fake2=$!
 echo "$fake2" > "${T}/supervisor.pid"
 echo "123456789" > "${T}/supervisor.pid.starttime"
