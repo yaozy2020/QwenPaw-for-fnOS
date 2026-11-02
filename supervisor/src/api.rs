@@ -31,7 +31,9 @@ pub struct AppState {
     pub var_dir: String,
     pub home_dir: String,
     pub share_dir: String,
+    pub ui_config_file: String,
     pub kernel_log: String,
+    pub operations: Arc<tokio::sync::Mutex<()>>,
     /// 监督者自身监听端口:改端口时必须拒绝内核占用它,否则桥接失联
     pub supervisor_port: u16,
 }
@@ -71,6 +73,28 @@ fn subtle_eq(a: &str, b: &str) -> bool {
 
 fn err_json(code: StatusCode, msg: &str) -> axum::response::Response {
     (code, Json(json!({"ok": false, "success": false, "error": msg, "message": msg}))).into_response()
+}
+
+type OperationResult = Result<tokio::sync::OwnedMutexGuard<()>, Box<axum::response::Response>>;
+
+fn try_operation(lock: &Arc<tokio::sync::Mutex<()>>) -> OperationResult {
+    lock.clone().try_lock_owned().map_err(|_| {
+        Box::new(err_json(
+            StatusCode::CONFLICT,
+            "另一个运维操作正在进行中,请稍后重试",
+        ))
+    })
+}
+
+fn begin_operation(state: &AppState) -> OperationResult {
+    let guard = try_operation(&state.operations)?;
+    if state.install.snapshot().running {
+        return Err(Box::new(err_json(
+            StatusCode::CONFLICT,
+            "内核安装正在进行中,当前操作已被拒绝",
+        )));
+    }
+    Ok(guard)
 }
 
 /// 全量快照(同步;/proc 与版本查询均为阻塞操作,量级可接受)。
@@ -158,6 +182,10 @@ async fn start(State(state): State<AppState>, req: Request<axum::body::Body>) ->
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     if !state.kernel.installed() {
         return err_json(StatusCode::CONFLICT, "QwenPaw 内核尚未安装,请在「版本更新」中选择版本安装");
     }
@@ -178,6 +206,10 @@ async fn stop(State(state): State<AppState>, req: Request<axum::body::Body>) -> 
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     state.kernel.stop().await;
     state.events.publish(render_snapshot(&state));
     Json(json!({"ok": true, "success": true, "message": "QwenPaw 已停止"})).into_response()
@@ -187,6 +219,10 @@ async fn restart(State(state): State<AppState>, req: Request<axum::body::Body>) 
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     state.kernel.stop().await;
     match state.kernel.spawn() {
         Ok(pid) => {
@@ -301,6 +337,10 @@ async fn kernel_install(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match try_operation(&state.operations) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     let body = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
         Ok(b) => b,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -446,6 +486,10 @@ async fn kernel_pin(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     let body = match axum::body::to_bytes(req.into_body(), 4 * 1024).await {
         Ok(b) => b,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -484,6 +528,10 @@ async fn kernel_reset_auth(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     let auth = std::path::Path::new(&state.share_dir)
         .parent()
         .map(|p| p.join(".qwenpaw.secret/auth.json"))
@@ -561,6 +609,32 @@ async fn wait_healthy_blocking(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
+fn sync_ui_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut config: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let entry = config
+        .pointer_mut("/.url/qwenpaw.main")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing .url/qwenpaw.main",
+            )
+        })?;
+    entry["port"] = serde_json::Value::String(port.to_string());
+    let tmp = path.with_extension("tmp");
+    let mut bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    bytes.push(b'\n');
+    std::fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
+    }
+    std::fs::rename(tmp, path)
+}
+
 #[derive(serde::Deserialize)]
 struct PortReq {
     port: u16,
@@ -575,6 +649,10 @@ async fn port(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
     let body = match axum::body::to_bytes(std::mem::take(req.body_mut()), 4 * 1024).await {
         Ok(b) => b,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -595,6 +673,12 @@ async fn port(
         );
     }
     if req.port == state.kernel.port() {
+        if let Err(e) = sync_ui_port(std::path::Path::new(&state.ui_config_file), req.port) {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("桌面入口端口同步失败: {e}"),
+            );
+        }
         return Json(json!({
             "ok": true, "success": true,
             "message": format!("端口本就是 {},无需更改", req.port),
@@ -620,6 +704,13 @@ async fn port(
     if healthy {
         healthy = wait_healthy_blocking(&state).await;
     }
+    let mut ui_error = None;
+    if healthy {
+        if let Err(e) = sync_ui_port(std::path::Path::new(&state.ui_config_file), req.port) {
+            healthy = false;
+            ui_error = Some(e);
+        }
+    }
     if healthy {
         state.events.publish(render_snapshot(&state));
         Json(json!({
@@ -634,6 +725,7 @@ async fn port(
         state.kernel.stop().await;
         // 恢复旧端口配置;写回失败必须如实上报,不得宣称"已回滚"
         let restore = std::fs::write(&port_file, format!("{}\n", old_port));
+        let ui_restore = sync_ui_port(std::path::Path::new(&state.ui_config_file), old_port);
         state.kernel.set_port(old_port);
         let rollback = state.kernel.spawn();
         // 旧实例同样要通过健康检查,才允许宣称"已回滚"(与正向路径同一标准)
@@ -643,22 +735,61 @@ async fn port(
             false
         };
         state.events.publish(render_snapshot(&state));
-        let detail = match spawn_result {
-            Err(e) => format!("新端口启动失败: {e}"),
-            Ok(_) => "新端口启动后健康检查未通过(端口冲突或内核异常)".to_string(),
+        let detail = match ui_error {
+            Some(e) => format!("桌面入口端口同步失败: {e}"),
+            None => match spawn_result {
+                Err(e) => format!("新端口启动失败: {e}"),
+                Ok(_) => "新端口启动后健康检查未通过(端口冲突或内核异常)".to_string(),
+            },
         };
-        let roll_msg = match (&restore, &rollback, rolled_healthy) {
-            (Err(e), _, _) => format!(
-                "旧端口配置写回失败({e}),服务暂按原端口 {old_port} 运行,重启后将回到新端口,请修复 {} 后重试",
-                port_file
-            ),
-            (_, Err(e), _) => format!("回滚启动失败: {e},请手动启动服务"),
-            (_, _, false) => "旧实例已启动但健康检查未通过,请检查内核日志".to_string(),
-            (_, _, true) => "已回滚至原端口".to_string(),
+        let roll_msg = if let Err(e) = ui_restore {
+            format!("旧桌面入口恢复失败: {e},请手动检查 {}", state.ui_config_file)
+        } else {
+            match (&restore, &rollback, rolled_healthy) {
+                (Err(e), _, _) => format!(
+                    "旧端口配置写回失败({e}),服务暂按原端口 {old_port} 运行,重启后将回到新端口,请修复 {} 后重试",
+                    port_file
+                ),
+                (_, Err(e), _) => format!("回滚启动失败: {e},请手动启动服务"),
+                (_, _, false) => "旧实例已启动但健康检查未通过,请检查内核日志".to_string(),
+                (_, _, true) => "已回滚至原端口".to_string(),
+            }
         };
         err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("{detail};{roll_msg}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operation_guard_rejects_concurrent_changes() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let _guard = try_operation(&lock).unwrap();
+        let response = try_operation(&lock).unwrap_err();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn ui_port_sync_updates_only_the_main_entry() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-ui-port-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        std::fs::write(
+            &path,
+            r#"{".url":{"qwenpaw.console":{"type":"iframe"},"qwenpaw.main":{"type":"url","port":"18088"}}}"#,
+        )
+        .unwrap();
+        sync_ui_port(&path, 18099).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value[".url"]["qwenpaw.main"]["port"], "18099");
+        assert_eq!(value[".url"]["qwenpaw.console"]["type"], "iframe");
+        assert!(!dir.join("config.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

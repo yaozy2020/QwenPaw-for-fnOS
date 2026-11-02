@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PYTHON_BIN="/var/apps/python312/target/bin/python3"
+PYTHON_BIN="${QWENPAW_PYTHON_BIN:-/var/apps/python312/target/bin/python3}"
 
 # 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为安装态语义
 . "$(dirname "$0")/lib.sh"
@@ -17,6 +17,11 @@ fi
 # 1. 提取并持久化安装向导中设置的端口，同步至飞牛系统元数据
 INIT_PORT="${wizard_port:-${service_port:-${wizard_service_port:-18088}}}"
 if [ "${INIT_PORT}" = "19091" ]; then INIT_PORT="18088"; fi
+if [ "${INIT_PORT}" = "19090" ]; then
+    log_msg "ERROR: 端口 19090 为监督者保留端口"
+    notify_user "QwenPaw 服务端口不可使用监督者保留端口 19090。"
+    exit 1
+fi
 if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
     echo "${INIT_PORT}" > "${TRIM_PKGVAR}/service_port"
@@ -76,13 +81,21 @@ if [ -x "${VENV_DIR}/bin/python3" ] && "${VENV_DIR}/bin/python3" -c "import impo
 fi
 
 log_msg "正在创建虚拟环境..."
-"${PYTHON_BIN}" -m venv "${VENV_DIR}"
+if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
+    log_msg "ERROR: 虚拟环境创建失败: ${VENV_DIR}"
+    notify_user "QwenPaw 虚拟环境创建失败，请检查 Python 运行环境与磁盘权限。"
+    exit 1
+fi
 log_msg "虚拟环境 ${VENV_DIR} 创建成功"
 # 750:venv 仅属主(app 用户)需要访问,不对同机其他用户放行(审查 S3)
 chmod -R 750 "${VENV_DIR}" 2>/dev/null || true
 
 log_msg "正在激活虚拟环境..."
-source "${VENV_DIR}/bin/activate"
+if ! source "${VENV_DIR}/bin/activate"; then
+    log_msg "ERROR: 虚拟环境激活失败: ${VENV_DIR}"
+    notify_user "QwenPaw 虚拟环境激活失败，请检查运行环境完整性。"
+    exit 1
+fi
 log_msg "虚拟环境激活成功"
 
 PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
@@ -112,7 +125,11 @@ if [ -n "$MIRROR_URL" ] && [ ! -f "${VAR_DIR}/pip-mirror" ]; then
 fi
 
 log_msg "正在升级虚拟环境 pip..."
-python3 -m pip install --upgrade pip $PIP_OPTS
+if ! python3 -m pip install --upgrade pip $PIP_OPTS; then
+    log_msg "ERROR: 虚拟环境 pip 升级失败"
+    notify_user "QwenPaw pip 升级失败，请检查下载源与网络后重试。"
+    exit 1
+fi
 log_msg "虚拟环境 pip 升级成功"
 
 # 内核版本来源（修复路径）：版本钉优先，精确恢复用户选择的版本。

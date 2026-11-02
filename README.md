@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-2.0.0-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-2.0.1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
@@ -82,7 +82,15 @@ QwenPaw-for-fnOS/
 
 ## 版本历史
 
-### v2.0.0-rc.1（当前，FPK 版本 2.0.0-1）
+### v2.0.1（当前）
+
+- **生命周期真实性**: venv 创建、激活和 pip 升级失败立即非零退出，并通过 `TRIM_TEMP_LOGFILE` 向用户报告，不再出现失败假成功；
+- **端口配置闭环**: 控制台修改端口后同步更新飞牛桌面入口，失败同时回滚运行配置与入口；安装及设置路径统一拒绝保留端口，同端口请求可自愈历史错配；
+- **并发运维防护**: 启停、重启、安装、改端口、重置认证和版本钉修改统一互斥，安装期间及并发变更立即返回 409，避免操作半修改的运行环境；
+- **升级恢复与协议一致性**: 外壳升级完成后显式恢复监督者与内核服务；CGI 透传监督者 HTTP 状态码，安装冲突真实返回 409；
+- **质量验证**: Rust 14 项测试覆盖动态端口、精确版本、UTF-8、端口入口同步和并发互斥，完整生命周期与 FPK 审计通过。
+
+### v2.0.0-rc.1（FPK 版本 2.0.0-1）
 
 - **发布候选安装状态机**: 新增 `Starting` 非终态，健康检查与版本钉写入成功后才进入 `Done`；健康检查使用实际配置端口并精确匹配目标版本，启动失败、健康超时和版本钉失败均如实上报；
 - **日志与质量门禁**: 运行日志和 pip 日志共用 UTF-8 安全截断，覆盖中文与 emoji 边界；Rust 12 项回归测试与 Clippy 严格检查通过；

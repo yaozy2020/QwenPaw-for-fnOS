@@ -215,6 +215,18 @@ else
     bad "config_callback 落盘异常"
 fi
 
+for reserved in 19090 19091; do
+    rc=0
+    TRIM_PKGVAR="${T}/cb_var" TRIM_APPDEST="${T}/cb_dest" wizard_port="$reserved" \
+        TRIM_TEMP_LOGFILE="${T}/reserved.log" bash "$ROOT/cmd/config_callback" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ] && [ "$(cat "${T}/cb_var/service_port")" = "18092" ] \
+        && grep -q '"port": "18092"' "${T}/cb_dest/ui/config"; then
+        ok "config_callback 拒绝保留端口 $reserved 且不修改现有配置"
+    else
+        bad "config_callback 未拒绝保留端口 $reserved: rc=$rc"
+    fi
+done
+
 # ── [8] 卸载回调生命周期与数据治理 (uninstall_callback) ──
 # 回归门禁：删除必须受 TRIM_* 约束，不得出现硬编码全局路径（历史事故：
 # 测试以临时 TRIM_DATA_SHARE_PATHS 运行回调，硬编码删除绕过了隔离，
@@ -252,6 +264,27 @@ if [ -f "$M_VAR2/config" ] && [ -f "$M_SHARE2/.qwenpaw/memory.db" ] && [ ! -d "$
 else
     bad "uninstall_callback 保留数据模式行为异常"
 fi
+
+# ── [9] 虚拟环境创建失败必须使生命周期失败，不得继续报告成功 ──
+mkdir -p "${T}/fakebin" "${T}/fail_home" "${T}/fail_var" "${T}/fail_etc" "${T}/fail_share"
+cat > "${T}/fakebin/python3" <<'EOF'
+#!/bin/bash
+exit 42
+EOF
+chmod +x "${T}/fakebin/python3"
+for callback in install_callback upgrade_callback; do
+    : > "${T}/failure.log"
+    rc=0
+    PATH="${T}/fakebin:$PATH" QWENPAW_PYTHON_BIN="${T}/fakebin/python3" \
+        TRIM_PKGHOME="${T}/fail_home" TRIM_PKGVAR="${T}/fail_var" TRIM_PKGETC="${T}/fail_etc" \
+        TRIM_DATA_SHARE_PATHS="${T}/fail_share" TRIM_TEMP_LOGFILE="${T}/failure.log" \
+        bash "$ROOT/cmd/$callback" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ] && grep -q '虚拟环境创建失败' "${T}/failure.log"; then
+        ok "$callback venv 创建失败正确返回失败并通知用户"
+    else
+        bad "$callback venv 创建失败仍可能报告成功: rc=$rc log=$(cat "${T}/failure.log")"
+    fi
+done
 
 echo "========================================="
 if [ "$fail" -eq 0 ]; then

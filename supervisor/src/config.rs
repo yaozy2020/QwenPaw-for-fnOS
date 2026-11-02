@@ -9,6 +9,7 @@ pub struct Config {
     pub etc_dir: String,
     pub home_dir: String,
     pub share_dir: String,
+    pub ui_config_file: String,
     pub kernel_venv: String,
     pub kernel_pid_file: String,
     pub kernel_log: String,
@@ -64,12 +65,14 @@ impl Config {
 
         let listen = env_port("SUPERVISOR_PORT", 19090);
         let auto_start = env::var("SUPERVISOR_AUTOSTART").unwrap_or_default() != "0";
+        let app_dest = env_or("TRIM_APPDEST", "/var/apps/qwenpaw/target");
 
         Config {
             var_dir: var_dir.clone(),
             etc_dir,
             home_dir: home_dir.clone(),
             share_dir: share_dir.clone(),
+            ui_config_file: format!("{app_dest}/ui/config"),
             kernel_venv: format!("{home_dir}/venv"),
             kernel_pid_file: format!("{var_dir}/kernel.pid"),
             kernel_log: format!("{var_dir}/qwenpaw.log"),

@@ -4,7 +4,7 @@
 # - venv 缺失重建：按 ${VAR_DIR}/qwenpaw-version 版本钉恢复；无钉时按向导渠道安装
 # 注意：不用 set -e（工程铁律），失败路径显式 exit 1
 
-PYTHON_BIN="/var/apps/python312/target/bin/python3"
+PYTHON_BIN="${QWENPAW_PYTHON_BIN:-/var/apps/python312/target/bin/python3}"
 
 # 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为安装态语义
 . "$(dirname "$0")/lib.sh"
@@ -25,9 +25,17 @@ stop_supervisor
 
 if [ ! -d "${VENV_DIR}" ]; then
     log_msg "venv 缺失，重建虚拟环境 ${VENV_DIR}..."
-    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+    if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
+        log_msg "ERROR: 虚拟环境创建失败: ${VENV_DIR}"
+        notify_user "QwenPaw 虚拟环境创建失败，请检查 Python 运行环境与磁盘权限。"
+        exit 1
+    fi
     chmod -R 750 "${VENV_DIR}" 2>/dev/null || true  # 仅属主访问(审查 S3)
-    source "${VENV_DIR}/bin/activate"
+    if ! source "${VENV_DIR}/bin/activate"; then
+        log_msg "ERROR: 虚拟环境激活失败: ${VENV_DIR}"
+        notify_user "QwenPaw 虚拟环境激活失败，请检查运行环境完整性。"
+        exit 1
+    fi
 
     PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
     PIP_OPTS=""
@@ -73,6 +81,7 @@ if [ ! -d "${VENV_DIR}" ]; then
         ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
         rm -f "${PIP_LOG}"
         log_msg "ERROR: pip 安装失败: ${ERROR_MSG}"
+        notify_user "QwenPaw 运行环境恢复失败: ${ERROR_MSG}"
         exit 1
     fi
     cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
@@ -96,6 +105,21 @@ chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
 chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true  # 会话记忆仅属主可读,不对同机其他用户放行(审查 S3)
 secure_var_perms
+
+MAIN_SCRIPT="${TRIM_APPDEST}/cmd/main"
+[ ! -x "${MAIN_SCRIPT}" ] && MAIN_SCRIPT="/var/apps/qwenpaw/cmd/main"
+if [ -x "${MAIN_SCRIPT}" ]; then
+    log_msg "正在恢复 QwenPaw 监督者与内核服务..."
+    if ! bash "${MAIN_SCRIPT}" start; then
+        log_msg "ERROR: 升级后服务恢复失败"
+        notify_user "QwenPaw 外壳已升级，但服务恢复失败，请检查 supervisor.log。"
+        exit 1
+    fi
+else
+    log_msg "ERROR: 未找到服务启动入口: ${MAIN_SCRIPT}"
+    notify_user "QwenPaw 外壳已升级，但启动入口缺失，请在应用中心手动启动。"
+    exit 1
+fi
 
 log_msg "QwenPaw 外壳升级完成！"
 exit 0

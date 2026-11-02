@@ -172,7 +172,9 @@ fn main() {
         var_dir: cfg.var_dir.clone(),
         home_dir: cfg.home_dir.clone(),
         share_dir: cfg.share_dir.clone(),
+        ui_config_file: cfg.ui_config_file.clone(),
         kernel_log: cfg.kernel_log.clone(),
+        operations: Arc::new(tokio::sync::Mutex::new(())),
         supervisor_port: cfg.listen_port,
     };
     let addr = format!("127.0.0.1:{}", cfg.listen_port);

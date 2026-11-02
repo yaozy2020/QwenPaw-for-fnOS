@@ -202,8 +202,12 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         open(sys.argv[2], "a").write(self.path + " " + self.rfile.read(n).decode(errors="replace") + "\n")
-        body = b'{"ok": true, "success": true, "message": "install accepted"}'
-        self.send_response(200)
+        if self.path.startswith("/restart"):
+            body = b'{"ok": false, "success": false, "message": "busy"}'
+            self.send_response(409)
+        else:
+            body = b'{"ok": true, "success": true, "message": "install accepted"}'
+            self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -412,6 +416,19 @@ if [ "$(json_field "$t11b" "d.get('success')")" = "True" ]     && grep -q '^/sta
     echo "  [  OK ] sendBeacon _csrf 查询参数退路 → 放行"
 else
     echo "  [FAIL] sendBeacon 退路被误拒: ${t11b:0:140}"
+    fail=1
+fi
+
+# T11c 上游 409 必须连同 JSON 一起透传，不能由 CGI 改成 200
+s11c="$(env QWENPAW_SUP_URL="http://127.0.0.1:${FAKE_PORT}" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
+    QUERY_STRING="action=restart" REQUEST_METHOD="POST" HTTP_COOKIE="qwenpaw_csrf=tok" \
+    HTTP_X_CSRF_TOKEN="tok" "$BR" | head -n 1)"
+t11c="$(envrun "action=restart" HTTP_COOKIE="qwenpaw_csrf=tok" HTTP_X_CSRF_TOKEN="tok")"
+if printf '%s' "$s11c" | grep -q '^Status: 409' \
+    && [ "$(json_field "$t11c" "d.get('success')")" = "False" ]; then
+    echo "  [  OK ] 上游 409 状态码与错误 JSON 同步透传"
+else
+    echo "  [FAIL] 上游 409 未正确透传: status=${s11c} body=${t11c:0:120}"
     fail=1
 fi
 

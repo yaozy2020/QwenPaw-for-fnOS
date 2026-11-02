@@ -189,19 +189,32 @@ TOKHDR=$(mktemp "${TMPDIR:-/tmp}/qwenpaw-hdr.XXXXXX") || {
 chmod 600 "${TOKHDR}" 2>/dev/null || true
 printf 'X-Supervisor-Token: %s\n' "${TOKEN}" > "${TOKHDR}"
 trap 'rm -f "${TOKHDR}"' EXIT
-resp=$(curl -s --max-time 30 -X "$method" \
+raw_resp=$(curl -s --max-time 30 -w $'\n%{http_code}' -X "$method" \
     -H @"${TOKHDR}" \
     -H "Content-Type: application/json" \
     ${body:+-d "$body"} \
     "${SUP}${path}")
 rm -f "${TOKHDR}"
 trap - EXIT
+http_code="${raw_resp##*$'\n'}"
+resp="${raw_resp%$'\n'*}"
+STATUS_LINE=""
+case "$http_code" in
+    200) ;;
+    2??) STATUS_LINE="Status: ${http_code}" ;;
+    000)
+        STATUS_LINE="Status: 502 Bad Gateway"
+        resp='{"success":false,"message":"监督者未响应,请稍后重试"}'
+        ;;
+    *) STATUS_LINE="Status: ${http_code}" ;;
+esac
 
 # version_list:监督者交回 PyPI 全量原始键名;语义排序(2.10.0>2.9.9,稳定>
 # 预发布)、is_beta 判定、最新稳定版推导都在这里做 —— 控制台取 versions[0]
 # 前的第一个 is_beta 作"最新测试",降序排列才能取到真正最新的 beta。
 # 上游失败(err_json/形状异常)必须 success:false 透传,绝不伪装"检查完成"。
 if [ "$action" = "version_list" ]; then
+    [ -n "$STATUS_LINE" ] && echo "$STATUS_LINE"
     echo "Content-Type: application/json"
     echo ""
     if command -v python3 >/dev/null 2>&1; then
@@ -262,6 +275,7 @@ else
         *) resp='{"success":false,"message":"监督者未响应,请稍后重试"}' ;;
     esac
 fi
+[ -n "$STATUS_LINE" ] && echo "$STATUS_LINE"
 echo "Content-Type: application/json"
 echo ""
 echo "$resp"
