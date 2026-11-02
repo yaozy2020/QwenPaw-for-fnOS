@@ -211,10 +211,17 @@ async fn start(State(state): State<AppState>, req: Request<axum::body::Body>) ->
         Ok(guard) => guard,
         Err(response) => return *response,
     };
-    if !state.kernel.installed() {
+    let kernel = Arc::clone(&state.kernel);
+    // installed() 要 stat venv 目录,不能占着 async 线程做
+    let installed = tokio::task::spawn_blocking({
+        let k = Arc::clone(&kernel);
+        move || k.installed()
+    })
+    .await
+    .unwrap_or(false);
+    if !installed {
         return err_json(StatusCode::CONFLICT, "QwenPaw 内核尚未安装,请在「版本更新」中选择版本安装");
     }
-    let kernel = Arc::clone(&state.kernel);
     let res = tokio::task::spawn_blocking(move || kernel.spawn())
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
@@ -447,7 +454,12 @@ async fn kernel_install(
     );
     if started {
         let seq = state.install.snapshot().seq;
-        state.events.publish(render_snapshot(&state));
+        // render_snapshot 内含 300ms 采样与子进程调用,必须离开 async 线程
+        let snap_state = state.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            snap_state.events.publish(render_snapshot(&snap_state));
+        })
+        .await;
         // seq 随受理响应返回:前端由此确认"后端已接单",替代 sendBeacon 的盲发
         Json(json!({"ok": true, "success": true, "message": "安装已开始", "seq": seq}))
             .into_response()
@@ -684,9 +696,19 @@ async fn kernel_pin(
         return err_json(StatusCode::BAD_REQUEST, "版本钉仅接受合法的精确版本号");
     }
     let pin_path = format!("{}/qwenpaw-version", state.var_dir);
-    match crate::install::atomic_write_0600(&pin_path, &format!("{}\n", req.version)) {
+    let pin_content = format!("{}\n", req.version);
+    let wrote = tokio::task::spawn_blocking(move || {
+        crate::install::atomic_write_0600(&pin_path, &pin_content)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    match wrote {
         Ok(_) => {
-            state.events.publish(render_snapshot(&state));
+            let snap_state = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                snap_state.events.publish(render_snapshot(&snap_state));
+            })
+            .await;
             Json(json!({"ok": true, "message": format!("版本钉已更新: {}", req.version)}))
                 .into_response()
         }

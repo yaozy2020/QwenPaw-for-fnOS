@@ -48,8 +48,10 @@ html[data-theme="dark"] {
   --text-muted: #7d8894;
   --divider: rgba(255, 255, 255, 0.06);
   --token-bg: #0c1017;
-  --primary: #3b82f6;
-  --primary-hover: #2f74ec;
+  /* 白字配 .btn-primary 背景:原 #3b82f6 仅 3.68:1。
+     #2563eb 达 5.17:1,视觉上仍是同一支蓝,只是压暗一档。 */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
   --primary-soft: rgba(59, 130, 246, 0.10);
   --primary-border: rgba(59, 130, 246, 0.28);
   --success: #34d399;
@@ -57,9 +59,12 @@ html[data-theme="dark"] {
   --warning: #fbbf24;
   --warning-bg: rgba(251, 191, 36, 0.10);
   --warning-border: rgba(251, 191, 36, 0.30);
-  --danger: #f87171;
-  --danger-bg: rgba(248, 113, 113, 0.10);
-  --danger-border: rgba(248, 113, 113, 0.30);
+  /* 原 #f87171 配白字仅 2.77:1。悬停态改为加深而非提亮是更稳妥的做法:
+     危险操作 hover 时视觉重量上升,同时把对比度推到 4.83:1。
+     文字色仍用浅红(见下方 --danger 派生),深底浅字更易读。 */
+  --danger: #dc2626;
+  --danger-bg: rgba(220, 38, 38, 0.10);
+  --danger-border: rgba(220, 38, 38, 0.30);
   /* 终端恒暗:亮色主题下也保持终端质感 */
   --terminal-bg: #070a10;
   --terminal-border: rgba(255, 255, 255, 0.06);
@@ -93,9 +98,11 @@ html[data-theme="light"] {
   --warning: #b45309;
   --warning-bg: rgba(217, 119, 6, 0.10);
   --warning-border: rgba(180, 83, 9, 0.30);
-  --danger: #dc2626;
-  --danger-bg: rgba(220, 38, 38, 0.08);
-  --danger-border: rgba(220, 38, 38, 0.28);
+  /* 原 #dc2626 落在 8% tint 上为 4.41:1,略低于 AA。#b91c1c 达 6.47:1,
+     徽章与 notice 同步受益。 */
+  --danger: #b91c1c;
+  --danger-bg: rgba(185, 28, 28, 0.08);
+  --danger-border: rgba(185, 28, 28, 0.28);
   --terminal-bg: #0f172a;
   --terminal-border: rgba(255, 255, 255, 0.08);
   --terminal-text: #cbd5e1;

@@ -352,16 +352,17 @@ impl VenvTransaction {
         let prepared = if had_active {
             copy_tree(active, &staged)
         } else {
-            std::process::Command::new(python)
-                .arg("-m")
-                .arg("venv")
-                .arg(&staged)
-                .status()
-                .and_then(|status| {
-                    if status.success() {
+            let mut cmd = std::process::Command::new(python);
+            cmd.arg("-m").arg("venv").arg(&staged);
+            run_with_timeout(cmd, std::time::Duration::from_secs(180), "创建 venv")
+                .and_then(|o| {
+                    if o.status.success() {
                         Ok(())
                     } else {
-                        Err(std::io::Error::other(format!("创建 venv 失败: {status}")))
+                        Err(std::io::Error::other(format!(
+                            "创建 venv 失败: {}",
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        )))
                     }
                 })
         };
@@ -808,17 +809,26 @@ pub fn recover_pending_transactions(
 
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
-    if metadata.file_type().is_symlink() {
+    let ft = metadata.file_type();
+    if ft.is_symlink() {
         return std::os::unix::fs::symlink(std::fs::read_link(source)?, destination);
     }
-    if metadata.is_dir() {
+    if ft.is_dir() {
         std::fs::create_dir(destination)?;
         for entry in std::fs::read_dir(source)? {
             let entry = entry?;
             copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
         }
-    } else {
+    } else if ft.is_file() {
         std::fs::copy(source, destination)?;
+    } else {
+        // FIFO / socket / 设备节点绝不能走 std::fs::copy:
+        // 打开 FIFO 会阻塞到有写端为止,一次 venv 里出现 FIFO 就能让安装线程永久挂死,
+        // running 恒 true、/kernel/install 永久 busy。直接失败比挂死好。
+        return Err(std::io::Error::other(format!(
+            "暂存复制遇到非常规文件,拒绝处理: {}",
+            source.display()
+        )));
     }
     std::fs::set_permissions(destination, metadata.permissions())
 }
@@ -1466,14 +1476,48 @@ fn wait_for_version(port: u16, target_version: &str, attempts: usize) -> bool {
     false
 }
 
+/// 带超时地运行一个短命令,超时则杀掉并返回错误。
+///
+/// `python -m venv` 与 importlib.metadata 查询都不在上面那个 pip 看门狗覆盖范围内:
+/// 一旦挂起(venv 创建卡在锁上、解释器启动卡在 NFS 上),安装线程会永久阻塞,
+/// running 恒 true、/kernel/install 永久 busy —— 正是看门狗注释声称要消灭的模式。
+fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+    label: &str,
+) -> std::io::Result<std::process::Output> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let started = std::time::Instant::now();
+
+    loop {
+        match child.try_wait()? {
+            Some(_) => return child.wait_with_output(),
+            None => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("{label} 超时({}s),已终止", timeout.as_secs()),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 /// 用 venv 内 python 读已安装内核版本(importlib.metadata)
 fn metadata_version(python: &Path) -> String {
-    std::process::Command::new(python)
-        .args([
-            "-c",
-            "import importlib.metadata as m; print(m.version('qwenpaw'))",
-        ])
-        .output()
+    let mut cmd = std::process::Command::new(python);
+    cmd.args([
+        "-c",
+        "import importlib.metadata as m; print(m.version('qwenpaw'))",
+    ]);
+    run_with_timeout(cmd, std::time::Duration::from_secs(30), "读取内核版本")
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -2452,6 +2496,62 @@ mod tests {
         assert!(!hit.load(std::sync::atomic::Ordering::SeqCst),
             "Prepared 阶段旧环境未动,不得停掉正在运行的内核");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    // ── 工单3:非常规文件不得让 copy_tree 挂死 ──
+    // FIFO 经 std::fs::copy 会在 open 处阻塞到有写端为止,
+    // 一次 venv 里出现 FIFO 就能让安装线程永久挂死。
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_rejects_fifo_instead_of_blocking() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        let fifo = src.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "mkfifo 失败");
+
+        let start = std::time::Instant::now();
+        let result = copy_tree(&src, &dst);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "遇到 FIFO 必须报错而不是挂死");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "copy_tree 不得阻塞(实际耗时 {:?})",
+            elapsed
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 工单3:带超时的命令执行 ──
+    #[test]
+    fn run_with_timeout_kills_hung_command() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        let start = std::time::Instant::now();
+        let result = run_with_timeout(cmd, std::time::Duration::from_millis(300), "测试命令");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "超时必须返回错误而不是一直等");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "超时后应立即返回(实际 {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_returns_output_on_success() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "printf hello"]);
+        let out = run_with_timeout(cmd, std::time::Duration::from_secs(5), "测试命令").unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
     }
 
     #[test]
