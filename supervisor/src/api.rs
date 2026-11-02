@@ -79,10 +79,39 @@ pub fn render_snapshot(state: &AppState) -> String {
     let st = state.kernel.status_now();
     let version = state.kernel.kernel_version();
     let inst = state.install.snapshot();
-    let auth = std::path::Path::new(&state.share_dir)
-        .parent()
-        .map(|p| p.join(".qwenpaw.secret/auth.json").exists())
-        .unwrap_or(false);
+    // 真实认证状态探测 (纯标准库轻量探测，无外部重量依赖):
+    let mut auth_state = "unknown";
+    if st.running && st.port > 0 {
+        use std::io::{Read, Write};
+        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], st.port)),
+            std::time::Duration::from_millis(300),
+        ) {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+            let req = format!("GET /api/auth/status HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", st.port);
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut buf = Vec::new();
+                if stream.read_to_end(&mut buf).is_ok() {
+                    let s = String::from_utf8_lossy(&buf);
+                    if let Some(body_idx) = s.find("\r\n\r\n") {
+                        let body = &s[body_idx + 4..];
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                            let enabled = val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let has_users = val.get("has_users").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if enabled && !has_users {
+                                auth_state = "uninitialized";
+                            } else if enabled && has_users {
+                                auth_state = "protected";
+                            } else {
+                                auth_state = "disabled";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let auth = auth_state == "protected";
     let start_epoch = st
         .started_at
         .map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
@@ -97,6 +126,7 @@ pub fn render_snapshot(state: &AppState) -> String {
         // 内核由 /proc 重新收养(监督者曾被 SIGKILL)时为 true,排障用
         "adopted": st.adopted,
         "authEnabled": auth,
+        "authStatus": auth_state,
         "port": st.port,
         "cpu": st.cpu_percent,
         "memKB": st.rss_kb,
@@ -219,8 +249,13 @@ fn tail_lines(path: &std::path::Path, max: usize, window: u64) -> Vec<String> {
             // 窗口起点可能切在多字节字符中间:丢弃非法段由 lossy 兜底,
             // 单行超长截断
             if l.len() > LINE_CAP {
-                let mut s = l.to_string();
-                s.truncate(LINE_CAP);
+                // 安全 UTF-8 字符边界截断 (P1-3: 避免直接字节截断导致多字节中文/emoji 发生 Panic)
+                let truncate_idx = l.char_indices()
+                    .map(|(idx, _)| idx)
+                    .take_while(|&idx| idx <= LINE_CAP)
+                    .last()
+                    .unwrap_or(0);
+                let mut s = l[..truncate_idx].to_string();
                 s.push('…');
                 s
             } else {

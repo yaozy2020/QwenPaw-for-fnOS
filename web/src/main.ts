@@ -239,7 +239,57 @@ const API_BASE = (function() {
         }
 
         if (valVersion && data.version) { valVersion.innerText = data.version; currentRunningVersion = data.version; updateUpgradeButtonText(); }
-        if (valAuth) valAuth.innerText = data.authEnabled ? "已启用密码保护" : "免密模式";
+        const valAdmin = document.getElementById("valAdminStatus");
+        const valDesc = document.getElementById("valAuthDesc");
+        const statusType = data.authStatus || (data.authEnabled ? "protected" : "disabled");
+
+        if (statusType === "uninitialized") {
+          if (valAuth) {
+            valAuth.innerText = "需初始化";
+            valAuth.style.color = "var(--warning)";
+          }
+          if (valAdmin) {
+            valAdmin.innerHTML = `<span style="color:var(--warning);font-weight:600;">⚠️ 未初始化管理员</span>`;
+          }
+          if (valDesc) {
+            valDesc.innerHTML = `<span style="color:var(--warning);">首次安装尚未设定密码！请点击下方“进入对话”直达初始设置页创建管理员。</span>`;
+          }
+        } else if (statusType === "protected") {
+          if (valAuth) {
+            valAuth.innerText = "已启用密码保护";
+            valAuth.style.color = "var(--success)";
+          }
+          if (valAdmin) {
+            valAdmin.innerHTML = `<span style="color:var(--success);">已绑定管理账号</span>`;
+          }
+          if (valDesc) {
+            valDesc.innerText = "进入 Web 对话端需输入你的管理员密码。如忘记密码，可点击下方按钮一键重置。";
+          }
+        } else if (statusType === "disabled") {
+          if (valAuth) {
+            valAuth.innerText = "免密模式";
+            valAuth.style.color = "var(--text-muted)";
+          }
+          if (valAdmin) {
+            valAdmin.innerText = "无密码保护";
+            valAdmin.style.color = "var(--text-muted)";
+          }
+          if (valDesc) {
+            valDesc.innerText = "当前未开启鉴权，任何人均可直接访问对话界面。";
+          }
+        } else {
+          if (valAuth) {
+            valAuth.innerText = "状态未知";
+            valAuth.style.color = "var(--text-muted)";
+          }
+          if (valAdmin) {
+            valAdmin.innerText = "服务未连接";
+            valAdmin.style.color = "var(--text-muted)";
+          }
+          if (valDesc) {
+            valDesc.innerText = "内核未启动或接口不可达，无法确认当前鉴权状态。";
+          }
+        }
 
         const portEl = document.getElementById("valPort");
         const activePort = data.port || "18088";

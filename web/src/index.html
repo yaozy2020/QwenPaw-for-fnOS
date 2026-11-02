@@ -136,14 +136,14 @@
       <div class="card-body">
         <div class="info-row">
           <span class="info-label">Web 登录验证</span>
-          <span class="info-val" id="valAuthStatus" style="color:var(--success);">已启用密码保护</span>
+          <span class="info-val" id="valAuthStatus" style="color:var(--text-muted);">状态获取中...</span>
         </div>
         <div class="info-row">
           <span class="info-label">管理员身份</span>
-          <span class="info-val">已绑定管理账号</span>
+          <span class="info-val" id="valAdminStatus" style="color:var(--text-muted);">-</span>
         </div>
-        <p style="font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 4px;">
-          进入 Web 对话端需输入你的管理员密码。如忘记密码，可点击下方按钮一键重置。
+        <p id="valAuthDesc" style="font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 4px;">
+          进入 Web 对话端需验证管理员密码。首次安装请先进入 WebUI 设定初始管理员。
         </p>
       </div>
       <div style="margin-top: 8px;">

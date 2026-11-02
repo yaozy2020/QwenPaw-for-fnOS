@@ -230,11 +230,11 @@ M_VAR="${T}/un_var1"
 M_HOME="${T}/un_home1"
 M_ETC="${T}/un_etc1"
 M_SHARE="${T}/un_share1"
-mkdir -p "$M_VAR" "$M_HOME" "$M_ETC" "$M_SHARE/.qwenpaw"
-touch "$M_VAR/dummy" "$M_HOME/dummy" "$M_ETC/dummy" "$M_SHARE/dummy" "$M_SHARE/.qwenpaw/memory.db"
+mkdir -p "$M_VAR" "$M_HOME" "$M_ETC" "$M_SHARE/.qwenpaw" "$M_SHARE/.qwenpaw.secret"
+touch "$M_VAR/dummy" "$M_HOME/dummy" "$M_ETC/dummy" "$M_SHARE/dummy" "$M_SHARE/.qwenpaw/memory.db" "$M_SHARE/.qwenpaw.secret/auth.json"
 wizard_keep_data=remove TRIM_PKGVAR="$M_VAR" TRIM_PKGHOME="$M_HOME" TRIM_PKGETC="$M_ETC" TRIM_DATA_SHARE_PATHS="$M_SHARE" bash "$ROOT/cmd/uninstall_callback" >/dev/null 2>&1
 if [ ! -d "$M_VAR" ] && [ ! -d "$M_HOME" ] && [ ! -d "$M_ETC" ] \
-    && [ -d "$M_SHARE" ] && [ ! -d "$M_SHARE/.qwenpaw" ] && [ -f "$M_SHARE/dummy" ]; then
+    && [ -d "$M_SHARE" ] && [ ! -d "$M_SHARE/.qwenpaw" ] && [ ! -d "$M_SHARE/.qwenpaw.secret" ] && [ -f "$M_SHARE/dummy" ]; then
     ok "uninstall_callback 彻底删除模式仅清 .qwenpaw，保留共享根"
 else
     bad "uninstall_callback 彻底删除模式越界或残留: var=$(test -d "$M_VAR" && echo 存在) home=$(test -d "$M_HOME" && echo 存在) share=$(test -d "$M_SHARE" && echo 存在)"

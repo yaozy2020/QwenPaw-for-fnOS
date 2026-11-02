@@ -116,7 +116,6 @@ impl KernelManager {
             .env("HOME", &self.cfg.etc_dir)
             .env("QWENPAW_WORKING_DIR", &self.cfg.share_dir)
             .env("QWENPAW_AUTH_ENABLED", "true")
-            .env("QWENPAW_CORS_ORIGINS", "*")
             // app_cmd 启动后自身会为子进程(shared_worker 等)回写该变量;此处
             // 显式注入保证 spawn 之初环境即一致
             .env("QWENPAW_LOG_LEVEL", &self.cfg.log_level)

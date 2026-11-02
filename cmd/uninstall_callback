@@ -51,7 +51,13 @@ remove | no | false | 0)
     # TRIM_DATA_SHARE_PATHS 运行本回调，全局删除会绕过隔离误删真实数据。
     case "${SHARE_DIR}" in
         */.qwenpaw)
+            # 严格清单化删除: 清理工作区、记忆目录与密钥认证目录 (.qwenpaw.secret)
             rm -rf "${SHARE_DIR}" 2>/dev/null || true
+            SECRET_DIR="${SHARE_DIR%/*}/.qwenpaw.secret"
+            if [ -d "${SECRET_DIR}" ]; then
+                rm -rf "${SECRET_DIR}" 2>/dev/null || true
+                log_msg "已清理应用密钥与认证目录: ${SECRET_DIR}"
+            fi
             ;;
         *)
             log_msg "WARN: 拒绝删除非 .qwenpaw 数据目录: ${SHARE_DIR}"

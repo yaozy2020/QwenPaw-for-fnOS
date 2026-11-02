@@ -603,15 +603,56 @@ impl InstallState {
                         }
                     });
                     if ok {
-                        // 版本钉只记录"经元数据核实的实际版本"(原子写);
-                        // pip 成功但元数据不符的路径已归入失败,绝不污染可用版本钉
-                        if !actual.is_empty() {
-                            if let Err(e) = atomic_write_0600(&pin_path, &format!("{actual}\n")) {
-                                eprintln!("[Supervisor] write version pin: {e}");
+                        // 安装/升级成功，先拉起内核进程
+                        (on_success)();
+
+                        // 端到端健康检查门禁: 等待内核进程就绪并真实响应 /api/version
+                        let mut health_ok = false;
+                        let target_v = actual.clone();
+                        for _ in 0..30 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            use std::io::{Read, Write};
+                            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+                                &std::net::SocketAddr::from(([127, 0, 0, 1], 18088)),
+                                std::time::Duration::from_millis(500),
+                            ) {
+                                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                                let req = "GET /api/version HTTP/1.1\r\nHost: 127.0.0.1:18088\r\nConnection: close\r\n\r\n";
+                                if stream.write_all(req.as_bytes()).is_ok() {
+                                    let mut buf = Vec::new();
+                                    if stream.read_to_end(&mut buf).is_ok() {
+                                        let s = String::from_utf8_lossy(&buf);
+                                        if s.contains("200 OK") {
+                                            if let Some(body_idx) = s.find("\r\n\r\n") {
+                                                let body = &s[body_idx + 4..];
+                                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                                                    if let Some(v) = val.get("version").and_then(|v| v.as_str()) {
+                                                        if target_v.is_empty() || v == target_v || v.starts_with(&target_v) {
+                                                            health_ok = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        // 安装成功自动拉起内核(装完即用,无需手动重启)
-                        (on_success)();
+
+                        if health_ok {
+                            if !actual.is_empty() {
+                                if let Err(e) = atomic_write_0600(&pin_path, &format!("{actual}\n")) {
+                                    eprintln!("[Supervisor] write version pin: {e}");
+                                }
+                            }
+                        } else {
+                            ok = false;
+                            this.set(|g| {
+                                g.phase = Phase::Failed;
+                                g.error = "内核包已安装，但在宽限期内启动健康检查超时 (health_timeout)".into();
+                            });
+                        }
                     }
                 }
                 Err(e) => {

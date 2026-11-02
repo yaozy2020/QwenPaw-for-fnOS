@@ -25,7 +25,6 @@ SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
 export QWENPAW_WORKING_DIR="${SHARE_DIR}"
 export QWENPAW_LOG_LEVEL="${QWENPAW_LOG_LEVEL:-${wizard_log_level:-info}}"
 export QWENPAW_AUTH_ENABLED=true
-export QWENPAW_CORS_ORIGINS="*"
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
 export QWENPAW_DEPENDENCY_STATE_DIR="${SHARE_DIR}/dependency-environments"
 
