@@ -15,11 +15,18 @@ if [ "${INIT_PORT}" = "19090" ]; then
     notify_user "QwenPaw 服务端口不可使用监督者保留端口 19090。"
     exit 1
 fi
-if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
-    mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
-    echo "${INIT_PORT}" > "${TRIM_PKGVAR}/service_port"
+# 非法端口必须报错退出,不能静默忽略:
+# config_callback 会 exit 1,安装侧却默默继续,用户以为设置成功。
+# 且统一走 lib.sh 的 VAR_DIR(与 config 侧同一口径),不裸用 TRIM_PKGVAR。
+if printf '%s' "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
+    mkdir -p "${VAR_DIR}" 2>/dev/null || true
+    echo "${INIT_PORT}" > "${VAR_DIR}/service_port"
     sync_ui_config_port "${INIT_PORT}"
     log_msg "安装端口已设定并同步为: ${INIT_PORT}"
+else
+    log_msg "ERROR: 端口非法: ${INIT_PORT}"
+    notify_user "QwenPaw 服务端口非法(${INIT_PORT}),须为 1024-65535 之间的整数。"
+    exit 1
 fi
 
 # 安装向导的日志级别落盘(wizard/install 收集 wizard_log_level):
@@ -155,7 +162,13 @@ if [ -f "${SHARE_DIR}/config.json" ] || [ -d "${SHARE_DIR}/workspaces" ]; then
     log_msg "检测到已有 QwenPaw 数据（config/workspaces），跳过 init 初始化"
 else
     log_msg "正在初始化 QwenPaw..."
-    echo "Yes" | python3 -m qwenpaw init --defaults
+    # init 失败不能继续宣称"安装成功":内核装上了但没有任何配置,
+    # 平台会显示成功而用户打开是空的。
+    if ! echo "Yes" | python3 -m qwenpaw init --defaults; then
+        log_msg "ERROR: qwenpaw init 初始化失败"
+        notify_user "QwenPaw 初始化失败，请查看安装日志后重试。"
+        exit 1
+    fi
 fi
 
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true

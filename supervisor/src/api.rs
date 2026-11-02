@@ -868,6 +868,11 @@ pub fn sync_main_entry(path: &std::path::Path, port: u16, installed: bool) -> st
             "control": {"accessPerm": "editable"}
         })
     });
+    // 存量配置可能把该键写成字符串/数组等非 object 值,
+    // 直接 entry["port"] 赋值会 panic(serde_json IndexMut 仅对 object 有效)
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
     entry["port"] = serde_json::Value::String(port.to_string());
     entry["noDisplay"] = serde_json::Value::Bool(!installed);
     write_ui_config(path, &config)
@@ -876,6 +881,10 @@ pub fn sync_main_entry(path: &std::path::Path, port: u16, installed: bool) -> st
 fn sync_ui_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
     let mut config = read_ui_config(path)?;
     if let Some(entry) = config.pointer_mut("/.url/qwenpaw.main") {
+        // 同上:非 object 时赋值会 panic
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
         entry["port"] = serde_json::Value::String(port.to_string());
         write_ui_config(path, &config)?;
     }

@@ -97,8 +97,8 @@ mkdir -p "$STAGE"
 
 # 顶层纯净白名单:清单/许可/图标 (mode 0644)
 cp "$PROJ_DIR/manifest" "$STAGE/manifest"
-cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE"
-cp "$PROJ_DIR/ICON.PNG" "$PROJ_DIR/ICON_256.PNG" "$STAGE/"
+cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE" || { echo "ERROR: 复制 LICENSE 失败"; exit 1; }
+cp "$PROJ_DIR/ICON.PNG" "$PROJ_DIR/ICON_256.PNG" "$STAGE/" || { echo "ERROR: 复制图标失败"; exit 1; }
 chmod 0644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE/ICON.PNG" "$STAGE/ICON_256.PNG"
 
 # cmd 目录白名单精准物化 (严禁任何未跟踪的测试/.pid残留入包)
@@ -115,7 +115,7 @@ done
 # config 目录白名单精准物化 (mode 0644)
 mkdir -p "$STAGE/config"
 cp "$PROJ_DIR/config/privilege" "$STAGE/config/privilege"
-cp "$PROJ_DIR/config/resource" "$STAGE/config/resource"
+cp "$PROJ_DIR/config/resource" "$STAGE/config/resource" || { echo "ERROR: 复制 config/resource 失败"; exit 1; }
 chmod 0644 "$STAGE/config/privilege" "$STAGE/config/resource"
 
 # wizard 目录白名单精准物化 (mode 0644)

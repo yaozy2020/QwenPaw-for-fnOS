@@ -272,11 +272,12 @@ button:active, .btn:active { transform: scale(0.98); }
   border-radius: 6px;
 }
 .btn-block { width: 100%; }
-/* 禁用态必须一眼可辨(评审 E 项:分页按钮状态失效) */
+/* 禁用态必须一眼可辨(评审 E 项:分页按钮状态失效)
+   pointer-events:none 会让 title 提示永不显示 —— 而 degraded 态恰恰靠 title
+   告知"为什么不能点",所以改用 cursor + opacity 表达禁用 */
 button:disabled, .btn:disabled {
   opacity: 0.4;
-  cursor: default;
-  pointer-events: none;
+  cursor: not-allowed;
 }
 
 /* 5. 主网格:3 栏 → 2 栏(中间断点,fnOS 桌面 iframe 常见宽度)→ 1 栏

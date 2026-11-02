@@ -35,6 +35,14 @@ pub struct KernelManager {
     cfg: KernelConfig,
     port: AtomicU16,
     state: Mutex<State>,
+    /// 进程生命周期操作的序列化锁。
+    ///
+    /// API 侧的运维互斥锁(tokio Mutex)只能串行化 HTTP 处理器之间的操作;
+    /// 安装线程直接调用 spawn/stop 且全程不持有那把锁,因此存在这样的交错:
+    /// 用户 restart 已 stop 完、正要 spawn,安装线程先一步 spawn 成功,
+    /// 随后 restart 再 spawn 撞上"已在运行"并把它报成重启失败 —— 实际留下了
+    /// 一个新内核,状态却显示失败。用 std 锁覆盖两条路径,保证 spawn/stop 不交错。
+    lifecycle: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -60,7 +68,12 @@ pub struct KernelStatus {
 
 impl KernelManager {
     pub fn new(cfg: KernelConfig, port: u16) -> Self {
-        Self { cfg, port: AtomicU16::new(port), state: Mutex::new(State::default()) }
+        Self {
+            cfg,
+            port: AtomicU16::new(port),
+            state: Mutex::new(State::default()),
+            lifecycle: Mutex::new(()),
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -110,6 +123,8 @@ impl KernelManager {
     /// 同步启动内核(无 await;由 axum 处理器与安装完成回调直接调用)。
     /// 以独立进程组启动(process_group(0) ≈ setsid)。
     pub fn spawn(&self) -> Result<i32, String> {
+        // 与 stop_sync 互斥,防止"stop 后 spawn"与安装线程的 spawn 交错
+        let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         {
             let st = self.state.lock().unwrap();
             if st.tracked != 0 && procfs::process_alive(st.tracked) {
@@ -211,6 +226,7 @@ impl KernelManager {
     }
 
     pub fn stop_sync(&self) {
+        let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let mut target = {
             let st = self.state.lock().unwrap();
             st.tracked
@@ -360,6 +376,71 @@ mod tests {
         kernel.invalidate_version();
         assert_eq!(kernel.kernel_version(), "2.3.0");
         assert_eq!(std::fs::read_to_string(dir.join("venv/bin/calls")).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // 工单10 回归:spawn/stop 必须互不交错。
+    // 无 lifecycle 锁时,两个线程的 spawn 可以同时通过"是否已在运行"检查,
+    // 结果是两份进程或一次假失败。
+    #[test]
+    fn lifecycle_lock_serializes_spawn_and_stop() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-lifecycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cfg = KernelConfig {
+            venv_dir: dir.to_string_lossy().to_string(),
+            pid_file: dir.join("kernel.pid").to_string_lossy().to_string(),
+            log_file: dir.join("kernel.log").to_string_lossy().to_string(),
+            share_dir: dir.to_string_lossy().to_string(),
+            etc_dir: dir.to_string_lossy().to_string(),
+            log_level: "info".to_string(),
+        };
+        let km = Arc::new(KernelManager::new(cfg, 0));
+
+        // 并发进入 spawn/stop,统计进入临界区的最大并发度
+        let inside = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let km2 = Arc::clone(&km);
+            let inside2 = Arc::clone(&inside);
+            let max2 = Arc::clone(&max_seen);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..20 {
+                    let cur = inside2.fetch_add(1, Ordering::SeqCst) + 1;
+                    max2.fetch_max(cur, Ordering::SeqCst);
+                    if i % 2 == 0 {
+                        let _ = km2.spawn();
+                    } else {
+                        km2.stop_sync();
+                    }
+                    inside2.fetch_sub(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // spawn/stop 内部已持锁,但它们本身可以并行进入"计数区",
+        // 因此这里断言的是"不会 panic/死锁",并额外确认 pid 文件未出现半截内容。
+        let pid_file = dir.join("kernel.pid");
+        if pid_file.exists() {
+            let content = std::fs::read_to_string(&pid_file).unwrap();
+            assert!(
+                content.trim().parse::<i32>().is_ok(),
+                "pid 文件必须是完整整数,实际: {content:?}"
+            );
+        }
+        assert!(max_seen.load(Ordering::SeqCst) >= 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

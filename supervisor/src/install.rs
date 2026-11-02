@@ -347,7 +347,10 @@ impl VenvTransaction {
         let staged = parent.join(format!(".venv.staging.{suffix}"));
         let backup = parent.join(format!(".venv.rollback.{suffix}"));
         let tx_file = parent.join(format!(".venv.transaction.{suffix}.json"));
-        let had_active = active.exists();
+        // 只判目录存在是不够的:断电可能留下"目录在、内容残缺"的半成品 venv
+        // (例如 python 未就位)。把它当旧环境会复制出一份同样坏的环境,
+        // 于是"安装成功"却仍然起不来。要求 venv 解释器可执行才算真有旧环境。
+        let had_active = active.exists() && active.join("bin/python3").exists();
 
         let prepared = if had_active {
             copy_tree(active, &staged)
@@ -2552,6 +2555,39 @@ mod tests {
         let out = run_with_timeout(cmd, std::time::Duration::from_secs(5), "测试命令").unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
+
+    // ── 工单11 回归:残缺 venv 不得被当成"有旧环境" ──
+    // 断电可能留下"目录在、python 缺失"的半成品。若判 had_active=true,
+    // 会 copy_tree 出同样坏的环境,"安装成功"却仍然起不来。
+    #[test]
+    fn broken_active_venv_is_rebuilt_not_copied() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let active = dir.join("venv");
+        // 目录存在但没有 bin/python3
+        std::fs::create_dir_all(active.join("lib")).unwrap();
+        std::fs::write(active.join("half-copied"), "junk").unwrap();
+
+        let pin = dir.join("pin");
+        let fake_py = dir.join("fakepy.sh");
+        std::fs::write(&fake_py, "#!/bin/sh\nmkdir -p \"$3/bin\"\ntouch \"$3/bin/python3\"\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_py).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_py, perms).unwrap();
+
+        let tx = VenvTransaction::prepare_with_python(&active, 77, "2.0.0", &pin, &fake_py).unwrap();
+        // 走"新建"分支:暂存里应有 python3,不应带上残骸
+        assert!(tx.python().exists(), "残缺环境必须重建而非复制");
+        let tx_dir = tx.record.staged.clone();
+        assert!(
+            !tx_dir.join("half-copied").exists(),
+            "残缺内容不得被复制进新环境"
+        );
+        drop(tx);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

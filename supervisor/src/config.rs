@@ -64,6 +64,16 @@ impl Config {
         let kernel_log_level = load_kernel_log_level(&var_dir);
 
         let listen = env_port("SUPERVISOR_PORT", 19090);
+
+        // 内核端口不能等于监督者端口:否则内核 bind 必然失败,
+        // 表现为"每次启动都健康检查超时 + 反复重启"的循环。
+        let supervisor_port = listen;
+        if kernel_port == supervisor_port {
+            eprintln!(
+                "[Supervisor] service_port({kernel_port}) 与监督者监听端口冲突,忽略该文件值,回退到 18088"
+            );
+            kernel_port = 18088;
+        }
         let auto_start = env::var("SUPERVISOR_AUTOSTART").unwrap_or_default() != "0";
         let app_dest = env_or("TRIM_APPDEST", "/var/apps/qwenpaw/target");
 

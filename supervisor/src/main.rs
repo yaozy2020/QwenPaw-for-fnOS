@@ -64,7 +64,9 @@ fn main() {
         Ok(lock) => lock,
         Err(e) => {
             eprintln!("[Supervisor] already running or cannot lock: {e}");
-            std::process::exit(0);
+            // 必须回报失败:exit(0) 会让平台把"根本没起来"当成启动成功,
+            // 后续所有运维操作都在对着一个不存在的进程说话。
+            std::process::exit(1);
         }
     };
 

@@ -27,7 +27,9 @@ if ! tar -xzf "$FPK" -C "$WORK" 2>/dev/null; then
     echo "audit: FPK 无法解包(非 gzip/tar?): $FPK"
     exit 1
 fi
-for f in manifest cmd/main cmd/install_callback cmd/uninstall_callback config/privilege wizard app.tgz; do
+# 图标与许可证此前不在必含清单里 —— 缺了也能过审,导致应用中心显示空白图标
+for f in manifest cmd/main cmd/install_callback cmd/uninstall_callback config/privilege wizard app.tgz \
+         ICON.PNG ICON_256.PNG LICENSE config/resource; do
     if [ -e "$WORK/$f" ]; then
         ok "顶层含 $f"
     else

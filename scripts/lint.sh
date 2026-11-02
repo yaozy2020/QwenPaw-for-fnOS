@@ -74,7 +74,9 @@ if [ -z "$SC_BIN" ]; then
     fi
 fi
 if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then
-    TARGETS=(cmd/main cmd/supervisor_ctl.sh cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback app/ui/api.cgi app/ui/index.cgi build.sh scripts/test-lifecycle.sh scripts/test-venv-recovery.sh)
+    # lib.sh 是公共函数库,此前只被 bash -n 语法检查过,没进 shellcheck;
+    # 四个 *_init 与两个门禁脚本同样遗漏。
+    TARGETS=(cmd/main cmd/lib.sh cmd/supervisor_ctl.sh cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback cmd/install_init cmd/upgrade_init cmd/config_init cmd/uninstall_init app/ui/api.cgi app/ui/index.cgi build.sh scripts/preflight.sh scripts/audit-fpk.sh scripts/test-lifecycle.sh scripts/test-venv-recovery.sh)
     if "$SC_BIN" -S error "${TARGETS[@]/#/"$ROOT/"}" 2>&1; then
         echo "  [  OK ] error 级问题为 0（warning 级见上方输出，不拦截）"
     else
