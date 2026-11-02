@@ -70,12 +70,35 @@ pub fn cpu_ticks(pid: i32) -> (u64, u64) {
     (utime, stime)
 }
 
+/// 页大小(KB),进程内只探测一次。
+///
+/// 原先硬编码 4 —— x86_64 上正确,但把"该平台恰好是 4KB"当成了普遍事实。
+/// 非 4KB 平台(如 arm64 上的 64KB 页)会让 RSS 显示缩小 16 倍。
+fn page_size_kb() -> i64 {
+    use std::sync::OnceLock;
+    static PAGE_KB: OnceLock<i64> = OnceLock::new();
+    *PAGE_KB.get_or_init(|| {
+        // getconf 是最直接的权威来源;失败时退回 sysconf(SC_PAGESIZE)
+        if let Ok(out) = std::process::Command::new("getconf").arg("PAGESIZE").output() {
+            if out.status.success() {
+                if let Ok(v) = String::from_utf8_lossy(&out.stdout).trim().parse::<i64>() {
+                    if v > 0 {
+                        return (v / 1024).max(1);
+                    }
+                }
+            }
+        }
+        let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if v > 0 { (v as i64 / 1024).max(1) } else { 4 }
+    })
+}
+
 pub fn rss_kb(pid: i32) -> i64 {
     let Some(s) = fs::read_to_string(format!("/proc/{pid}/statm")).ok() else {
         return 0;
     };
     let Some(rss_pages) = s.split_whitespace().nth(1) else { return 0 };
-    rss_pages.parse::<i64>().unwrap_or(0) * 4 // 4KB/页
+    rss_pages.parse::<i64>().unwrap_or(0) * page_size_kb()
 }
 
 pub fn group_of(pid: i32) -> i32 {

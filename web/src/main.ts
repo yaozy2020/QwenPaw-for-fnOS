@@ -245,6 +245,12 @@ const API_BASE = (function() {
         }
 
         if (notInstalled) {
+          // 未安装提前返回,必须复位鉴权区颜色:
+          // 否则上一次的绿色"已开启"会粘在"内核未安装"的状态上
+          for (const id of ["valAuthStatus", "valAdminStatus"]) {
+            const el = document.getElementById(id);
+            if (el) el.style.color = "var(--text-muted)";
+          }
           // 内核未安装（首次安装模式）：提示去版本管理安装
           if (badge) {
             badge.className = "badge badge-warning";

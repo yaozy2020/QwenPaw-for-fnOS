@@ -729,6 +729,39 @@ pub fn recover_pending_transactions(
                 let _ = sync_dir(parent);
             }
             TxPhase::Committed => {
+                // Committed 落盘与写 pin 之间还有一次 fsync 窗口。若在那里断电,
+                // 磁盘上是"新环境 + 旧钉",下次重装会按旧钉回退到老版本。
+                // 这里按记录里的 target_version 补齐;无法重建时(空/未知)只告警。
+                let pin_now = std::fs::read_to_string(&record.pin_path).unwrap_or_default();
+                let pin_now = pin_now.trim();
+                let target = record.target_version.trim();
+                if !target.is_empty() && pin_now != target {
+                    match atomic_write_0600(
+                        &record.pin_path.to_string_lossy(),
+                        &format!("{target}\n"),
+                    ) {
+                        Ok(()) => {
+                            if let Some(logf) = log {
+                                logf(&format!(
+                                    "recover: 事务 {} 已提交但版本钉为 {:?},已补写为 {target}",
+                                    record.tx_id, pin_now
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(logf) = log {
+                                logf(&format!("recover: 补写版本钉失败: {e}"));
+                            }
+                        }
+                    }
+                } else if target.is_empty() && pin_now.is_empty() && log.is_some() {
+                    if let Some(logf) = log {
+                        logf(&format!(
+                            "recover: 事务 {} 缺少目标版本,无法重建版本钉(WARN)",
+                            record.tx_id
+                        ));
+                    }
+                }
                 // Committed：保留新环境和版本钉，只清理旧备份
                 if record.backup.exists() {
                     let _ = std::fs::remove_dir_all(&record.backup);
@@ -776,6 +809,29 @@ pub fn recover_pending_transactions(
     if unreadable_tx {
         if let Some(logf) = log {
             logf("recover: 存在无法解析的事务文件,跳过孤儿备份清理(fail-closed)");
+        }
+        // 只"不删"是不够的:坏 tx 说明该次安装在进行中被中断,
+        // 磁盘很可能停在"active 缺失 + backup 存在"。
+        // 归位动作只依赖目录现状,不需要 tx 内容,所以坏 tx 也能修。
+        // 有多个候选时取名字(含 pid.seq)最大的,即最近一次。
+        if !venv_dir.exists() {
+            let mut candidates: Vec<_> = candidate_rollbacks
+                .iter()
+                .filter(|p| p.exists())
+                .cloned()
+                .collect();
+            candidates.sort();
+            if let Some(backup) = candidates.last() {
+                if std::fs::rename(backup, venv_dir).is_ok() {
+                    let _ = sync_dir(parent);
+                    if let Some(logf) = log {
+                        logf(&format!(
+                            "recover: 事务文件损坏,已按磁盘现状把 {} 归位为活动环境",
+                            backup.display()
+                        ));
+                    }
+                }
+            }
         }
     } else {
         for rollback_path in candidate_rollbacks {

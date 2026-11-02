@@ -95,7 +95,10 @@ jobs:
         run: |
           npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
 
-      # [5] 双构建 SHA256 对比 (可重现构建门禁)
+      # [5] 双构建 SHA256 对比。
+      # 覆盖范围:web 打包与 FPK 封装的确定性(每次都重算)。
+      # 不覆盖:cargo target 复用带来的同工具链稳定输出 —— 真正的洁净房重建
+      # 需要在独立容器内做,成本 +4min 以上,当前不作为发布阻塞项。
       - name: Dual-build reproducible verification
         id: build
         env:
@@ -111,7 +114,13 @@ jobs:
           FPK_NAME=$(basename "$FPK_FILE")
           SHA1=$(sha256sum "$DIR1/$FPK_NAME" | awk '{print $1}')
 
-          echo "=== 第二次构建 ==="
+          echo "=== 第二次构建(洁净 web 产物) ==="
+          # 双构建的意义是发现不确定性来源。Rust 侧 cargo 本身按内容哈希缓存、
+          # 同一工具链下输出稳定;风险集中在 web 打包(文件遍历顺序、时间戳)
+          # 与 fpk 封装顺序。因此第二次构建前清掉 web/dist 与 node_modules 缓存,
+          # 让这两条路径真正重跑 —— 不是"同环境冒烟",而是对非确定性热点的复算。
+          rm -rf web/dist web/node_modules/.cache
+          npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
           FPK_OUT="$DIR2" bash build.sh
           SHA2=$(sha256sum "$DIR2/$FPK_NAME" | awk '{print $1}')
 
