@@ -47,8 +47,17 @@ jobs:
       - name: Verify AUDIT_REPORT.md is up-to-date
         run: python3 scripts/gen-audit.py --check
 
+      - name: Setup Node (pin 版本,避免上游默认值漂移)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Setup web toolchain (npm ci,锁文件一致性)
-        run: npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+        # 默认走官方 registry:硬编码国内镜像会让境外 runner 变慢甚至失败,
+        # 也会掩盖上游包缺失的真实故障。需要镜像时用仓库变量覆盖即可。
+        run: npm ci --prefix web --registry="${NPM_REGISTRY}" --no-audit --no-fund
+        env:
+          NPM_REGISTRY: ${{ vars.NPM_REGISTRY || 'https://registry.npmjs.org' }}
 
       - name: Lint (bash -n + shellcheck + 桥接 JSON 门禁 + 桥安全门禁 + esbuild 编译)
         run: STRICT_CI=1 bash scripts/lint.sh

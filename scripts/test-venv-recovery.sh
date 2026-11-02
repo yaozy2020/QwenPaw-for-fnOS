@@ -30,9 +30,38 @@ run_crash_test() {
     local test_dir="$MOCK_BASE/$point"
     mkdir -p "$test_dir/home/venv/bin" "$test_dir/var" "$test_dir/share" "$test_dir/etc"
 
-    # 生成随机可用端口
-    local sup_port=$((20000 + RANDOM % 10000))
-    local kernel_port=$((sup_port + 1))
+    # 挑选一对可用端口。只用 RANDOM 不含占用检测:随机撞上他人已监听端口时,
+    # 监督者会因绑定失败而启动不了,测试表现为莫名的超时,难以定位。
+    # 这里实际探一次绑定量,连续占用就重试。
+    local sup_port kernel_port attempt
+    for attempt in $(seq 1 40); do
+      sup_port=$((20000 + RANDOM % 10000))
+      kernel_port=$((sup_port + 1))
+      if python3 - "$sup_port" "$kernel_port" <<'PYPROBE'
+import socket, sys
+ok = True
+for p in (int(sys.argv[1]), int(sys.argv[2])):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", p))
+    except OSError:
+        ok = False
+    finally:
+        s.close()
+    if not ok:
+        break
+sys.exit(0 if ok else 1)
+PYPROBE
+      then
+        break
+      fi
+      sup_port=""
+    done
+    if [ -z "$sup_port" ]; then
+      echo "ERROR: 连续 40 次未能找到空闲端口对" >&2
+      return 1
+    fi
 
     # 模拟能够响应 metadata 和 pip 的 Python
     local mock_py="$test_dir/fake_python"

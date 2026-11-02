@@ -29,6 +29,12 @@ qget() {  # $1=key → 输出值
 action=$(echo "$QUERY_STRING" | tr '&' '\n' | grep '^action=' | head -1 | cut -d= -f2-)
 
 REQUEST_METHOD="${REQUEST_METHOD:-GET}"
+# HEAD 是对 GET 的元信息请求(CGI 服务器会丢弃响应体),按 GET 语义处理即可。
+# 原实现直接判 405:健康检查/探活用 HEAD 探测时会把一个正常端点误报为不允许。
+if [ "$REQUEST_METHOD" = "HEAD" ]; then
+    REQUEST_METHOD="GET"
+    HEAD_REQUEST=1
+fi
 
 # ── 方法白名单:读=GET,变更=POST ──
 case "$action" in
@@ -44,7 +50,11 @@ case "$action" in
 esac
 if [ "$REQUEST_METHOD" != "$want_method" ]; then
     echo "Status: 405 Method Not Allowed"
-    echo "Allow: $want_method"
+    if [ "$want_method" = "GET" ]; then
+        echo "Allow: GET, HEAD"
+    else
+        echo "Allow: $want_method"
+    fi
     echo "Content-Type: application/json"
     echo ""
     printf '{"success":false,"message":"此操作仅允许 %s 请求"}\n' "$want_method"
@@ -198,6 +208,17 @@ esac
 # 转发到监督者。Token 经 0600 临时头文件传给 curl(-H @file,curl≥7.55):
 # 命令行参数会完整出现在 /proc/<pid>/cmdline,同机任意用户可读 —— 与 Token
 # 文件 0600 的威胁模型不对等(审查 S1)。即用即删,trap 兜底异常退出。
+# curl 缺失时必须在此明确失败。原实现会一路走到下面的 case,
+# http_code 拿到空串(既不是 200 也不是 000),落进兜底分支,
+# 前端只看到一条含糊的"未知错误",排查成本极高。
+if ! command -v curl >/dev/null 2>&1; then
+    echo "Content-Type: application/json"
+    echo "Status: 503 Service Unavailable"
+    echo ""
+    echo '{"success":false,"message":"系统缺少 curl,无法与监督者通信,请检查应用依赖"}'
+    exit 0
+fi
+
 TOKHDR=$(mktemp "${TMPDIR:-/tmp}/qwenpaw-hdr.XXXXXX") || {
     echo '{"success":false,"message":"内部错误:无法创建临时文件"}'
     exit 1

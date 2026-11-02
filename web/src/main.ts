@@ -134,53 +134,146 @@ const API_BASE = (function() {
     });
 
     // 现代模态弹窗 (返回 Promise，置顶展示)
-    function showModal({ title = "提示确认", message = "", type = "primary", confirmText = "确认执行", cancelText = "取消" }) {
+    // 通用确认弹窗。传入 input 时渲染内联输入框,resolve 值为输入字符串或 null,
+    // 这样需要填值的操作(如改端口)不必再用原生 prompt() —— 原生弹窗
+    // 样式不可控、阻断渲染,且无法做校验反馈。
+    // 无障碍:role=dialog + aria-modal 已在模板上,Esc 关闭、Tab 焦点陷阱、
+    // 关闭后把焦点还给触发元素。
+    function showModal({
+      title = "提示确认", message = "", type = "primary",
+      confirmText = "确认执行", cancelText = "取消",
+      input = null,
+    }) {
       return new Promise((resolve) => {
         const overlay = document.getElementById("customModal");
+        const box = overlay?.querySelector(".modal-box");
         const modalTitle = document.getElementById("modalTitle");
         const modalMessage = document.getElementById("modalMessage");
         const modalBadge = document.getElementById("modalBadge");
         const confirmBtn = document.getElementById("modalConfirmBtn");
         const cancelBtn = document.getElementById("modalCancelBtn");
+        const fieldWrap = document.getElementById("modalFieldWrap");
+        const fieldLabel = document.getElementById("modalFieldLabel");
+        const inputEl = document.getElementById("modalInput");
+        if (!overlay || !box || !confirmBtn || !cancelBtn) return resolve(false);
 
         modalTitle.innerText = title;
         modalMessage.innerText = message;
         confirmBtn.innerText = confirmText;
         cancelBtn.innerText = cancelText;
 
+        const hasInput = Boolean(input);
+        if (fieldWrap && fieldLabel && inputEl) {
+          fieldWrap.hidden = !hasInput;
+          if (hasInput) {
+            fieldLabel.innerText = input.label || "输入";
+            inputEl.value = input.value ?? "";
+            inputEl.type = input.type || "text";
+            inputEl.inputMode = input.inputMode || "text";
+            inputEl.placeholder = input.placeholder || "";
+            inputEl.setAttribute("pattern", input.pattern || "");
+          } else {
+            inputEl.value = "";
+          }
+        }
+
         modalBadge.className = "modal-icon-badge " + (type === "danger" ? "danger" : (type === "warn" ? "warn" : "primary"));
         confirmBtn.className = type === "danger" ? "btn btn-danger" : "btn btn-primary";
 
         const openTime = Date.now();
+        // 记录触发元素,关闭后归还焦点(键盘用户否则会被丢回页面顶部)
+        const previousFocus = document.activeElement;
+
+        function currentValue() {
+          if (!hasInput || !inputEl) return null;
+          const v = inputEl.value.trim();
+          if (v === "") return null;
+          if (input.validate && !input.validate(v)) return undefined; // 校验失败:不关闭
+          return v;
+        }
+
         function cleanup(res) {
           overlay.classList.remove("active");
           confirmBtn.removeEventListener("click", onConfirm);
           cancelBtn.removeEventListener("click", onCancel);
           overlay.removeEventListener("click", onBackdrop);
+          document.removeEventListener("keydown", onKeydown, true);
+          if (previousFocus && typeof previousFocus.focus === "function") {
+            previousFocus.focus();
+          }
           resolve(res);
         }
 
-        function onConfirm() { cleanup(true); }
-        function onCancel() { cleanup(false); }
+        function onConfirm() {
+          if (!hasInput) return cleanup(true);
+          const v = currentValue();
+          if (v === undefined) return;       // 校验未通过,弹窗保持打开
+          cleanup(v);
+        }
+        function onCancel() { cleanup(hasInput ? null : false); }
         function onBackdrop(e) {
-          if (e.target === overlay && Date.now() - openTime > 250) cleanup(false);
+          if (e.target === overlay && Date.now() - openTime > 250) onCancel();
+        }
+        function onKeydown(e) {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+            return;
+          }
+          if (e.key === "Enter" && hasInput) {
+            // 输入框内回车等同确认,避免用户必须去点按钮
+            e.preventDefault();
+            onConfirm();
+            return;
+          }
+          if (e.key !== "Tab") return;
+          // 焦点陷阱:Tab 只在弹窗内的可聚焦元素之间循环
+          const focusables = Array.from(
+            box.querySelectorAll('button, input, [href], select, textarea, [tabindex]:not([tabindex="-1"])')
+          ).filter((el) => !el.disabled && el.offsetParent !== null);
+          if (!focusables.length) return;
+          const first = focusables[0];
+          const last = focusables[focusables.length - 1];
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
         }
 
         confirmBtn.addEventListener("click", onConfirm);
         cancelBtn.addEventListener("click", onCancel);
         overlay.addEventListener("click", onBackdrop);
+        document.addEventListener("keydown", onKeydown, true);
 
         overlay.classList.add("active");
+        // 有输入框时聚焦并全选,方便直接改写;否则聚焦确认按钮
+        if (hasInput && inputEl) {
+          inputEl.focus();
+          inputEl.select?.();
+        } else {
+          confirmBtn.focus();
+        }
       });
     }
 
     // 灵动岛风格置顶 Toast
+    // 定时器必须单例:每次 showToast 都新建 setTimeout 会让先前那条的计时器
+    // 继续跑,在后一条刚显示时把它移除 —— 连续提示(如"正在保存…"→"已保存")
+    // 会出现闪一下就消失。改为始终重置同一个计时器。
+    let toastTimer = null;
     function showToast(msg) {
       const t = document.getElementById("toast");
       if (!t) return;
       t.innerText = msg;
       t.classList.add("show");
-      setTimeout(() => t.classList.remove("show"), 2500);
+      if (toastTimer !== null) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        t.classList.remove("show");
+        toastTimer = null;
+      }, 2500);
     }
 
     // 卡片标题 meta 位(运行时长)的唯一写入点:正常/降级两分支共用,防口径漂移
@@ -212,13 +305,20 @@ const API_BASE = (function() {
     }
 
     // 服务状态监控 (全空值保护，稳健守护)
+    // 轮询请求的序号守卫。fetch 的完成顺序不保证与发起顺序一致:
+    // 后端短暂 502/超时后,旧请求可能晚于新请求返回,此时若直接渲染,
+    // 就会把已经恢复的"运行中"翻回"不可达"(约 5s 后自愈,但用户看到闪跳)。
+    // 只允许最新一次发起的请求写入 UI。
+    let statusReqSeq = 0;
     async function fetchStatus() {
       if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
+      const mySeq = ++statusReqSeq;
       try {
         const res = await fetch(`${API_BASE}?action=status&_t=${Date.now()}`);
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
-        
+        if (mySeq !== statusReqSeq) return; // 已有更新的请求在途,丢弃过期结果
+
         const badge = document.getElementById("statusBadge");
         const valVersion = document.getElementById("valVersion");
         const valAuth = document.getElementById("valAuthStatus");
@@ -415,10 +515,25 @@ const API_BASE = (function() {
     // 修改 Web 服务端口
     async function changeServicePort() {
       const currentPort = document.getElementById("valPort")?.innerText || "18088";
-      const input = prompt("请输入新的 QwenPaw Web 访问端口 (范围: 1024~65535):", currentPort);
-      if (!input || input.trim() === currentPort) return;
-      
-      const newPort = parseInt(input.trim(), 10);
+      // 用站内弹窗替代原生 prompt():样式统一、可校验、不阻断渲染。
+      // 校验在弹窗内完成,非法输入不关闭弹窗也不触发后端。
+      const raw = await showModal({
+        title: "修改服务端口",
+        message: "请输入新的 QwenPaw Web 访问端口（范围 1024~65535）。保存后服务将自动重启以应用新端口。",
+        type: "warn",
+        confirmText: "确认修改并重启",
+        input: {
+          label: "新端口",
+          value: currentPort,
+          inputMode: "numeric",
+          placeholder: "1024-65535",
+          validate: (v) => /^[0-9]+$/.test(v) && Number(v) >= 1024 && Number(v) <= 65535,
+        },
+      });
+      if (raw === null || raw === false) return;
+      if (raw === currentPort) return;
+
+      const newPort = parseInt(raw, 10);
       if (isNaN(newPort) || newPort < 1024 || newPort > 65535) {
         showToast("端口无效！必须为 1024~65535 之间的纯数字");
         return;
@@ -1122,6 +1237,14 @@ const API_BASE = (function() {
     loadMirror();
     refreshTimer = setInterval(fetchLogs, 3500);
     setInterval(fetchStatus, 5000);
+
+    // 标签页切回前台时立即补一次:轮询在 hidden 期间是暂停的,
+    // 若只等下一个节拍,用户看到的最多是 5s 前的旧状态(可能是"运行中"却已停)。
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      fetchStatus();
+      fetchLogs();
+    });
 
     // 内联 onclick/onchange 处理器需全局可见 —— esbuild IIFE 会封住顶层作用域
     Object.assign(window, {

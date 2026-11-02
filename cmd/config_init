@@ -10,15 +10,33 @@ if [ -f "${PORT_FILE}" ]; then
     [ -n "$p" ] && current_port="$p"
 fi
 
-# 回显日志级别:从落盘文件读取,对齐 wizard/config 中的 wizard_log_level 字段
+# 回显日志级别:从落盘文件读取,对齐 wizard/config 中的 wizard_log_level 字段。
+# 向导只提供 info/debug/warning/error 四档;落盘值若为 trace/critical(旧版或手工写入),
+# 不能静默改写成 debug/error —— 那会让用户在设置面板看到与实际生效不同的值,
+# 改完保存还会把真实级别永久覆盖。这里按"能原样回显就原样回显"处理:
+# 落在向导选项内的照抄,向导没有的旧值映射到最接近的档位,同时把真实值写进日志。
 current_level="info"
 LEVEL_FILE="${PKGVAR}/qwenpaw-log-level"
 if [ -f "${LEVEL_FILE}" ]; then
     l=$(head -n 1 "${LEVEL_FILE}" | tr -d '[:space:]')
     case "$l" in
-        trace) current_level="debug" ;;
-        critical) current_level="error" ;;
-        error|warning|info|debug) current_level="$l" ;;
+        error|warning|info|debug)
+            current_level="$l"
+            ;;
+        trace)
+            # 旧版 trace 比 debug 更细,面板只能选 debug;不改动落盘值,仅提示
+            current_level="debug"
+            echo "[config_init] 落盘日志级别为 trace(向导无此档),面板回显为 debug;未改动落盘值" >&2
+            ;;
+        critical)
+            current_level="error"
+            echo "[config_init] 落盘日志级别为 critical(向导无此档),面板回显为 error;未改动落盘值" >&2
+            ;;
+        "")
+            ;;
+        *)
+            echo "[config_init] 落盘日志级别 '${l}' 不在白名单,回显默认值 info" >&2
+            ;;
     esac
 fi
 

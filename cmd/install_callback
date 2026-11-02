@@ -55,7 +55,7 @@ log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
 
 # 运行环境与内核均健在 → 外壳升级/重装不重装内核（版本双轨制），仅刷新版本钉
 # 以 venv 实际状态为准(不依赖任何标记文件:TRIM_PKGHOME 会随 fpk 升级被清掉)
-if [ -x "${VENV_DIR}/bin/python3" ] && "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
+if kernel_installed; then
     CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
     log_msg "检测到运行环境与内核（${CUR_VER:-?}）均健在，跳过内核重装（双轨制：内核升级请走控制台版本管理）"
     if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then

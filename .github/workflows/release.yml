@@ -25,11 +25,23 @@ jobs:
 
       - name: Determine tag
         id: tag
+        # 事件字段一律经 env 透传,不直接内插进 run 脚本:
+        # workflow_dispatch 的 inputs.tag 是用户可控字符串,内插会变成
+        # 脚本注入面(如 tag 含 `"; rm -rf ...` 时被 shell 执行)。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
           else
             TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          # 标签必须形如 vX.Y.Z 或 vX.Y.Z-rc.N,其它形状一律拒绝,
+          # 避免后续脚本拿任意字符串去拼路径/参数。
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+            echo "::error::非法的标签名: '$TAG'(要求 vX.Y.Z 或 vX.Y.Z-rc.N)"
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -39,15 +51,18 @@ jobs:
       #   v2.1.0      -> manifest 2.1.0   -> prerelease=false
       - name: Verify tag matches manifest mapping
         id: verify
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          python3 scripts/verify-release-tag.py "${{ steps.tag.outputs.tag }}" --github-output
+          python3 scripts/verify-release-tag.py "$TAG" --github-output
 
       # [2] 不可变性校验：防止覆盖已存在 Release 资产
       - name: Check release immutability
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
+          TAG="$RELEASE_TAG"
           # fail-closed:查询本身失败(网络/鉴权)时不能当作"release 不存在"放行,
           # 否则不可变性检查在最需要生效的时候恰好失效。
           if ! ERR=$(gh release view "$TAG" --json assets --jq '.assets | length' 2>&1); then
@@ -151,11 +166,16 @@ jobs:
       # [7] 自动生成包含“已知限制”的 Release 说明
       - name: Generate release notes with known limitations
         id: notes
+        env:
+          FPK_NAME_IN: ${{ steps.build.outputs.fpk_name }}
+          SHA256_IN: ${{ steps.build.outputs.fpk_sha256 }}
+          VERSION_IN: ${{ steps.verify.outputs.manifest_version }}
+          TAG_IN: ${{ steps.tag.outputs.tag }}
         run: |
-          FPK_NAME="${{ steps.build.outputs.fpk_name }}"
-          SHA256="${{ steps.build.outputs.fpk_sha256 }}"
-          VERSION="${{ steps.verify.outputs.manifest_version }}"
-          TAG="${{ steps.tag.outputs.tag }}"
+          FPK_NAME="$FPK_NAME_IN"
+          SHA256="$SHA256_IN"
+          VERSION="$VERSION_IN"
+          TAG="$TAG_IN"
 
           cat <<EOF > release_notes.md
           # QwenPaw for fnOS ${TAG} (外壳版本 v${VERSION})
@@ -195,10 +215,13 @@ jobs:
       - name: Verify release assets read-back
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_IN: ${{ steps.tag.outputs.tag }}
+          FPK_NAME_IN: ${{ steps.build.outputs.fpk_name }}
+          SHA256_IN: ${{ steps.build.outputs.fpk_sha256 }}
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          FPK_NAME="${{ steps.build.outputs.fpk_name }}"
-          EXPECTED_SHA="${{ steps.build.outputs.fpk_sha256 }}"
+          TAG="$TAG_IN"
+          FPK_NAME="$FPK_NAME_IN"
+          EXPECTED_SHA="$SHA256_IN"
 
           DOWNLOAD_DIR="${RUNNER_TEMP}/readback"
           mkdir -p "$DOWNLOAD_DIR"

@@ -14,6 +14,16 @@ set -o pipefail
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
+# 版本号提取必须有失败保护:manifest 格式漂移(缩进/换行/键改名)会让这里静默得到
+# 空串,产出文件名变成 "qwenpaw--x86.fpk" 并一路带到 Release 里。
+if [ -z "$VERSION" ]; then
+  echo "ERROR: 无法从 manifest 提取 version(检查 '^version' 行格式)" >&2
+  exit 1
+fi
+if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$'; then
+  echo "ERROR: manifest version '$VERSION' 不符合 X.Y.Z[-N] 格式" >&2
+  exit 1
+fi
 # 输出路径可被环境变量覆盖（CI 用 FPK_OUT=$GITHUB_WORKSPACE）；
 # 默认是 build/output 目录。
 FPK_OUT="${FPK_OUT:-${PROJ_DIR}/build/output}"

@@ -111,7 +111,7 @@
       </div>
       <!-- 按钮随运行状态切换:停止态必须给出"启动"入口,
            否则用户只能借"重启"间接启动(视觉上是重启,语义错位) -->
-      <div class="card-actions" id="serviceActions">
+      <div class="card-actions">
         <button class="btn-primary btn-sm" style="flex:1" id="btnStartService"
                 onclick="controlService('start')" hidden>启动服务</button>
         <button class="btn-outline btn-sm" style="flex:1" id="btnRestartService"
@@ -275,16 +275,21 @@
 
   <!-- 自定义确认弹窗 Modal (置顶展开) -->
   <div class="modal-overlay" id="customModal">
-    <div class="modal-box">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalMessage" tabindex="-1">
       <div class="modal-header">
         <div class="modal-icon-badge" id="modalBadge">
-          <svg id="modalIcon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
           </svg>
         </div>
         <div class="modal-title" id="modalTitle">提示确认</div>
       </div>
       <div class="modal-msg" id="modalMessage">确认执行此操作吗？</div>
+      <!-- 可选输入区:需要用户填值的操作(如改端口)用它替代原生 prompt() -->
+      <div class="modal-field" id="modalFieldWrap" hidden>
+        <label class="modal-label" id="modalFieldLabel" for="modalInput">输入</label>
+        <input class="modal-input" id="modalInput" type="text" autocomplete="off" />
+      </div>
       <div class="modal-actions">
         <button class="btn-outline" id="modalCancelBtn">取消</button>
         <button class="btn-primary" id="modalConfirmBtn">确认执行</button>
@@ -294,9 +299,9 @@
 
   <!-- 专属升级终端弹窗 (置顶展开，实时流式) -->
   <div class="modal-overlay" id="upgradeModal">
-    <div class="modal-box">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upTitle">
       <div class="modal-header">
-        <div class="modal-icon-badge primary" id="upBadge">
+        <div class="modal-icon-badge primary">
           <span class="spinner" id="upSpinner"></span>
           <svg id="upDoneIcon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" style="display:none; color:var(--success);">
             <polyline points="20 6 9 17 4 12"/>

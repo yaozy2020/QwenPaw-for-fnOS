@@ -782,6 +782,19 @@ button:disabled, .btn:disabled {
   margin-top: 2px;
 }
 .modal-msg { font-size: var(--fs-md); color: var(--text-sub); line-height: 1.6; }
+/* 弹窗内联输入区(替代原生 prompt()) */
+.modal-field { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.modal-label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
+.modal-input {
+  width: 100%; box-sizing: border-box;
+  padding: 10px 12px; min-height: 40px;
+  font-size: var(--fs-md); font-family: inherit;
+  color: var(--text-main); background: var(--bg-inset, rgba(127, 127, 127, .08));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, .25));
+  border-radius: 10px; outline: none;
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+.modal-input:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring, rgba(90, 140, 255, .25)); }
 .modal-actions { display: flex; gap: 10px; margin-top: 6px; }
 .modal-actions button { flex: 1; min-height: 40px; justify-content: center; font-size: var(--fs-md); }
 
