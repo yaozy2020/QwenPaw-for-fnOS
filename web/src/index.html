@@ -143,11 +143,11 @@
           <span class="info-val" id="valAdminStatus" style="color:var(--text-muted);">-</span>
         </div>
         <p id="valAuthDesc" style="font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 4px;">
-          进入 Web 对话端需验证管理员密码。首次安装请先进入 WebUI 设定初始管理员。
+          本控制台使用飞牛账号登录；QwenPaw 对话端使用独立管理员账号，两套密码不会自动同步。
         </p>
       </div>
       <div style="margin-top: 8px;">
-        <button class="btn-outline btn-sm" style="width: 100%;" onclick="resetAuth()">重置管理密码</button>
+        <button class="btn-outline btn-sm" style="width: 100%;" onclick="resetAuth()">重置 QwenPaw 管理员密码</button>
       </div>
     </div>
 
@@ -202,6 +202,7 @@
               <div class="history-dropdown" id="mirrorDropdown" style="position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:60; max-height:240px; box-shadow:var(--shadow);"></div>
             </div>
           </div>
+          <div id="versionSourceStatus" role="alert" style="display:none; margin-bottom:10px; padding:9px 12px; background:var(--danger-bg); border:1px solid rgba(239,68,68,0.3); border-radius:8px; color:var(--danger); font-size:12px; line-height:1.5;"></div>
           <div class="ver-cards-container" id="versionCardsContainer">
             <div class="ver-card-item" onclick="pickVersion('2.3.0b2')">
               <div class="ver-info-left">
@@ -228,8 +229,9 @@
           </div>
         </div>
       </div>
-      <div style="margin-top: 8px;">
-        <button class="btn-primary btn-sm" id="btnUpgradeAction" style="width: 100%;" onclick="checkOrUpgrade()">执行更新至选定版本</button>
+      <div style="margin-top: 8px; display:flex; gap:8px;">
+        <button class="btn-primary btn-sm" id="btnUpgradeAction" style="flex:1;" onclick="checkOrUpgrade()">执行更新至选定版本</button>
+        <button class="btn-outline btn-sm" id="btnUninstallKernel" style="display:none; color:var(--danger); border-color:var(--danger);" onclick="uninstallKernel()">仅卸载内核</button>
       </div>
     </div>
   </div>

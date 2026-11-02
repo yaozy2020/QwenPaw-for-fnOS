@@ -43,6 +43,8 @@ struct State {
     started_wall: Option<SystemTime>,
     cache_pid: i32,
     cache_at: Option<Instant>,
+    version_cache: String,
+    version_cache_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,15 +72,35 @@ impl KernelManager {
     }
 
     pub fn kernel_version(&self) -> String {
+        {
+            let state = self.state.lock().unwrap();
+            if state
+                .version_cache_at
+                .map(|at| at.elapsed() < Duration::from_secs(5))
+                .unwrap_or(false)
+            {
+                return state.version_cache.clone();
+            }
+        }
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
-        match process::Command::new(&bin)
+        let version = match process::Command::new(&bin)
             .arg("-c")
             .arg("import importlib.metadata as m; print(m.version('qwenpaw'))")
             .output()
         {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => String::new(),
-        }
+        };
+        let mut state = self.state.lock().unwrap();
+        state.version_cache = version.clone();
+        state.version_cache_at = Some(Instant::now());
+        version
+    }
+
+    pub fn invalidate_version(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.version_cache.clear();
+        state.version_cache_at = None;
     }
 
     pub fn installed(&self) -> bool {
@@ -183,6 +205,10 @@ impl KernelManager {
     /// 三段式停止:组 TERM(宽限 10s)→ 单 KILL → 组 KILL 清扫。
     /// 组信号仅在内核为自身进程组长(setsid 启动)时启用,防误伤同组平台进程。
     pub async fn stop(&self) {
+        self.stop_sync();
+    }
+
+    pub fn stop_sync(&self) {
         let mut target = {
             let st = self.state.lock().unwrap();
             st.tracked
@@ -293,5 +319,45 @@ impl KernelManager {
             rss_kb: rss,
             port: self.port(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_version_is_cached_and_explicitly_invalidated() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-version-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("venv/bin")).unwrap();
+        let python = dir.join("venv/bin/python3");
+        std::fs::write(
+            &python,
+            "#!/bin/bash\nprintf 'call\\n' >> \"$(dirname \"$0\")/calls\"\nprintf '2.3.0\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&python).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&python, permissions).unwrap();
+        let kernel = KernelManager::new(
+            KernelConfig {
+                venv_dir: dir.join("venv").to_string_lossy().into_owned(),
+                pid_file: dir.join("kernel.pid").to_string_lossy().into_owned(),
+                log_file: dir.join("kernel.log").to_string_lossy().into_owned(),
+                share_dir: dir.to_string_lossy().into_owned(),
+                etc_dir: dir.to_string_lossy().into_owned(),
+                log_level: "info".into(),
+            },
+            18088,
+        );
+        assert_eq!(kernel.kernel_version(), "2.3.0");
+        assert_eq!(kernel.kernel_version(), "2.3.0");
+        assert_eq!(std::fs::read_to_string(dir.join("venv/bin/calls")).unwrap().lines().count(), 1);
+        kernel.invalidate_version();
+        assert_eq!(kernel.kernel_version(), "2.3.0");
+        assert_eq!(std::fs::read_to_string(dir.join("venv/bin/calls")).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

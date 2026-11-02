@@ -63,7 +63,6 @@ if [ -z "$SC_BIN" ]; then
     fi
 fi
 if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then
-    # 活跃脚本；scripts/update-qwenpaw.sh 为遗留脚本不参与门禁
     TARGETS=(cmd/main cmd/supervisor_ctl.sh cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback app/ui/api.cgi app/ui/index.cgi build.sh scripts/test-lifecycle.sh)
     if "$SC_BIN" -S error "${TARGETS[@]/#/"$ROOT/"}" 2>&1; then
         echo "  [  OK ] error 级问题为 0（warning 级见上方输出，不拦截）"
@@ -429,6 +428,15 @@ if printf '%s' "$s11c" | grep -q '^Status: 409' \
     echo "  [  OK ] 上游 409 状态码与错误 JSON 同步透传"
 else
     echo "  [FAIL] 上游 409 未正确透传: status=${s11c} body=${t11c:0:120}"
+    fail=1
+fi
+
+# T11d 仅卸载内核必须走独立端点,不得误映射为卸载整个应用
+if envrun "action=uninstall_kernel" HTTP_COOKIE="qwenpaw_csrf=tok" HTTP_X_CSRF_TOKEN="tok" >/dev/null \
+    && grep -q '^/kernel/uninstall' "$WORK/reqlog"; then
+    echo "  [  OK ] 仅卸载内核桥接至独立监督者端点"
+else
+    echo "  [FAIL] 仅卸载内核桥接路由缺失"
     fail=1
 fi
 

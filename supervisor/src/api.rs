@@ -22,6 +22,12 @@ use crate::{
     kernel::KernelManager,
 };
 
+#[derive(Default)]
+pub struct AuthCache {
+    at: Option<std::time::Instant>,
+    status: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub kernel: Arc<KernelManager>,
@@ -34,6 +40,7 @@ pub struct AppState {
     pub ui_config_file: String,
     pub kernel_log: String,
     pub operations: Arc<tokio::sync::Mutex<()>>,
+    pub auth_cache: Arc<std::sync::Mutex<AuthCache>>,
     /// 监督者自身监听端口:改端口时必须拒绝内核占用它,否则桥接失联
     pub supervisor_port: u16,
 }
@@ -48,6 +55,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/logs", get(logs))
         .route("/logs/clear", post(logs_clear))
         .route("/kernel/install", post(kernel_install))
+        .route("/kernel/uninstall", post(kernel_uninstall))
         .route("/kernel/install-status", get(install_status))
         .route("/kernel/install-log", get(install_log))
         .route("/kernel/versions", get(kernel_versions))
@@ -97,44 +105,59 @@ fn begin_operation(state: &AppState) -> OperationResult {
     Ok(guard)
 }
 
-/// 全量快照(同步;/proc 与版本查询均为阻塞操作,量级可接受)。
-/// 形状与旧 api.cgi 兼容:控制台零改动。
-pub fn render_snapshot(state: &AppState) -> String {
-    let st = state.kernel.status_now();
-    let version = state.kernel.kernel_version();
-    let inst = state.install.snapshot();
-    // 真实认证状态探测 (纯标准库轻量探测，无外部重量依赖):
-    let mut auth_state = "unknown";
-    if st.running && st.port > 0 {
+fn auth_status(state: &AppState, running: bool, port: u16) -> String {
+    {
+        let cache = state.auth_cache.lock().unwrap();
+        if cache.at.map(|at| at.elapsed() < std::time::Duration::from_secs(5)).unwrap_or(false) {
+            return cache.status.clone();
+        }
+    }
+    let mut status = "unknown";
+    if running && port > 0 {
         use std::io::{Read, Write};
         if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], st.port)),
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             std::time::Duration::from_millis(300),
         ) {
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
-            let req = format!("GET /api/auth/status HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", st.port);
+            let req = format!("GET /api/auth/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
             if stream.write_all(req.as_bytes()).is_ok() {
                 let mut buf = Vec::new();
                 if stream.read_to_end(&mut buf).is_ok() {
-                    let s = String::from_utf8_lossy(&buf);
-                    if let Some(body_idx) = s.find("\r\n\r\n") {
-                        let body = &s[body_idx + 4..];
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-                            let enabled = val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                            let has_users = val.get("has_users").and_then(|v| v.as_bool()).unwrap_or(false);
-                            if enabled && !has_users {
-                                auth_state = "uninitialized";
-                            } else if enabled && has_users {
-                                auth_state = "protected";
-                            } else {
-                                auth_state = "disabled";
-                            }
+                    let response = String::from_utf8_lossy(&buf);
+                    if let Some(body_idx) = response.find("\r\n\r\n") {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&response[body_idx + 4..]) {
+                            let enabled = value.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let has_users = value.get("has_users").and_then(|v| v.as_bool()).unwrap_or(false);
+                            status = match (enabled, has_users) {
+                                (true, false) => "uninitialized",
+                                (true, true) => "protected",
+                                _ => "disabled",
+                            };
                         }
                     }
                 }
             }
         }
     }
+    let mut cache = state.auth_cache.lock().unwrap();
+    cache.at = Some(std::time::Instant::now());
+    cache.status = status.into();
+    cache.status.clone()
+}
+
+/// 全量快照由 HTTP 处理器放入 spawn_blocking;/proc 和探测不占用 Tokio 工作线程。
+/// 形状与旧 api.cgi 兼容:控制台零改动。
+pub fn render_snapshot(state: &AppState) -> String {
+    let st = state.kernel.status_now();
+    let version = state.kernel.kernel_version();
+    let _ = sync_main_entry(
+        std::path::Path::new(&state.ui_config_file),
+        st.port,
+        !version.is_empty(),
+    );
+    let inst = state.install.snapshot();
+    let auth_state = auth_status(state, st.running, st.port);
     let auth = auth_state == "protected";
     let start_epoch = st
         .started_at
@@ -174,8 +197,10 @@ async fn status(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    Json(serde_json::from_str(&render_snapshot(&state)).unwrap_or(json!({"ok": false})))
-        .into_response()
+    let snapshot = tokio::task::spawn_blocking(move || render_snapshot(&state))
+        .await
+        .unwrap_or_else(|_| json!({"ok": false}).to_string());
+    Json(serde_json::from_str(&snapshot).unwrap_or(json!({"ok": false}))).into_response()
 }
 
 async fn start(State(state): State<AppState>, req: Request<axum::body::Body>) -> axum::response::Response {
@@ -246,7 +271,10 @@ async fn events(
         );
         return Sse::new(denied).keep_alive(KeepAlive::default());
     }
-    let first = render_snapshot(&state);
+    let snapshot_state = state.clone();
+    let first = tokio::task::spawn_blocking(move || render_snapshot(&snapshot_state))
+        .await
+        .unwrap_or_else(|_| json!({"ok": false}).to_string());
     let rx = state.events.subscribe();
     let snap_stream = BroadcastStream::new(rx).filter_map(|m| {
         m.ok().map(|json| Ok(Event::default().event("snapshot").data(json)))
@@ -411,6 +439,15 @@ async fn kernel_install(
     }
 }
 
+fn version_index_url(mirror: &str) -> String {
+    let mirror = sanitize_mirror(mirror);
+    if mirror.is_empty() {
+        "https://pypi.org/simple/qwenpaw/".into()
+    } else {
+        format!("{}/qwenpaw/", mirror.trim_end_matches('/'))
+    }
+}
+
 async fn kernel_versions(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -418,21 +455,47 @@ async fn kernel_versions(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    // 全量原始键名交桥接层排序:字典序会截丢 2.10.0 这类版本,语义排序在
-    // 桥内 python(真实缩进可测)完成,监督者不做截断(独立审计 minor)。
+    let mirror = std::fs::read_to_string(format!("{}/pip-mirror", state.var_dir))
+        .unwrap_or_default();
+    let url = version_index_url(mirror.trim());
+    // PEP 503 Simple Index 与 pip 使用同一镜像;通用 JSON API 并非所有镜像都提供。
     let probe = "\
-import urllib.request, json
-req = urllib.request.Request('https://pypi.org/pypi/qwenpaw/json', headers={'User-Agent': 'QwenPaw'})
-data = json.loads(urllib.request.urlopen(req, timeout=5).read())
-releases = list(data.get('releases', {}).keys())
-print(json.dumps({'releases': releases, 'latest_stable': data['info']['version']}))";
-    match std::process::Command::new("python3").arg("-c").arg(probe).output() {
-        Ok(o) if o.status.success() => {
+import urllib.request, urllib.parse, json, sys
+from html.parser import HTMLParser
+class Links(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.versions = set()
+    def handle_starttag(self, tag, attrs):
+        if tag != 'a':
+            return
+        href = dict(attrs).get('href', '')
+        name = urllib.parse.unquote(urllib.parse.urlsplit(href).path.rsplit('/', 1)[-1])
+        if name.lower().startswith('qwenpaw-') and name.endswith('.whl'):
+            parts = name.split('-')
+            if len(parts) >= 5:
+                self.versions.add(parts[1])
+        else:
+            for suffix in ('.tar.gz', '.zip'):
+                if name.lower().startswith('qwenpaw-') and name.endswith(suffix):
+                    self.versions.add(name[9:-len(suffix)])
+req = urllib.request.Request(sys.argv[1], headers={'User-Agent': 'QwenPaw'})
+parser = Links()
+parser.feed(urllib.request.urlopen(req, timeout=15).read().decode('utf-8', 'replace'))
+if not parser.versions:
+    raise RuntimeError('镜像未返回可用内核版本')
+print(json.dumps({'releases': sorted(parser.versions), 'latest_stable': ''}))";
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("python3").arg("-c").arg(probe).arg(url).output()
+    })
+    .await;
+    match output {
+        Ok(Ok(o)) if o.status.success() => {
             let payload: serde_json::Value =
                 serde_json::from_slice(&o.stdout).unwrap_or(json!({"ok": false}));
             Json(payload).into_response()
         }
-        _ => err_json(StatusCode::BAD_GATEWAY, "查询 PyPI 失败"),
+        _ => err_json(StatusCode::BAD_GATEWAY, "查询所选 PyPI 镜像失败"),
     }
 }
 
@@ -477,6 +540,83 @@ async fn install_log(
     let path = format!("{}/qwenpaw-upgrade.log.pip", state.var_dir);
     let lines = tail_lines(std::path::Path::new(&path), tail, 256 * 1024);
     Json(json!({"success": true, "logs": lines})).into_response()
+}
+
+fn remove_kernel_files(home: &std::path::Path, var: &std::path::Path) -> Result<Vec<String>, String> {
+    let venv = home.join("venv");
+    let pin = var.join("qwenpaw-version");
+    if !venv.exists() {
+        return match std::fs::remove_file(&pin) {
+            Ok(()) => Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("删除版本钉失败: {e}")),
+        };
+    }
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let trash = home.join(format!(".venv.uninstall.{}.{unique}", std::process::id()));
+    let pin_backup = var.join(format!(".qwenpaw-version.uninstall.{}.{unique}", std::process::id()));
+    let had_pin = pin.exists();
+    if had_pin {
+        std::fs::rename(&pin, &pin_backup).map_err(|e| format!("备份版本钉失败: {e}"))?;
+    }
+    if let Err(e) = std::fs::rename(&venv, &trash) {
+        if had_pin {
+            let _ = std::fs::rename(&pin_backup, &pin);
+        }
+        return Err(format!("移出内核运行环境失败: {e}"));
+    }
+    let mut warnings = Vec::new();
+    if let Err(e) = std::fs::remove_dir_all(&trash) {
+        warnings.push(format!("运行环境残留于 {}: {e}", trash.display()));
+    }
+    if had_pin {
+        if let Err(e) = std::fs::remove_file(&pin_backup) {
+            warnings.push(format!("版本钉备份残留于 {}: {e}", pin_backup.display()));
+        }
+    }
+    Ok(warnings)
+}
+
+async fn kernel_uninstall(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
+    state.kernel.stop().await;
+    let warnings = match remove_kernel_files(
+        std::path::Path::new(&state.home_dir),
+        std::path::Path::new(&state.var_dir),
+    ) {
+        Ok(warnings) => warnings,
+        Err(e) => {
+            let _ = state.kernel.spawn();
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
+    };
+    state.kernel.invalidate_version();
+    let entry_result = sync_main_entry(
+        std::path::Path::new(&state.ui_config_file),
+        state.kernel.port(),
+        false,
+    );
+    state.events.publish(render_snapshot(&state));
+    let mut message = "内核已卸载，用户配置、记忆与管理员认证已保留".to_string();
+    if !warnings.is_empty() {
+        message.push_str(&format!("；{}", warnings.join("；")));
+    }
+    if let Err(e) = entry_result {
+        message.push_str(&format!("；桌面入口更新失败: {e}"));
+    }
+    Json(json!({"ok": true, "success": true, "message": message})).into_response()
 }
 
 async fn kernel_pin(
@@ -609,21 +749,9 @@ async fn wait_healthy_blocking(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn sync_ui_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
-    let text = std::fs::read_to_string(path)?;
-    let mut config: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let entry = config
-        .pointer_mut("/.url/qwenpaw.main")
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "missing .url/qwenpaw.main",
-            )
-        })?;
-    entry["port"] = serde_json::Value::String(port.to_string());
+fn write_ui_config(path: &std::path::Path, config: &serde_json::Value) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
-    let mut bytes = serde_json::to_vec_pretty(&config)
+    let mut bytes = serde_json::to_vec_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     bytes.push(b'\n');
     std::fs::write(&tmp, bytes)?;
@@ -633,6 +761,53 @@ fn sync_ui_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
     }
     std::fs::rename(tmp, path)
+}
+
+fn read_ui_config(path: &std::path::Path) -> std::io::Result<serde_json::Value> {
+    let text = std::fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+pub fn sync_main_entry(path: &std::path::Path, port: u16, installed: bool) -> std::io::Result<()> {
+    let mut config = read_ui_config(path)?;
+    let urls = config
+        .get_mut(".url")
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing .url"))?;
+    let entry_matches = urls
+        .get("qwenpaw.main")
+        .map(|entry| {
+            entry["port"].as_str() == Some(&port.to_string())
+                && entry["noDisplay"].as_bool() == Some(!installed)
+        })
+        .unwrap_or(false);
+    if entry_matches {
+        return Ok(());
+    }
+    let entry = urls.entry("qwenpaw.main").or_insert_with(|| {
+        json!({
+            "title": "QwenPaw",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "http",
+            "port": port.to_string(),
+            "url": "/",
+            "allUsers": false,
+            "control": {"accessPerm": "editable"}
+        })
+    });
+    entry["port"] = serde_json::Value::String(port.to_string());
+    entry["noDisplay"] = serde_json::Value::Bool(!installed);
+    write_ui_config(path, &config)
+}
+
+fn sync_ui_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
+    let mut config = read_ui_config(path)?;
+    if let Some(entry) = config.pointer_mut("/.url/qwenpaw.main") {
+        entry["port"] = serde_json::Value::String(port.to_string());
+        write_ui_config(path, &config)?;
+    }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -767,11 +942,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn version_index_uses_the_selected_mirror() {
+        assert_eq!(version_index_url(""), "https://pypi.org/simple/qwenpaw/");
+        assert_eq!(
+            version_index_url("https://pypi.tuna.tsinghua.edu.cn/simple"),
+            "https://pypi.tuna.tsinghua.edu.cn/simple/qwenpaw/"
+        );
+        assert_eq!(
+            version_index_url("https://mirrors.aliyun.com/pypi/simple/"),
+            "https://mirrors.aliyun.com/pypi/simple/qwenpaw/"
+        );
+        assert_eq!(
+            version_index_url("https://mirrors.aliyun.com/pypi/simple/;bad"),
+            "https://pypi.org/simple/qwenpaw/"
+        );
+    }
+
+    #[test]
     fn operation_guard_rejects_concurrent_changes() {
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let _guard = try_operation(&lock).unwrap();
         let response = try_operation(&lock).unwrap_err();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn kernel_uninstall_removes_only_runtime_and_pin() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-uninstall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        let var = dir.join("var");
+        let share = dir.join("share");
+        std::fs::create_dir_all(home.join("venv/bin")).unwrap();
+        std::fs::create_dir_all(&var).unwrap();
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::write(home.join("venv/bin/python3"), "runtime").unwrap();
+        std::fs::write(var.join("qwenpaw-version"), "2.3.0b2\n").unwrap();
+        std::fs::write(share.join("config.json"), "keep").unwrap();
+        let warnings = remove_kernel_files(&home, &var).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!home.join("venv").exists());
+        assert!(!var.join("qwenpaw-version").exists());
+        assert_eq!(std::fs::read_to_string(share.join("config.json")).unwrap(), "keep");
+        assert!(remove_kernel_files(&home, &var).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_main_entry_follows_kernel_installation() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-ui-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        std::fs::write(&path, r#"{".url":{"qwenpaw.console":{"type":"iframe"}}}"#).unwrap();
+        sync_main_entry(&path, 18088, false).unwrap();
+        sync_main_entry(&path, 18088, true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value[".url"]["qwenpaw.main"]["port"], "18088");
+        assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], false);
+        assert_eq!(value[".url"]["qwenpaw.console"]["type"], "iframe");
+        sync_main_entry(&path, 18088, false).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], true);
+        sync_ui_port(&path, 18099).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value[".url"]["qwenpaw.main"]["port"], "18099");
+        assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], true);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

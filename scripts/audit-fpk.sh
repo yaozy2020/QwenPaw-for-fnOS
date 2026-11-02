@@ -35,6 +35,14 @@ for f in manifest cmd/main cmd/install_callback cmd/uninstall_callback config/pr
     fi
 done
 
+expected_checksum=$(md5sum "$WORK/app.tgz" | awk '{print $1}')
+actual_checksum=$(awk -F= '/^checksum[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' "$WORK/manifest")
+if [ -n "$actual_checksum" ] && [ "$actual_checksum" = "$expected_checksum" ]; then
+    ok "manifest checksum 与规范化 app.tgz 一致"
+else
+    fail "manifest checksum 不匹配: manifest=${actual_checksum:-缺失} app.tgz=$expected_checksum"
+fi
+
 # 顶层全白名单审计 (P1-4: 严禁任何本地未追踪/未声明文件污染包顶层)
 unexpected_top=$(find "$WORK" -maxdepth 2 -type f \
     ! -path "$WORK/manifest" ! -path "$WORK/LICENSE" ! -path "$WORK/ICON.PNG" ! -path "$WORK/ICON_256.PNG" \

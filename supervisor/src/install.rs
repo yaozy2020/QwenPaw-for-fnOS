@@ -183,6 +183,110 @@ struct Inner {
     cancelled: bool,
 }
 
+struct VenvTransaction {
+    active: std::path::PathBuf,
+    staged: std::path::PathBuf,
+    backup: std::path::PathBuf,
+}
+
+impl VenvTransaction {
+    fn prepare(active: &Path, seq: u64) -> std::io::Result<Self> {
+        let python = std::env::var("QWENPAW_PYTHON_BIN")
+            .unwrap_or_else(|_| "/var/apps/python312/target/bin/python3".into());
+        Self::prepare_with_python(active, seq, Path::new(&python))
+    }
+
+    fn prepare_with_python(active: &Path, seq: u64, python: &Path) -> std::io::Result<Self> {
+        let parent = active.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
+        })?;
+        let suffix = format!("{}.{}", std::process::id(), seq);
+        let staged = parent.join(format!(".venv.staging.{suffix}"));
+        let backup = parent.join(format!(".venv.rollback.{suffix}"));
+        let prepared = if active.exists() {
+            copy_tree(active, &staged)
+        } else {
+            std::process::Command::new(python)
+                .arg("-m")
+                .arg("venv")
+                .arg(&staged)
+                .status()
+                .and_then(|status| {
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other(format!("创建 venv 失败: {status}")))
+                    }
+                })
+        };
+        if let Err(error) = prepared {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(error);
+        }
+        Ok(Self { active: active.to_path_buf(), staged, backup })
+    }
+
+    fn python(&self) -> std::path::PathBuf {
+        self.staged.join("bin/python3")
+    }
+
+    fn activate(&mut self) -> std::io::Result<()> {
+        let had_active = self.active.exists();
+        if had_active {
+            std::fs::rename(&self.active, &self.backup)?;
+        }
+        if let Err(error) = std::fs::rename(&self.staged, &self.active) {
+            if had_active {
+                let _ = std::fs::rename(&self.backup, &self.active);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> std::io::Result<()> {
+        std::fs::rename(&self.active, &self.staged)?;
+        if self.backup.exists() {
+            if let Err(error) = std::fs::rename(&self.backup, &self.active) {
+                let _ = std::fs::rename(&self.staged, &self.active);
+                return Err(error);
+            }
+        }
+        std::fs::remove_dir_all(&self.staged)
+    }
+
+    fn commit(self) -> std::io::Result<()> {
+        if self.backup.exists() {
+            std::fs::remove_dir_all(&self.backup)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for VenvTransaction {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.staged);
+    }
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return std::os::unix::fs::symlink(std::fs::read_link(source)?, destination);
+    }
+    if metadata.is_dir() {
+        std::fs::create_dir(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(source, destination)?;
+    }
+    std::fs::set_permissions(destination, metadata.permissions())
+}
+
 #[derive(Clone)]
 pub struct InstallState {
     inner: Arc<Mutex<Inner>>,
@@ -348,7 +452,7 @@ impl InstallState {
         pip_log: String,
         pin_path: String,
     ) -> bool {
-        {
+        let task_seq = {
             let mut g = self.inner.lock().unwrap();
             if g.running {
                 return false;
@@ -357,19 +461,33 @@ impl InstallState {
             g.running = true;
             g.phase = Phase::Downloading;
             g.fetched = 0;
-            g.message = "启动安装".into();
+            g.message = "准备独立安装环境".into();
             g.error = String::new();
             g.pid = 0;
             g.cancelled = false;
-        }
+            g.seq
+        };
         self.emit(self.snapshot());
 
         let this = self.clone();
         let on_success = std::sync::Arc::clone(&self.on_success);
         std::thread::spawn(move || {
-            // 直接用虚拟环境内的 python,不激活环境、不经过 Shell(激活只影响
-            // PATH/提示符;`venv/bin/python3 -m pip` 与激活后等价)
-            let python = Path::new(&venv_dir).join("bin/python3");
+            if this.abort_if_cancelled() {
+                return;
+            }
+            let mut transaction = match VenvTransaction::prepare(Path::new(&venv_dir), task_seq) {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    this.set(|g| {
+                        g.running = false;
+                        g.phase = Phase::Failed;
+                        g.error = format!("无法准备独立安装环境: {error}");
+                    });
+                    return;
+                }
+            };
+            // pip 只修改暂存环境,原 venv 在完整健康检查前保持不变。
+            let python = transaction.python();
             let mut cmd = std::process::Command::new(&python);
             cmd.arg("-m").arg("pip");
             for a in pip_args(&channel, &mirror) {
@@ -608,6 +726,15 @@ impl InstallState {
                         return;
                     }
 
+                    if let Err(error) = transaction.activate() {
+                        this.set(|g| {
+                            g.running = false;
+                            g.phase = Phase::Failed;
+                            g.error = format!("切换内核运行环境失败: {error}");
+                        });
+                        return;
+                    }
+
                     this.set(|g| {
                         g.phase = Phase::Starting;
                         g.message = format!("内核包已安装 v{actual}，等待服务就绪");
@@ -616,17 +743,27 @@ impl InstallState {
                     let health_ok =
                         spawn_result.is_ok() && wait_for_version(kernel_port, &actual, 30);
                     if !health_ok {
-                        let error = match spawn_result {
+                        let mut error = match spawn_result {
                             Err(e) => format!("内核启动失败 (spawn_failed): {e}"),
                             Ok(_) => {
                                 "内核包已安装，但在宽限期内启动健康检查超时 (health_timeout)".into()
                             }
+                        };
+                        error = match transaction.rollback() {
+                            Ok(()) => format!("{error}；已恢复原内核环境"),
+                            Err(e) => format!("{error}；恢复原内核环境失败: {e}"),
                         };
                         this.set(|g| {
                             g.running = false;
                             g.phase = Phase::Failed;
                             g.error = error;
                         });
+                        return;
+                    }
+
+                    if this.cancelled() {
+                        let _ = transaction.rollback();
+                        this.finish_cancelled();
                         return;
                     }
 
@@ -637,21 +774,26 @@ impl InstallState {
                     };
                     match pin_result {
                         Ok(()) => {
+                            let cleanup = transaction.commit();
                             this.set(|g| {
                                 g.running = false;
                                 g.phase = Phase::Done;
-                                g.message = if actual.is_empty() {
-                                    "安装完成，服务已就绪".into()
-                                } else {
-                                    format!("安装完成 v{actual}，服务已就绪")
+                                g.message = match cleanup {
+                                    Ok(()) => format!("安装完成 v{actual}，服务已就绪"),
+                                    Err(e) => format!("安装完成 v{actual}，服务已就绪；旧环境备份清理失败: {e}"),
                                 };
                             });
                         }
                         Err(e) => {
+                            let mut error = format!("版本钉写入失败 (pin_write_failed): {e}");
+                            error = match transaction.rollback() {
+                                Ok(()) => format!("{error}；已恢复原内核环境"),
+                                Err(e) => format!("{error}；恢复原内核环境失败: {e}"),
+                            };
                             this.set(|g| {
                                 g.running = false;
                                 g.phase = Phase::Failed;
-                                g.error = format!("版本钉写入失败 (pin_write_failed): {e}");
+                                g.error = error;
                             });
                         }
                     }
@@ -975,6 +1117,123 @@ mod tests {
         }
     }
 
+    fn fake_venv(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "qwenpaw-venv-{test_name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bin = dir.join("venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python3");
+        std::fs::write(
+            &python,
+            "#!/bin/bash\nif [ \"$1\" = \"-m\" ]; then\n  printf new > \"$(dirname \"$0\")/../installed\"\n  exit \"${FAKE_PIP_EXIT:-0}\"\nfi\nprintf '2.0.0\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&python).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&python, permissions).unwrap();
+        std::fs::write(dir.join("venv/installed"), "old").unwrap();
+        dir
+    }
+
+    fn wait_for_terminal(st: &InstallState) -> InstallSnapshot {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while st.snapshot().running && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        st.snapshot()
+    }
+
+    #[test]
+    fn missing_active_venv_creates_a_fresh_staged_environment() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-fresh-venv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let python = dir.join("base-python");
+        std::fs::write(&python, "#!/bin/bash\nmkdir -p \"$3/bin\"\ncp \"$0\" \"$3/bin/python3\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&python).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&python, permissions).unwrap();
+        let active = dir.join("venv");
+        let mut transaction = VenvTransaction::prepare_with_python(&active, 1, &python).unwrap();
+        assert!(transaction.python().exists());
+        assert!(!active.exists(), "暂存提交前不得创建活动 venv");
+        transaction.activate().unwrap();
+        assert!(active.join("bin/python3").exists());
+        transaction.commit().unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "提交后仅保留基础 Python 和活动 venv");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_health_check_restores_previous_venv_and_pin() {
+        let dir = fake_venv("rollback");
+        let venv = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+        let st = InstallState::new(
+            Arc::new(|_: InstallSnapshot| {}),
+            Arc::new(|| Err("injected start failure".into())),
+        );
+        assert!(st.try_start(
+            venv.to_string_lossy().into_owned(),
+            18088,
+            InstallChannel::Latest,
+            String::new(),
+            dir.join("pip.log").to_string_lossy().into_owned(),
+            pin.to_string_lossy().into_owned(),
+        ));
+        let snapshot = wait_for_terminal(&st);
+        assert_eq!(snapshot.phase, Phase::Failed);
+        assert_eq!(std::fs::read_to_string(venv.join("installed")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(pin).unwrap(), "1.0.0\n");
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(entries, 3, "暂存与备份目录必须清理: {entries}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn successful_install_commits_staged_venv_and_pin() {
+        let dir = fake_venv("commit");
+        let venv = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+        let on_success: OnSuccessCb = Arc::new(|| {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 18089))
+                .map_err(|e| e.to_string())?;
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let body = r#"{"version":"2.0.0"}"#;
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                }
+            });
+            Ok(1)
+        });
+        let st = InstallState::new(Arc::new(|_: InstallSnapshot| {}), on_success);
+        assert!(st.try_start(
+            venv.to_string_lossy().into_owned(),
+            18089,
+            InstallChannel::Latest,
+            String::new(),
+            dir.join("pip.log").to_string_lossy().into_owned(),
+            pin.to_string_lossy().into_owned(),
+        ));
+        let snapshot = wait_for_terminal(&st);
+        assert_eq!(snapshot.phase, Phase::Done, "{}", snapshot.error);
+        assert_eq!(std::fs::read_to_string(venv.join("installed")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(pin).unwrap(), "2.0.0\n");
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(entries, 3, "成功后不得残留暂存与备份目录: {entries}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn cancel_in_pid_registration_window_kills_pip_and_lands_cancelled() {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -995,13 +1254,12 @@ mod tests {
             Arc::new(|_: InstallSnapshot| {}),
             on_success,
         );
-        let dir = std::env::temp_dir().join(format!("qwenpaw-inst-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = fake_venv("cancel-window");
         let pip_log = dir.join("pip.log").to_string_lossy().to_string();
         let pin = dir.join("pin").to_string_lossy().to_string();
 
         assert!(st.try_start(
-            "/nonexistent-venv".into(),
+            dir.join("venv").to_string_lossy().into_owned(),
             18088,
             InstallChannel::Latest,
             String::new(),

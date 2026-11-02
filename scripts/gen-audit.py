@@ -8,7 +8,7 @@ gen-audit.py — 自动生成 AUDIT_REPORT.md
   - manifest（版本号、依赖、changelog）
   - cmd/*（生命周期脚本）
   - wizard/*（向导清单）
-  - app/qwenpaw/code/src/*（上游源码统计）
+  - app/qwenpaw/code/src/*（可选的本地上游源码统计，不属于 FPK 物料）
   - git log --tags（最近发布）
 """
 import os

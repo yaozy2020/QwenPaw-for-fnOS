@@ -9,8 +9,10 @@ tools/fpkstudio-pack.py
 4. 输出由环境变量 FPK_OUT 严格收敛，并返回确切产物路径与签名。
 """
 
+import gzip
 import hashlib
 import http.client
+import io
 import json
 import os
 import shutil
@@ -20,6 +22,66 @@ import sys
 import tempfile
 import time
 import urllib.request
+import tarfile
+
+
+def normalize_tar(data, epoch, replacements=None, sort_entries=False):
+    replacements = replacements or {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as source:
+        entries = []
+        for member in source.getmembers():
+            payload = replacements.get(member.name)
+            if payload is None and member.isfile():
+                payload = source.extractfile(member).read()
+            if payload is not None:
+                member.size = len(payload)
+            member.uid = 0
+            member.gid = 0
+            member.uname = ""
+            member.gname = ""
+            member.mtime = epoch
+            member.pax_headers = {}
+            entries.append((member, payload))
+    if sort_entries:
+        entries.sort(key=lambda entry: entry[0].name)
+    output = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=epoch) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as target:
+            for member, payload in entries:
+                target.addfile(member, io.BytesIO(payload) if payload is not None else None)
+    return output.getvalue()
+
+
+def normalize_fpk(path):
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
+    with open(path, "rb") as f:
+        outer = f.read()
+    with tarfile.open(fileobj=io.BytesIO(outer), mode="r:gz") as archive:
+        app = archive.extractfile("app.tgz").read()
+        manifest = archive.extractfile("manifest").read().decode("utf-8")
+    normalized_app = normalize_tar(app, epoch, sort_entries=True)
+    checksum = hashlib.md5(normalized_app).hexdigest()
+    lines = []
+    found_checksum = False
+    for line in manifest.splitlines():
+        if line.strip().startswith("checksum"):
+            key = line.split("=", 1)[0]
+            line = f"{key}= {checksum}"
+            found_checksum = True
+        lines.append(line)
+    if not found_checksum:
+        lines.append(f"checksum                   = {checksum}")
+    normalized_manifest = ("\n".join(lines) + "\n").encode("utf-8")
+    normalized = normalize_tar(
+        outer,
+        epoch,
+        replacements={"app.tgz": normalized_app, "manifest": normalized_manifest},
+    )
+    temporary = path + ".normalized"
+    with open(temporary, "wb") as f:
+        f.write(normalized)
+    os.replace(temporary, path)
+
 
 PROJ_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN_DIR = os.path.join(PROJ_DIR, "tools", "fpkstudio-bin")
@@ -137,6 +199,7 @@ def main():
             final_dst = os.path.join(out_dir, packed_file)
 
             shutil.copy2(packed_path, final_dst)
+            normalize_fpk(final_dst)
             with open(final_dst, "rb") as f:
                 sha = hashlib.sha256(f.read()).hexdigest()
             with open(final_dst + ".sha256", "w") as f:

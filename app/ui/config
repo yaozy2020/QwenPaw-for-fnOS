@@ -19,6 +19,7 @@
             "port": "18088",
             "url": "/",
             "allUsers": false,
+            "noDisplay": false,
             "control": {
                 "accessPerm": "editable"
             }

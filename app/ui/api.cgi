@@ -33,7 +33,7 @@ REQUEST_METHOD="${REQUEST_METHOD:-GET}"
 # ── 方法白名单:读=GET,变更=POST ──
 case "$action" in
     status|logs|version_list|get_mirror|upgrade_status|upgrade_logs) want_method="GET" ;;
-    start|stop|restart|clear_logs|upgrade|reset_auth|change_port|set_mirror) want_method="POST" ;;
+    start|stop|restart|clear_logs|upgrade|uninstall_kernel|reset_auth|change_port|set_mirror) want_method="POST" ;;
     *)
         echo "Status: 404 Not Found"
         echo "Content-Type: application/json"
@@ -112,6 +112,10 @@ case "$action" in
         else
             body="{\"version\":\"${ver//\"/\\\"}\",\"mirror\":\"${mir//\"/\\\"}\"}"
         fi
+        ;;
+    uninstall_kernel)
+        method="POST"
+        path="/kernel/uninstall"
         ;;
     upgrade_status)
         # 监督者轻端点直出旧形状,桥零转换(曾每轮询起一个 python3,卡顿源之一)

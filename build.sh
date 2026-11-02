@@ -17,6 +17,8 @@ VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d 
 # 输出路径可被环境变量覆盖（CI 用 FPK_OUT=$GITHUB_WORKSPACE）；
 # 默认是 build/output 目录。
 FPK_OUT="${FPK_OUT:-${PROJ_DIR}/build/output}"
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJ_DIR" log -1 --format=%ct 2>/dev/null || echo 0)}"
+export SOURCE_DATE_EPOCH
 mkdir -p "$FPK_OUT"
 OUTPUT="${FPK_OUT}/qwenpaw_v${VERSION}.fpk"
 

@@ -58,22 +58,41 @@ fn main() {
         },
         cfg.kernel_port,
     ));
+    if let Err(e) = api::sync_main_entry(
+        std::path::Path::new(&cfg.ui_config_file),
+        cfg.kernel_port,
+        kernel.installed(),
+    ) {
+        logf(&format!("sync desktop kernel entry failed: {e}"));
+    }
     let events = Events::new();
     let kernel_for_install = Arc::clone(&kernel);
+    let ui_config_for_install = cfg.ui_config_file.clone();
     let install = InstallState::new(
         {
             let log = Arc::clone(&log);
             Arc::new(move |snap: install::InstallSnapshot| {
+                if matches!(snap.phase, install::Phase::Done | install::Phase::Failed | install::Phase::Cancelled) {
+                    kernel_for_install.invalidate_version();
+                    if let Err(e) = api::sync_main_entry(
+                        std::path::Path::new(&ui_config_for_install),
+                        kernel_for_install.port(),
+                        kernel_for_install.installed(),
+                    ) {
+                        let _ = writeln!(log.lock().unwrap(), "[Supervisor] sync desktop kernel entry failed: {e}");
+                    }
+                }
                 let mut g = log.lock().unwrap();
                 let _ = writeln!(
                     g,
                     "[Supervisor] install seq={} phase={:?} fetched={} msg={}",
                     snap.seq, snap.phase, snap.fetched, snap.message
                 );
-                // pip 失败不能把服务留在停机态(独立审计 major):失败终态尝试
-                // 拉起现有内核;半改写 venv 时 spawn 可能失败,如实落日志
+                // 失败终态统一先停掉可能未通过健康检查的新进程,再启动
+                // 未受影响的旧环境(或回滚后的环境),避免进程与 venv 错配。
                 if snap.phase == install::Phase::Failed {
-                    let _ = writeln!(g, "[Supervisor] install failed, attempting kernel restart");
+                    let _ = writeln!(g, "[Supervisor] install failed, restoring previous kernel service");
+                    kernel_for_install.stop_sync();
                     match kernel_for_install.spawn() {
                         Ok(pid) => { let _ = writeln!(g, "[Supervisor] kernel restarted after failed install, pid={pid}"); }
                         Err(e) => { let _ = writeln!(g, "[Supervisor] kernel restart after failed install FAILED: {e}"); }
@@ -175,6 +194,7 @@ fn main() {
         ui_config_file: cfg.ui_config_file.clone(),
         kernel_log: cfg.kernel_log.clone(),
         operations: Arc::new(tokio::sync::Mutex::new(())),
+        auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
         supervisor_port: cfg.listen_port,
     };
     let addr = format!("127.0.0.1:{}", cfg.listen_port);

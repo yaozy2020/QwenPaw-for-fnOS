@@ -30,8 +30,7 @@ jobs:
                    cmd/install_callback cmd/upgrade_init cmd/upgrade_callback \
                    cmd/uninstall_init cmd/uninstall_callback cmd/config_init \
                    cmd/config_callback build.sh scripts/lint.sh scripts/preflight.sh \
-                   scripts/sync-upstream.sh scripts/update-qwenpaw.sh scripts/audit-fpk.sh \
-                   tools/fnpack; do
+                   scripts/audit-fpk.sh tools/fnpack; do
             mode=$(git ls-files -s "$f" | awk '{print $1}')
             if [ "$mode" != "100755" ]; then
               echo "::error::$f 的 git 模式是 ${mode:-缺失},应为 100755"

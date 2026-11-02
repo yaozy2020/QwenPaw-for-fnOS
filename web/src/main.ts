@@ -217,6 +217,9 @@ const API_BASE = (function() {
           const tip = document.getElementById("kernelInstallTip");
           if (tip) tip.style.display = "none";
         }
+        const uninstallBtn = document.getElementById("btnUninstallKernel");
+        if (uninstallBtn) uninstallBtn.style.display = notInstalled ? "none" : "inline-block";
+        updateUpgradeButtonText();
 
         // 后端安装任务进行中(重开控制台/换设备):恢复现场入口。
         // 弹窗已打开时不重复提示;点击进入附加模式而非再次创建任务
@@ -245,49 +248,51 @@ const API_BASE = (function() {
 
         if (statusType === "uninitialized") {
           if (valAuth) {
-            valAuth.innerText = "需初始化";
+            valAuth.innerText = "已开启（待设置密码）";
             valAuth.style.color = "var(--warning)";
           }
           if (valAdmin) {
-            valAdmin.innerHTML = `<span style="color:var(--warning);font-weight:600;">⚠️ 未初始化管理员</span>`;
+            valAdmin.innerText = "尚未创建管理员";
+            valAdmin.style.color = "var(--warning)";
           }
           if (valDesc) {
-            valDesc.innerHTML = `<span style="color:var(--warning);">首次安装尚未设定密码！请点击下方“进入对话”直达初始设置页创建管理员。</span>`;
+            valDesc.innerText = "对话端已要求登录验证，但还没有管理员。请进入对话端完成初始设置；该账号独立于飞牛账号。";
           }
         } else if (statusType === "protected") {
           if (valAuth) {
-            valAuth.innerText = "已启用密码保护";
+            valAuth.innerText = "已开启（需要密码）";
             valAuth.style.color = "var(--success)";
           }
           if (valAdmin) {
-            valAdmin.innerHTML = `<span style="color:var(--success);">已绑定管理账号</span>`;
+            valAdmin.innerText = "管理员已创建";
+            valAdmin.style.color = "var(--success)";
           }
           if (valDesc) {
-            valDesc.innerText = "进入 Web 对话端需输入你的管理员密码。如忘记密码，可点击下方按钮一键重置。";
+            valDesc.innerText = "对话端需要 QwenPaw 独立管理员密码。重置只清除此密码，不影响飞牛账号、用户配置或记忆。";
           }
         } else if (statusType === "disabled") {
           if (valAuth) {
-            valAuth.innerText = "免密模式";
-            valAuth.style.color = "var(--text-muted)";
+            valAuth.innerText = "未开启（公开访问）";
+            valAuth.style.color = "var(--danger)";
           }
           if (valAdmin) {
-            valAdmin.innerText = "无密码保护";
-            valAdmin.style.color = "var(--text-muted)";
+            valAdmin.innerText = "未启用账号验证";
+            valAdmin.style.color = "var(--danger)";
           }
           if (valDesc) {
-            valDesc.innerText = "当前未开启鉴权，任何人均可直接访问对话界面。";
+            valDesc.innerText = "任何能访问该端口的人无需密码即可使用对话端。如需保护，请在对话端设置 QwenPaw 管理员。";
           }
         } else {
           if (valAuth) {
-            valAuth.innerText = "状态未知";
+            valAuth.innerText = "无法确认";
             valAuth.style.color = "var(--text-muted)";
           }
           if (valAdmin) {
-            valAdmin.innerText = "服务未连接";
+            valAdmin.innerText = "无法读取";
             valAdmin.style.color = "var(--text-muted)";
           }
           if (valDesc) {
-            valDesc.innerText = "内核未启动或接口不可达，无法确认当前鉴权状态。";
+            valDesc.innerText = "内核未运行或状态接口不可达，暂时无法确认密码状态；这不代表验证已关闭。请启动内核后再确认。";
           }
         }
 
@@ -345,8 +350,8 @@ const API_BASE = (function() {
     // 鉴权管理
     async function resetAuth() {
       const ok = await showModal({
-        title: "重置管理密码",
-        message: "确定要重置管理员密码吗？重置后此前会话将失效，下次打开 Web 端时将提示重新设定密码。",
+        title: "重置 QwenPaw 管理员密码",
+        message: "这将清除 QwenPaw 对话端的管理员密码并使现有会话失效，下次进入对话端时需要重新设置。\n\n飞牛账号及其密码不受影响，用户配置与记忆也不会删除。确认继续？",
         type: "warn",
         confirmText: "确认重置"
       });
@@ -364,6 +369,30 @@ const API_BASE = (function() {
         setTimeout(fetchStatus, 1200);
       } catch (e) {
         showToast("请求失败: " + e.message);
+      }
+    }
+
+    async function uninstallKernel() {
+      if (!currentRunningVersion) {
+        showToast("当前未安装 QwenPaw 内核");
+        return;
+      }
+      const ok = await showModal({
+        title: "仅卸载 QwenPaw 内核",
+        message: `将停止服务并删除 QwenPaw v${currentRunningVersion} 的运行环境与版本钉。\n\n用户配置、会话记忆、工作数据和管理员认证都会保留，控制台也不会卸载。之后可重新选择版本安装。确认继续？`,
+        type: "danger",
+        confirmText: "仅卸载内核，保留数据"
+      });
+      if (!ok) return;
+      try {
+        showToast("正在卸载内核并保留用户数据...");
+        const res = await fetch(`${API_BASE}?action=uninstall_kernel`, { method: "POST", headers: csrfHeaders() });
+        const data = await res.json().catch(() => ({ success: false, message: "后端响应异常" }));
+        showToast(data.message || (data.success ? "内核已卸载" : "卸载失败"));
+        await fetchStatus();
+        fetchLogs();
+      } catch (e) {
+        showToast("卸载请求失败: " + e.message);
       }
     }
 
@@ -438,7 +467,12 @@ const API_BASE = (function() {
       try {
         const res = await fetch(`${API_BASE}?action=set_mirror&mirror=${encodeURIComponent(mirrorValue)}`, { method: "POST", headers: csrfHeaders() });
         const d = await res.json();
-        showToast(d.success ? "下载源已保存，安装/升级内核时生效" : ("保存失败: " + (d.message || "")));
+        if (d.success) {
+          showToast("下载源已保存，版本查询与内核安装将共用此源");
+          await fetchVersionList();
+        } else {
+          showToast("保存失败: " + (d.message || ""));
+        }
       } catch (e) {
         showToast("下载源保存失败");
       }
@@ -458,30 +492,36 @@ const API_BASE = (function() {
       }
     });
 
+    function showVersionSourceError(detail = "") {
+      const alert = document.getElementById("versionSourceStatus");
+      const message = "当前下载源不可用，无法获取版本列表。请更换下载源，或检查 NAS 网络、DNS 与代理设置后重试。";
+      if (alert) alert.innerText = detail ? `${message}（${detail}）` : message;
+      if (alert) alert.style.display = "block";
+      showToast(message);
+      return false;
+    }
+
     async function fetchVersionList(): Promise<boolean> {
       try {
         const res = await fetch(`${API_BASE}?action=version_list&_t=${Date.now()}`);
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        const data = await res.json();
-        if (data.success && Array.isArray(data.versions)) {
+        const data = await res.json().catch(() => null);
+        if (res.ok && data && data.success && Array.isArray(data.versions)) {
           rawVersionList = data.versions;
           latestStableVer = data.latest_stable || "2.2.2.post1";
           const firstBeta = rawVersionList.find(v => v.is_beta);
           if (firstBeta) latestBetaVer = firstBeta.version;
           if (!userPickedVersion) {
-            // 初次载入或用户未自选版本时，默认选中推荐稳定版（初装最优体验，杜绝幽灵历史版本）
             selectedVersion = latestStableVer;
           }
+          const alert = document.getElementById("versionSourceStatus");
+          if (alert) alert.style.display = "none";
           refreshVersionCards();
           return true;
         }
-        showToast("版本检查失败: " + (data.message || "上游响应异常"));
-        return false;
+        return showVersionSourceError(data && data.message ? data.message : `HTTP ${res.status}`);
       } catch (e) {
         console.warn("fetchVersionList err:", e);
-        showToast("版本检查失败: " + (e as Error).message);
-        refreshVersionCards();
-        return false;
+        return showVersionSourceError((e as Error).message);
       }
     }
 
@@ -536,6 +576,16 @@ const API_BASE = (function() {
       return compareVersion(current, selected) > 0;
     }
 
+    function isSameVersion(current: string, selected: string): boolean {
+      return Boolean(current && selected && compareVersion(current, selected) === 0);
+    }
+
+    function currentInstallAction(): string {
+      if (!currentRunningVersion) return "安装";
+      if (isSameVersion(currentRunningVersion, selectedVersion)) return "重新安装";
+      return isDowngradeOf(currentRunningVersion, selectedVersion) ? "降级" : "升级";
+    }
+
     function updateUpgradeButtonText() {
       const btn = document.getElementById("btnUpgradeAction");
       const warnBar = document.getElementById("downgradeWarnBar");
@@ -545,6 +595,13 @@ const API_BASE = (function() {
       // 内核未安装：按钮语义是「安装」而非「更新/降级」
       if (!currentRunningVersion) {
         btn.innerText = `安装内核 v${activeSelected}`;
+        btn.className = "btn btn-primary btn-sm";
+        if (warnBar) warnBar.style.display = "none";
+        return;
+      }
+
+      if (isSameVersion(currentRunningVersion, selectedVersion)) {
+        btn.innerText = `重新安装 v${selectedVersion}`;
         btn.className = "btn btn-primary btn-sm";
         if (warnBar) warnBar.style.display = "none";
         return;
@@ -573,6 +630,14 @@ const API_BASE = (function() {
           message: `即将为您下载并部署 QwenPaw v${selectedVersion} 核心运行环境，首次安装约需 1~3 分钟。确认开始？`,
           type: "primary",
           confirmText: "开始安装",
+          cancelText: "取消"
+        });
+      } else if (isSameVersion(currentRunningVersion, selectedVersion)) {
+        ok = await showModal({
+          title: "重新安装当前版本",
+          message: `将通过独立暂存环境重新安装 QwenPaw v${selectedVersion}，期间服务会短暂重启。用户配置与记忆保持不变，失败时自动恢复当前环境。确认继续？`,
+          type: "warn",
+          confirmText: "重新安装",
           cancelText: "取消"
         });
       } else if (isDowngradeOf(currentRunningVersion, selectedVersion)) {
@@ -672,7 +737,7 @@ const API_BASE = (function() {
       upgradeStartedAt = Date.now();
       document.getElementById("upTitle").innerText = upgradeAttachMode
         ? "正在查看进行中的安装任务..."
-        : `QwenPaw 正在更新至 v${selectedVersion}...`;
+        : `QwenPaw 正在${currentInstallAction()} v${selectedVersion}...`;
       document.getElementById("upSubTitle").innerText = upgradeAttachMode
         ? "NAS 后端独立执行中,与本页面是否在线无关"
         : "正在执行 pip 下载与环境重构，期间服务将自动重启";
@@ -769,12 +834,12 @@ const API_BASE = (function() {
             document.getElementById("btnUpClose").style.display = "block";
 
             if (isFailed) {
-              document.getElementById("upTitle").innerText = "升级遇到问题";
-              document.getElementById("upSubTitle").innerText = "执行遇到异常退出，请查看上方详细日志";
+              document.getElementById("upTitle").innerText = `${currentInstallAction()}遇到问题`;
+              document.getElementById("upSubTitle").innerText = "请查看详细日志；若下载源不可用，请换源或检查 NAS 网络后重试。原内核环境已保留或恢复";
               document.getElementById("upDoneIcon").style.color = "var(--danger)";
             } else {
-              document.getElementById("upTitle").innerText = "升级已顺利完成！";
-              document.getElementById("upSubTitle").innerText = "新版本已就绪，QwenPaw 后台服务已恢复运行";
+              document.getElementById("upTitle").innerText = `${currentInstallAction()}已顺利完成！`;
+              document.getElementById("upSubTitle").innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
               document.getElementById("upDoneIcon").style.color = "var(--success)";
             }
           }
