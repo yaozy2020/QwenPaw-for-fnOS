@@ -2693,6 +2693,40 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_0600_is_atomic_and_leaves_no_tmp() {
+        let dir = std::env::temp_dir().join(format!("qp-aw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("supervisor.pid");
+        let target_s = target.to_string_lossy().to_string();
+
+        atomic_write_0600(&target_s, "1234\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "1234\n");
+
+        // 覆盖写:读者要么看到旧值,要么看到新值,不会看到空文件
+        atomic_write_0600(&target_s, "5678\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "5678\n");
+
+        // 临时文件必须已 rename 走,目录里只剩目标文件
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "supervisor.pid")
+            .collect();
+        assert!(leftovers.is_empty(), "不应残留临时文件: {leftovers:?}");
+
+        // 权限必须是 0600
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "pid 文件权限应为 0600,实际 {mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sweep_stale_tmp_files_removes_only_regular_tmp_files() {
         let dir = std::env::temp_dir().join(format!("qp-sweep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

@@ -246,8 +246,17 @@ fn main() {
         Err(e) => logf(&format!("recover pending transactions error: {e}")),
     }
 
-    // supervisor 自身 pid(平台 stop 的目标)
-    std::fs::write(&cfg.supervisor_pid_file, format!("{}\n", std::process::id())).ok();
+    // supervisor 自身 pid(平台 stop 的目标)。
+    // 必须原子写:裸 fs::write 先截断再写,若此刻被 SIGKILL/断电,磁盘上会留下
+    // 空文件或半截数字。平台 stop 读到空/非法 pid 会判定"未运行"而跳过停止,
+    // 于是真实例变成无法通过平台停下的孤儿(只剩手工 kill)。
+    match crate::install::atomic_write_0600(
+        &cfg.supervisor_pid_file,
+        &format!("{}\n", std::process::id()),
+    ) {
+        Ok(()) => {}
+        Err(e) => logf(&format!("write supervisor pid error: {e}")),
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
