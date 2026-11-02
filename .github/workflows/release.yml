@@ -177,9 +177,9 @@ jobs:
           cd "$DOWNLOAD_DIR"
 
           echo "从 Release $TAG 回读下载 $FPK_NAME ..."
-          gh release download "$TAG" -p "$FPK_NAME"
+          gh release download "$TAG" --repo "${{ github.repository }}" -p "$FPK_NAME" --dir "$DOWNLOAD_DIR"
 
-          DOWNLOADED_SHA=$(sha256sum "$FPK_NAME" | awk '{print $1}')
+          DOWNLOADED_SHA=$(sha256sum "$DOWNLOAD_DIR/$FPK_NAME" | awk '{print $1}')
           echo "本地构建 SHA256: $EXPECTED_SHA"
           echo "回读下载 SHA256: $DOWNLOADED_SHA"
 
