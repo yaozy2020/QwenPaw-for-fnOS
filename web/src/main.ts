@@ -1,4 +1,5 @@
 import { renderStatusCard, renderLogLines, renderMirrorOptions, renderVersionCards, renderHistoryItems } from "./components";
+import { formatUptime } from "./statusStore";
 
 const API_BASE = (function() {
       const path = window.location.pathname;
@@ -296,6 +297,13 @@ const API_BASE = (function() {
           }
         }
 
+        const upEl = document.getElementById("statusUptime");
+        if (upEl) {
+          upEl.innerText = (!notInstalled && data.running && data.startAt)
+            ? "已运行 " + formatUptime(Math.floor(Date.now() / 1000) - data.startAt)
+            : "";
+        }
+
         const portEl = document.getElementById("valPort");
         const activePort = data.port || "18088";
         if (portEl) portEl.innerText = activePort;
@@ -325,6 +333,8 @@ const API_BASE = (function() {
             degraded: true, // 如实显示"状态不可达",不得伪装成"内核未安装"
           }, cardMount);
         }
+        const upEl = document.getElementById("statusUptime");
+        if (upEl) upEl.innerText = "";
         const valVersion = document.getElementById("valVersion");
         if (valVersion) valVersion.innerText = "无法获取";
         const valAuth = document.getElementById("valAuthStatus");

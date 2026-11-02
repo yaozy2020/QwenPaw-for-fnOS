@@ -1,6 +1,6 @@
 // Preact 视图组件:纯函数 of 数据,不含轮询与业务时序。
 // 插值默认转义 —— 日志/版本号等外部数据不再依赖手工 escapeHtml(r7 同族风险点)。
-import { formatUptime, formatMem, type StatusData } from "./statusStore";
+import { formatMem, type StatusData } from "./statusStore";
 
 export function StatusCardView({ data }: { data: StatusData }) {
   const degraded = Boolean(data.degraded);
@@ -11,7 +11,6 @@ export function StatusCardView({ data }: { data: StatusData }) {
   const stateColor = degraded ? "var(--text-muted)"
     : notInstalled ? "var(--text-sub)"
     : running ? "var(--success)" : "var(--danger)";
-  const uptime = running && data.startAt ? formatUptime(Math.floor(Date.now() / 1000) - data.startAt) : null;
   const stats: [string, string][] = [
     ["进程 PID", running ? String(data.pid || "-") : "-"],
     ["CPU 占用", running && typeof data.cpu === "number" ? data.cpu.toFixed(1) + "%" : "-"],
@@ -22,7 +21,6 @@ export function StatusCardView({ data }: { data: StatusData }) {
       <div class="status-head">
         <span class="status-dot" style={{ background: stateColor }}></span>
         <span class="status-text" style={{ color: stateColor }}>{stateText}</span>
-        {uptime && <span class="status-uptime">已运行 {uptime}</span>}
       </div>
       <div class="stat-grid">
         {stats.map(([label, val]) => (

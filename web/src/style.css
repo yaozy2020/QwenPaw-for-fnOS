@@ -25,6 +25,7 @@
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 15px;
+  --fs-2xl: 20px;
   --fs-xl: 17px;
   /* 动效:统一 expo-out,时长两档 */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
@@ -87,7 +88,7 @@ html[data-theme="light"] {
   --primary-hover: #1d4ed8;
   --primary-soft: rgba(37, 99, 235, 0.08);
   --primary-border: rgba(37, 99, 235, 0.25);
-  --success: #059669;
+  --success: #047857;
   --success-bg: rgba(5, 150, 105, 0.10);
   --warning: #b45309;
   --warning-bg: rgba(217, 119, 6, 0.10);
@@ -176,6 +177,7 @@ header {
   font-family: var(--mono);
   font-size: var(--fs-xs);
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* 状态徽章:胶囊底色 + 语义色,脉冲点表示"活" */
@@ -367,12 +369,14 @@ button:disabled, .btn:disabled {
   font-size: var(--fs-lg);
   font-weight: 600;
 }
-.status-uptime {
+/* 卡片标题右侧的 meta 位(运行时长等纯补充信息,不与状态焦点抢行) */
+.card-meta {
   margin-left: auto;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-xs);
   color: var(--text-muted);
+  white-space: nowrap;
 }
 .stat-grid {
   display: grid;
@@ -389,7 +393,7 @@ button:disabled, .btn:disabled {
 .stat-value {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: var(--fs-lg);
+  font-size: var(--fs-2xl);
   font-weight: 600;
   color: var(--text-main);
   white-space: nowrap;
@@ -859,6 +863,7 @@ button:disabled, .btn:disabled {
   .grid { grid-template-columns: 1fr; gap: 14px; }
   .grid > .card:last-child { grid-column: auto; }
   .card { padding: var(--sp-4); gap: 14px; }
+  .card-actions button { flex: 1 1 auto; }
   .terminal-card { padding: var(--sp-4); gap: 10px; }
   .terminal-header {
     flex-direction: column;
@@ -874,6 +879,7 @@ button:disabled, .btn:disabled {
     font-size: var(--fs-xs);
     padding: 10px;
   }
+  .stat-value { font-size: var(--fs-lg); }
   .modal-overlay {
     padding: var(--sp-3);
     padding-top: calc(24px + env(safe-area-inset-top, 0px));

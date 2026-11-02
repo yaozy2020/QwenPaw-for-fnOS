@@ -86,6 +86,7 @@
           </svg>
           服务监控
         </div>
+        <span class="card-meta" id="statusUptime"></span>
       </div>
       <div class="card-body">
         <!-- StatusCard(Preact 视图组件):挂载失败时保留静态兜底,结构与 StatusCardView 一致 -->
@@ -225,7 +226,7 @@
         </div>
       </div>
       <div class="card-actions">
-        <button class="btn-primary btn-sm" id="btnUpgradeAction" style="flex:1;" onclick="checkOrUpgrade()">执行更新至选定版本</button>
+        <button class="btn-primary btn-sm" id="btnUpgradeAction" onclick="checkOrUpgrade()">执行更新至选定版本</button>
         <button class="btn-danger-ghost btn-sm" id="btnUninstallKernel" style="display:none;" onclick="uninstallKernel()">仅卸载内核</button>
       </div>
     </div>
@@ -253,7 +254,7 @@
         <button class="btn-outline btn-sm" onclick="clearTerminalLogs()">清屏</button>
       </div>
     </div>
-    <div class="terminal-body" id="logTerminal">正在加载实时日志...</div>
+    <div class="terminal-body" id="logTerminal"></div>
     <div class="terminal-footer">
       <button class="btn-outline btn-sm" id="logPrevBtn" onclick="logGoPrev()">上一页</button>
       <span id="logPageIndicator">第 - 页</span>
@@ -300,7 +301,7 @@
           <div class="modal-subtitle" id="upSubTitle">正在执行 pip 安装与环境构建，期间服务将自动重启</div>
         </div>
       </div>
-      <div class="upgrade-terminal-body" id="upTerminal">正在建立升级日志管道...</div>
+      <div class="upgrade-terminal-body" id="upTerminal"></div>
       <div class="modal-actions">
         <button class="btn-primary btn-block" id="btnUpClose" onclick="closeUpgradeModal()" style="display:none;">完成并返回控制台</button>
       </div>
