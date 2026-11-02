@@ -109,9 +109,15 @@
           </div>
         </div>
       </div>
-      <div class="card-actions">
-        <button class="btn-outline btn-sm" style="flex:1" onclick="controlService('restart')">重启服务</button>
-        <button class="btn-danger btn-sm" style="flex:1" onclick="controlService('stop')">停止服务</button>
+      <!-- 按钮随运行状态切换:停止态必须给出"启动"入口,
+           否则用户只能借"重启"间接启动(视觉上是重启,语义错位) -->
+      <div class="card-actions" id="serviceActions">
+        <button class="btn-primary btn-sm" style="flex:1" id="btnStartService"
+                onclick="controlService('start')" hidden>启动服务</button>
+        <button class="btn-outline btn-sm" style="flex:1" id="btnRestartService"
+                onclick="controlService('restart')" hidden>重启服务</button>
+        <button class="btn-danger btn-sm" style="flex:1" id="btnStopService"
+                onclick="controlService('stop')" hidden>停止服务</button>
       </div>
     </div>
 

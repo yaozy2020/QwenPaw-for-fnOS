@@ -2,7 +2,9 @@
 // 渲染契约:vanilla 轮询(fetchStatus 等)每拍以最新数据调 render() 重渲染,
 // Preact 负责 diff —— 行为语义(节奏/隐藏页暂停/旁路副作用)全部留在 vanilla。
 export interface StatusData {
-  installed: boolean | undefined; // undefined = 尚未取得首个快照
+  // undefined = 尚未取得首个快照；null = 后端不可达、安装状态未知
+  // 三态必须区分:把"未知"写成 false 会被下游当成"确定未安装"
+  installed: boolean | null | undefined;
   running: boolean;
   pid: string;
   startAt: number | null; // epoch 秒

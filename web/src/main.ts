@@ -178,6 +178,34 @@ const API_BASE = (function() {
       setTimeout(() => t.classList.remove("show"), 2500);
     }
 
+    // 卡片标题 meta 位(运行时长)的唯一写入点:正常/降级两分支共用,防口径漂移
+    // 服务操作区按运行态切换。
+    // 停止态必须给出"启动"入口 —— 否则用户只能点"重启"来恢复,
+    // 虽然结果正确,但语义误导(用户以为在重启,实则是启动)。
+    // degraded(后端不可达)时全部禁用:此时点任何操作都会失败,不如不给入口。
+    function setServiceActions(running: boolean, installed: boolean, degraded: boolean): void {
+      const start = document.getElementById("btnStartService");
+      const restart = document.getElementById("btnRestartService");
+      const stop = document.getElementById("btnStopService");
+      if (!start || !restart || !stop) return;
+
+      // 未安装内核时没有任何可执行的操作
+      const usable = installed && !degraded;
+      start.hidden = !(usable && !running);
+      restart.hidden = !(usable && running);
+      stop.hidden = !(usable && running);
+
+      for (const btn of [start, restart, stop]) {
+        btn.disabled = degraded;
+        btn.title = degraded ? "控制台无法连接监督者，暂不可操作" : "";
+      }
+    }
+
+    function setStatusUptime(text) {
+      const el = document.getElementById("statusUptime");
+      if (el) el.innerText = text;
+    }
+
     // 服务状态监控 (全空值保护，稳健守护)
     async function fetchStatus() {
       if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
@@ -203,6 +231,7 @@ const API_BASE = (function() {
             memKB: typeof data.memKB === "number" ? data.memKB : null,
           }, cardMount);
         }
+        setServiceActions(Boolean(data.running), data.installed !== false, false);
 
         if (notInstalled) {
           // 内核未安装（首次安装模式）：提示去版本管理安装
@@ -297,12 +326,9 @@ const API_BASE = (function() {
           }
         }
 
-        const upEl = document.getElementById("statusUptime");
-        if (upEl) {
-          upEl.innerText = (!notInstalled && data.running && data.startAt)
-            ? "已运行 " + formatUptime(Math.floor(Date.now() / 1000) - data.startAt)
-            : "";
-        }
+        setStatusUptime((!notInstalled && data.running && data.startAt)
+          ? "已运行 " + formatUptime(Math.floor(Date.now() / 1000) - data.startAt)
+          : "");
 
         const portEl = document.getElementById("valPort");
         const activePort = data.port || "18088";
@@ -324,7 +350,10 @@ const API_BASE = (function() {
         const cardMount = document.getElementById("statusCardMount");
         if (cardMount) {
           renderStatusCard({
-            installed: false,
+            // 不可达时安装状态"未知",不能写 false。
+            // false 的语义是"确定未安装",会被下游当作事实派生逻辑,
+            // 造成"状态不可达"与"内核未安装"同时出现的矛盾提示。
+            installed: null,
             running: false,
             pid: "-",
             startAt: null,
@@ -333,8 +362,8 @@ const API_BASE = (function() {
             degraded: true, // 如实显示"状态不可达",不得伪装成"内核未安装"
           }, cardMount);
         }
-        const upEl = document.getElementById("statusUptime");
-        if (upEl) upEl.innerText = "";
+        setStatusUptime("—"); // 保持 meta 位稳定,与卡内"状态不可达"呼应
+        setServiceActions(false, false, true); // 不可达时不给操作入口
         const valVersion = document.getElementById("valVersion");
         if (valVersion) valVersion.innerText = "无法获取";
         const valAuth = document.getElementById("valAuthStatus");
@@ -601,6 +630,10 @@ const API_BASE = (function() {
     }
 
     let currentRunningVersion = "";
+    // 操作发起时的动作快照("安装"/"重新安装"/"升级"/"降级")。
+    // 终态标题必须用它,不能在终态重算 —— 安装成功后当前版本已变成所选版本,
+    // 重算会把"安装"误判成"重新安装"。
+    let pendingInstallAction = "";
 
     // 降级判定:优先读取后端权威 action (upgrade/downgrade/reinstall/install);
     // 列表外版本退回索引与比较
@@ -674,6 +707,7 @@ const API_BASE = (function() {
 
       if (!currentRunningVersion) {
         // 初装分支: 内核尚未安装,明确使用"安装"语义,绝不误提示为升级/降级
+        pendingInstallAction = "安装";
         ok = await showModal({
           title: "安装内核确认",
           message: `即将为您下载并部署 QwenPaw v${selectedVersion} 核心运行环境，首次安装约需 1~3 分钟。确认开始？`,
@@ -682,6 +716,7 @@ const API_BASE = (function() {
           cancelText: "取消"
         });
       } else if (isSameVersion(currentRunningVersion, selectedVersion)) {
+        pendingInstallAction = "重新安装";
         ok = await showModal({
           title: "重新安装当前版本",
           message: `将通过独立暂存环境重新安装 QwenPaw v${selectedVersion}，期间服务会短暂重启。用户配置与记忆保持不变，失败时自动恢复当前环境。确认继续？`,
@@ -690,6 +725,7 @@ const API_BASE = (function() {
           cancelText: "取消"
         });
       } else if (isDowngradeOf(currentRunningVersion, selectedVersion)) {
+        pendingInstallAction = "降级";
         ok = await showModal({
           title: "降级风险警告",
           message: `你正准备将 QwenPaw 降级至旧版本 v${selectedVersion}（当前运行为 v${currentRunningVersion}）。\n\n【已知风险】跨版本反向降级可能导致新版配置文件、会话记忆结构不兼容或依赖库冲突，甚至引起服务启动异常！\n\n如无明确排障需求，建议保持现状或升级。是否确认强行降级？`,
@@ -698,6 +734,7 @@ const API_BASE = (function() {
           cancelText: "取消并返回"
         });
       } else {
+        pendingInstallAction = "升级";
         ok = await showModal({
           title: "在线升级确认",
           message: `即将安装 QwenPaw v${selectedVersion} 并重新构建环境，期间服务将短暂重启。确认继续？`,
@@ -706,7 +743,10 @@ const API_BASE = (function() {
           cancelText: "取消"
         });
       }
-      if (!ok) return;
+      if (!ok) {
+        pendingInstallAction = "";
+        return;
+      }
 
       // 触发前取基线:seq + 是否已有任务在跑。已有任务直接附加查看,禁止重复创建
       let baseline = null;
@@ -882,12 +922,16 @@ const API_BASE = (function() {
             document.getElementById("upDoneIcon").style.display = "inline-block";
             document.getElementById("btnUpClose").style.display = "block";
 
+            // 终态必须用"操作发起时"的动作,不能重算:
+            // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
+            // 导致空环境首次安装也显示"重新安装已顺利完成"。
+            const doneAction = pendingInstallAction || currentInstallAction();
             if (isFailed) {
-              document.getElementById("upTitle").innerText = `${currentInstallAction()}遇到问题`;
+              document.getElementById("upTitle").innerText = `${doneAction}遇到问题`;
               document.getElementById("upSubTitle").innerText = "请查看详细日志；若下载源不可用，请换源或检查 NAS 网络后重试。原内核环境已保留或恢复";
               document.getElementById("upDoneIcon").style.color = "var(--danger)";
             } else {
-              document.getElementById("upTitle").innerText = `${currentInstallAction()}已顺利完成！`;
+              document.getElementById("upTitle").innerText = `${doneAction}已顺利完成！`;
               document.getElementById("upSubTitle").innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
               document.getElementById("upDoneIcon").style.color = "var(--success)";
             }
@@ -1009,4 +1053,6 @@ const API_BASE = (function() {
       saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
       closeUpgradeModal, logGoPrev, logGoNext, logGoLatest,
       toggleMirrorDropdown, pickMirror, attachRunningInstall,
+      // 遗漏会直接报 "uninstallKernel is not defined"(内联 onclick 找不到该符号)
+      uninstallKernel,
     });

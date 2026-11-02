@@ -45,7 +45,7 @@ html[data-theme="dark"] {
   --brand-icon-border: rgba(59, 130, 246, 0.22);
   --text-main: #f1f5f9;
   --text-sub: #a2adbb;
-  --text-muted: #6b7686;
+  --text-muted: #7d8894;
   --divider: rgba(255, 255, 255, 0.06);
   --token-bg: #0c1017;
   --primary: #3b82f6;
@@ -81,7 +81,7 @@ html[data-theme="light"] {
   --brand-icon-border: #d3e3fd;
   --text-main: #101828;
   --text-sub: #475467;
-  --text-muted: #8a94a6;
+  --text-muted: #626e80;
   --divider: rgba(16, 24, 40, 0.07);
   --token-bg: #f2f4f7;
   --primary: #2563eb;
@@ -322,6 +322,8 @@ button:disabled, .btn:disabled {
   gap: var(--sp-2);
   margin-top: auto;
 }
+/* hidden 属性必须真正生效:通用 button/布局规则会覆盖 UA 的 [hidden]{display:none} */
+.card-actions > button[hidden] { display: none !important; }
 .card-note {
   font-size: var(--fs-sm);
   color: var(--text-muted);
