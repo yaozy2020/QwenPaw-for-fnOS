@@ -198,7 +198,12 @@ def main():
             packed_path = res_data["results"][0]["path"]
             final_dst = os.path.join(out_dir, packed_file)
 
-            shutil.copy2(packed_path, final_dst)
+            if os.path.exists(final_dst):
+                try:
+                    os.remove(final_dst)
+                except OSError:
+                    pass
+            shutil.copyfile(packed_path, final_dst)
             normalize_fpk(final_dst)
             with open(final_dst, "rb") as f:
                 sha = hashlib.sha256(f.read()).hexdigest()

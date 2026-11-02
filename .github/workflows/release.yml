@@ -1,13 +1,15 @@
 name: Release
 
-# 仅手动触发：推 tag 不会自动打包，避免半成品 tag 意外出包。
-# 发版流程：确认版本 → git tag vX.Y.Z && git push → Actions → Release → Run workflow → 填入 tag 名
+# 手动触发或推送发布标签触发
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v1.0.7)"
+        description: "Release Tag (e.g. v2.1.0 or v2.1.0-rc.2)"
         required: true
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -25,22 +27,40 @@ jobs:
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ github.event.inputs.tag }}"
           else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF#refs/tags/}"
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Verify tag matches manifest version
+      # [1] 标签与 manifest 映射校验
+      # 映射规则：
+      #   v2.1.0-rc.2 -> manifest 2.1.0-2 -> prerelease=true
+      #   v2.1.0      -> manifest 2.1.0   -> prerelease=false
+      - name: Verify tag matches manifest mapping
+        id: verify
         run: |
-          manifest_version=$(awk -F= '/^version/ {gsub(/ /,"",$2); print $2; exit}' manifest)
-          expected="${{ steps.tag.outputs.tag }}"
-          expected="${expected#v}"
-          echo "manifest=$manifest_version  tag=$expected"
-          if [ "$manifest_version" != "$expected" ]; then
-            echo "::error::manifest 版本号与 tag 不一致"
-            exit 1
+          python3 scripts/verify-release-tag.py "${{ steps.tag.outputs.tag }}" --github-output
+
+      # [2] 不可变性校验：防止覆盖已存在 Release 资产
+      - name: Check release immutability
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            ASSET_COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
+            if [ "$ASSET_COUNT" -gt 0 ]; then
+              echo "::error::Release $TAG 已经存在且包含 $ASSET_COUNT 个已发布资产。严禁覆盖或重写已有 Release！"
+              exit 1
+            else
+              echo "Release $TAG 存在但无资产，允许继续发布。"
+            fi
+          else
+            echo "Release $TAG 尚未创建，校验通过。"
           fi
 
+      # [3] 文件权限检查
       - name: Verify git exec bits
         run: |
           for f in app/ui/api.cgi app/ui/index.cgi cmd/main build.sh tools/fnpack; do
@@ -48,29 +68,120 @@ jobs:
             [ "$mode" = "100755" ] || { echo "::error::$f 应为 100755,实际 ${mode:-缺失}"; exit 1; }
           done
 
-      - name: Preflight + AUDIT
+      # [4] 静态检查与门禁
+      - name: Preflight + AUDIT + Unit Tests
         run: |
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
+          (cd supervisor && cargo test --locked)
 
-      # 控制台经 esbuild 编译(web/src → 单文件 index.html);fnpack 为仓库内
-      # vendor 的静态 ELF（x86-64，任意 Linux 可跑），不再依赖容器。
-      # npm ci 保证按锁文件安装;build.sh 内含 cargo --locked 构建 + FPK 内容审计。
-      - name: Build fpk (vendored static fnpack)
-        env:
-          FPK_OUT: ${{ github.workspace }}
-          FNPACK_BIN: ${{ github.workspace }}/tools/fnpack
+      - name: Prepare build environment
         run: |
           npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
-          bash build.sh
-          ls -lh qwenpaw_v*.fpk
 
+      # [5] 双构建 SHA256 对比 (可重现构建门禁)
+      - name: Dual-build reproducible verification
+        id: build
+        env:
+          FNPACK_BIN: ${{ github.workspace }}/tools/fnpack
+        run: |
+          DIR1="${RUNNER_TEMP}/build1"
+          DIR2="${RUNNER_TEMP}/build2"
+          mkdir -p "$DIR1" "$DIR2"
+
+          echo "=== 第一次构建 ==="
+          FPK_OUT="$DIR1" bash build.sh
+          FPK_NAME=$(basename $(ls "$DIR1"/qwenpaw_v*.fpk))
+          SHA1=$(sha256sum "$DIR1/$FPK_NAME" | awk '{print $1}')
+
+          echo "=== 第二次构建 ==="
+          FPK_OUT="$DIR2" bash build.sh
+          SHA2=$(sha256sum "$DIR2/$FPK_NAME" | awk '{print $1}')
+
+          echo "Build 1 SHA256: $SHA1"
+          echo "Build 2 SHA256: $SHA2"
+
+          if [ "$SHA1" != "$SHA2" ]; then
+            echo "::error::双构建 SHA256 不一致，违反确定性可重现构建约束！"
+            exit 1
+          fi
+
+          echo "双构建一致性校验完全通过！"
+          cp "$DIR1/$FPK_NAME" "${{ github.workspace }}/$FPK_NAME"
+          cp "$DIR1/$FPK_NAME.sha256" "${{ github.workspace }}/$FPK_NAME.sha256"
+          echo "fpk_name=$FPK_NAME" >> "$GITHUB_OUTPUT"
+          echo "fpk_sha256=$SHA1" >> "$GITHUB_OUTPUT"
+
+      # [6] FPK 内容全量审计
+      - name: Audit generated FPK
+        run: |
+          bash scripts/audit-fpk.sh "${{ github.workspace }}/${{ steps.build.outputs.fpk_name }}"
+
+      # [7] 自动生成包含“已知限制”的 Release 说明
+      - name: Generate release notes with known limitations
+        id: notes
+        run: |
+          FPK_NAME="${{ steps.build.outputs.fpk_name }}"
+          SHA256="${{ steps.build.outputs.fpk_sha256 }}"
+          VERSION="${{ steps.verify.outputs.manifest_version }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+
+          cat <<EOF > release_notes.md
+          # QwenPaw for fnOS ${TAG} (外壳版本 v${VERSION})
+
+          ### 📦 发布包校验清单
+          - **安装包**: \`${FPK_NAME}\`
+          - **SHA256**: \`${SHA256}\`
+
+          ---
+
+          ### ⚠️ 已知限制与运行说明 (Known Limitations)
+          1. **桌面图标动态隐藏限制**：
+             - 由于飞牛 fnOS 桌面平台采用静态应用索引与桌面会话缓存机制，内核处于未安装或仅卸载状态时，外壳设置的 \`NoDisplay=true\` 状态可能不会立即在当前打开的桌面视图中消失；
+             - 如需刷新图标状态，可按 \`F5\` 刷新浏览器页面或重新进入应用中心。
+          2. **独立事务自愈保障**：
+             - 本版本已正式闭环 venv 独立事务状态机。安装中途如遭遇断电或异常中断，监督者重启时会自动回滚或自愈，保障环境单一权威。
+          3. **服务端口修改说明**：
+             - 修改端口后监督者会自动热重启，请使用新端口访问管理控制台。
+          EOF
+          cat release_notes.md
+
+      # [8] 创建并上传 Release
       - name: Create GitHub Release
+        id: create_release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: QwenPaw for fnOS ${{ steps.tag.outputs.tag }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.verify.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: |
-            ${{ github.workspace }}/qwenpaw_v*.fpk
-            ${{ github.workspace }}/qwenpaw_v*.fpk.sha256
+            ${{ github.workspace }}/${{ steps.build.outputs.fpk_name }}
+            ${{ github.workspace }}/${{ steps.build.outputs.fpk_name }}.sha256
+
+      # [9] 资产回读校验：从 GitHub 下载已上传资产并二次核对 SHA256
+      - name: Verify release assets read-back
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          FPK_NAME="${{ steps.build.outputs.fpk_name }}"
+          EXPECTED_SHA="${{ steps.build.outputs.fpk_sha256 }}"
+
+          DOWNLOAD_DIR="${RUNNER_TEMP}/readback"
+          mkdir -p "$DOWNLOAD_DIR"
+          cd "$DOWNLOAD_DIR"
+
+          echo "从 Release $TAG 回读下载 $FPK_NAME ..."
+          gh release download "$TAG" -p "$FPK_NAME"
+
+          DOWNLOADED_SHA=$(sha256sum "$FPK_NAME" | awk '{print $1}')
+          echo "本地构建 SHA256: $EXPECTED_SHA"
+          echo "回读下载 SHA256: $DOWNLOADED_SHA"
+
+          if [ "$EXPECTED_SHA" != "$DOWNLOADED_SHA" ]; then
+            echo "::error::Release 资产回读 SHA256 不匹配！远程资产可能损坏或被截断！"
+            exit 1
+          fi
+          echo "Release 资产回读二次核验完全一致！"

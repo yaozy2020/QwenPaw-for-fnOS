@@ -183,27 +183,148 @@ struct Inner {
     cancelled: bool,
 }
 
-struct VenvTransaction {
-    active: std::path::PathBuf,
-    staged: std::path::PathBuf,
-    backup: std::path::PathBuf,
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TxPhase {
+    Prepared,
+    Activated,
+    HealthChecked,
+    Committed,
+    RolledBack,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct VenvTxRecord {
+    pub schema_version: u32,
+    pub tx_id: String,
+    pub phase: TxPhase,
+    pub active: std::path::PathBuf,
+    pub staged: std::path::PathBuf,
+    pub backup: std::path::PathBuf,
+    pub had_active: bool,
+    pub target_version: String,
+    pub pin_path: std::path::PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashPoint {
+    AfterPrepare,
+    AfterActiveRenamedToBackup,
+    AfterStagedActivated,
+    AfterHealthChecked,
+    AfterPinWritten,
+    AfterCommit,
+}
+
+static TEST_CRASH_POINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[allow(dead_code)]
+pub fn set_test_crash_point(cp: Option<CrashPoint>) {
+    let val = match cp {
+        None => 0,
+        Some(CrashPoint::AfterPrepare) => 1,
+        Some(CrashPoint::AfterActiveRenamedToBackup) => 2,
+        Some(CrashPoint::AfterStagedActivated) => 3,
+        Some(CrashPoint::AfterHealthChecked) => 4,
+        Some(CrashPoint::AfterPinWritten) => 5,
+        Some(CrashPoint::AfterCommit) => 6,
+    };
+    TEST_CRASH_POINT.store(val, Ordering::SeqCst);
+}
+
+fn check_crash_point(point: CrashPoint) {
+    let current_test = TEST_CRASH_POINT.load(Ordering::SeqCst);
+    let matches_test = match point {
+        CrashPoint::AfterPrepare => current_test == 1,
+        CrashPoint::AfterActiveRenamedToBackup => current_test == 2,
+        CrashPoint::AfterStagedActivated => current_test == 3,
+        CrashPoint::AfterHealthChecked => current_test == 4,
+        CrashPoint::AfterPinWritten => current_test == 5,
+        CrashPoint::AfterCommit => current_test == 6,
+    };
+
+    let env_name = match point {
+        CrashPoint::AfterPrepare => "after_prepare",
+        CrashPoint::AfterActiveRenamedToBackup => "after_rename_backup",
+        CrashPoint::AfterStagedActivated => "after_activate",
+        CrashPoint::AfterHealthChecked => "after_health_checked",
+        CrashPoint::AfterPinWritten => "after_pin_written",
+        CrashPoint::AfterCommit => "after_commit",
+    };
+    let matches_env = std::env::var("QWENPAW_CRASH_POINT")
+        .map(|v| v.eq_ignore_ascii_case(env_name))
+        .unwrap_or(false);
+
+    if matches_test || matches_env {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        std::process::exit(137);
+    }
+}
+
+pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+    Ok(())
+}
+
+fn write_tx_record(tx_file: &Path, record: &VenvTxRecord) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = tx_file.with_extension("tmp");
+    let json_str = serde_json::to_string_pretty(record)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(json_str.as_bytes())?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, tx_file)?;
+    if let Some(p) = tx_file.parent() {
+        let _ = sync_dir(p);
+    }
+    Ok(())
+}
+pub struct VenvTransaction {
+    record: VenvTxRecord,
+    tx_file: std::path::PathBuf,
+    committed_or_rolled_back: bool,
 }
 
 impl VenvTransaction {
-    fn prepare(active: &Path, seq: u64) -> std::io::Result<Self> {
+    pub fn prepare(active: &Path, seq: u64, target_version: &str, pin_path: &Path) -> std::io::Result<Self> {
         let python = std::env::var("QWENPAW_PYTHON_BIN")
             .unwrap_or_else(|_| "/var/apps/python312/target/bin/python3".into());
-        Self::prepare_with_python(active, seq, Path::new(&python))
+        Self::prepare_with_python(active, seq, target_version, pin_path, Path::new(&python))
     }
 
-    fn prepare_with_python(active: &Path, seq: u64, python: &Path) -> std::io::Result<Self> {
+    pub fn prepare_with_python(
+        active: &Path,
+        seq: u64,
+        target_version: &str,
+        pin_path: &Path,
+        python: &Path,
+    ) -> std::io::Result<Self> {
         let parent = active.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
         })?;
         let suffix = format!("{}.{}", std::process::id(), seq);
         let staged = parent.join(format!(".venv.staging.{suffix}"));
         let backup = parent.join(format!(".venv.rollback.{suffix}"));
-        let prepared = if active.exists() {
+        let tx_file = parent.join(format!(".venv.transaction.{suffix}.json"));
+        let had_active = active.exists();
+
+        let prepared = if had_active {
             copy_tree(active, &staged)
         } else {
             std::process::Command::new(python)
@@ -223,51 +344,276 @@ impl VenvTransaction {
             let _ = std::fs::remove_dir_all(&staged);
             return Err(error);
         }
-        Ok(Self { active: active.to_path_buf(), staged, backup })
-    }
 
-    fn python(&self) -> std::path::PathBuf {
-        self.staged.join("bin/python3")
-    }
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix,
+            phase: TxPhase::Prepared,
+            active: active.to_path_buf(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active,
+            target_version: target_version.to_string(),
+            pin_path: pin_path.to_path_buf(),
+        };
 
-    fn activate(&mut self) -> std::io::Result<()> {
-        let had_active = self.active.exists();
-        if had_active {
-            std::fs::rename(&self.active, &self.backup)?;
+        if let Err(e) = write_tx_record(&tx_file, &record) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(e);
         }
-        if let Err(error) = std::fs::rename(&self.staged, &self.active) {
-            if had_active {
-                let _ = std::fs::rename(&self.backup, &self.active);
+        check_crash_point(CrashPoint::AfterPrepare);
+
+        Ok(Self {
+            record,
+            tx_file,
+            committed_or_rolled_back: false,
+        })
+    }
+
+    pub fn python(&self) -> std::path::PathBuf {
+        self.record.staged.join("bin/python3")
+    }
+
+    pub fn activate(&mut self) -> std::io::Result<()> {
+        let parent = self.record.active.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
+        })?;
+
+        if self.record.had_active && self.record.active.exists() {
+            std::fs::rename(&self.record.active, &self.record.backup)?;
+            let _ = sync_dir(parent);
+            check_crash_point(CrashPoint::AfterActiveRenamedToBackup);
+        }
+
+        if let Err(error) = std::fs::rename(&self.record.staged, &self.record.active) {
+            if self.record.had_active && self.record.backup.exists() {
+                let _ = std::fs::rename(&self.record.backup, &self.record.active);
+                let _ = sync_dir(parent);
             }
             return Err(error);
         }
+        let _ = sync_dir(parent);
+
+        self.record.phase = TxPhase::Activated;
+        write_tx_record(&self.tx_file, &self.record)?;
+        check_crash_point(CrashPoint::AfterStagedActivated);
         Ok(())
     }
 
-    fn rollback(&mut self) -> std::io::Result<()> {
-        std::fs::rename(&self.active, &self.staged)?;
-        if self.backup.exists() {
-            if let Err(error) = std::fs::rename(&self.backup, &self.active) {
-                let _ = std::fs::rename(&self.staged, &self.active);
-                return Err(error);
-            }
-        }
-        std::fs::remove_dir_all(&self.staged)
+    pub fn health_checked(&mut self) -> std::io::Result<()> {
+        self.record.phase = TxPhase::HealthChecked;
+        write_tx_record(&self.tx_file, &self.record)?;
+        check_crash_point(CrashPoint::AfterHealthChecked);
+        Ok(())
     }
 
-    fn commit(self) -> std::io::Result<()> {
-        if self.backup.exists() {
-            std::fs::remove_dir_all(&self.backup)
+    pub fn rollback(&mut self) -> std::io::Result<()> {
+        let parent = self.record.active.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
+        })?;
+
+        if self.record.had_active {
+            if self.record.active.exists() {
+                let _ = std::fs::remove_dir_all(&self.record.active);
+            }
+            if self.record.backup.exists() {
+                let _ = std::fs::rename(&self.record.backup, &self.record.active);
+                let _ = sync_dir(parent);
+            }
         } else {
-            Ok(())
+            // 首次安装没有旧环境：回滚后保持未安装，不留空版本钉
+            if self.record.active.exists() {
+                let _ = std::fs::remove_dir_all(&self.record.active);
+                let _ = sync_dir(parent);
+            }
+            if self.record.pin_path.exists() {
+                let _ = std::fs::remove_file(&self.record.pin_path);
+            }
         }
+
+        if self.record.staged.exists() {
+            let _ = std::fs::remove_dir_all(&self.record.staged);
+            let _ = sync_dir(parent);
+        }
+        if self.record.backup.exists() {
+            let _ = std::fs::remove_dir_all(&self.record.backup);
+            let _ = sync_dir(parent);
+        }
+
+        self.record.phase = TxPhase::RolledBack;
+        let _ = std::fs::remove_file(&self.tx_file);
+        let _ = sync_dir(parent);
+        self.committed_or_rolled_back = true;
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> std::io::Result<()> {
+        let parent = self.record.active.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
+        })?;
+
+        self.record.phase = TxPhase::Committed;
+        write_tx_record(&self.tx_file, &self.record)?;
+        check_crash_point(CrashPoint::AfterPinWritten);
+
+        if self.record.backup.exists() {
+            let _ = std::fs::remove_dir_all(&self.record.backup);
+            let _ = sync_dir(parent);
+        }
+        if self.record.staged.exists() {
+            let _ = std::fs::remove_dir_all(&self.record.staged);
+            let _ = sync_dir(parent);
+        }
+
+        check_crash_point(CrashPoint::AfterCommit);
+        let _ = std::fs::remove_file(&self.tx_file);
+        let _ = sync_dir(parent);
+        self.committed_or_rolled_back = true;
+        Ok(())
     }
 }
 
 impl Drop for VenvTransaction {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.staged);
+        if !self.committed_or_rolled_back {
+            let _ = std::fs::remove_dir_all(&self.record.staged);
+        }
     }
+}
+
+/// 监督者启动恢复:恢复未完成事务(崩溃/SIGKILL/断电自愈)
+pub fn recover_pending_transactions(
+    venv_dir: &Path,
+    pin_path: &Path,
+    log: Option<&dyn Fn(&str)>,
+) -> std::io::Result<usize> {
+    let parent = match venv_dir.parent() {
+        Some(p) if p.exists() => p,
+        _ => return Ok(0),
+    };
+    let mut recovered_count = 0;
+    let read_dir = match std::fs::read_dir(parent) {
+        Ok(rd) => rd,
+        Err(_) => return Ok(0),
+    };
+
+    let mut tx_files = Vec::new();
+    let mut orphan_stagings = Vec::new();
+
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(".venv.transaction.") && name_str.ends_with(".json") {
+            tx_files.push(entry.path());
+        } else if name_str.starts_with(".venv.staging.") {
+            orphan_stagings.push(entry.path());
+        }
+    }
+
+    tx_files.sort();
+
+    for tx_path in &tx_files {
+        let content = match std::fs::read_to_string(tx_path) {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = std::fs::remove_file(tx_path);
+                continue;
+            }
+        };
+        let record: VenvTxRecord = match serde_json::from_str(&content) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = std::fs::remove_file(tx_path);
+                continue;
+            }
+        };
+
+        if let Some(logf) = log {
+            logf(&format!(
+                "recovering venv transaction id={} phase={:?}",
+                record.tx_id, record.phase
+            ));
+        }
+
+        match record.phase {
+            TxPhase::Prepared => {
+                // Prepared：删除暂存环境，原环境不动
+                if record.staged.exists() {
+                    let _ = std::fs::remove_dir_all(&record.staged);
+                    let _ = sync_dir(parent);
+                }
+                let _ = std::fs::remove_file(tx_path);
+                let _ = sync_dir(parent);
+            }
+            TxPhase::Activated | TxPhase::HealthChecked => {
+                // Activated、HealthChecked：默认回滚，保守路径
+                if record.had_active {
+                    if record.active.exists() {
+                        let _ = std::fs::remove_dir_all(&record.active);
+                    }
+                    if record.backup.exists() {
+                        let _ = std::fs::rename(&record.backup, &record.active);
+                        let _ = sync_dir(parent);
+                    }
+                } else {
+                    // 首次安装没有旧环境：回滚后保持未安装，不留空版本钉
+                    if record.active.exists() {
+                        let _ = std::fs::remove_dir_all(&record.active);
+                        let _ = sync_dir(parent);
+                    }
+                    if record.pin_path.exists() {
+                        let _ = std::fs::remove_file(&record.pin_path);
+                    } else if pin_path.exists() {
+                        let _ = std::fs::remove_file(pin_path);
+                    }
+                }
+                if record.staged.exists() {
+                    let _ = std::fs::remove_dir_all(&record.staged);
+                    let _ = sync_dir(parent);
+                }
+                if record.backup.exists() {
+                    let _ = std::fs::remove_dir_all(&record.backup);
+                    let _ = sync_dir(parent);
+                }
+                let _ = std::fs::remove_file(tx_path);
+                let _ = sync_dir(parent);
+            }
+            TxPhase::Committed => {
+                // Committed：保留新环境和版本钉，只清理旧备份
+                if record.backup.exists() {
+                    let _ = std::fs::remove_dir_all(&record.backup);
+                    let _ = sync_dir(parent);
+                }
+                if record.staged.exists() {
+                    let _ = std::fs::remove_dir_all(&record.staged);
+                    let _ = sync_dir(parent);
+                }
+                let _ = std::fs::remove_file(tx_path);
+                let _ = sync_dir(parent);
+            }
+            TxPhase::RolledBack => {
+                if record.staged.exists() {
+                    let _ = std::fs::remove_dir_all(&record.staged);
+                }
+                if record.backup.exists() {
+                    let _ = std::fs::remove_dir_all(&record.backup);
+                }
+                let _ = std::fs::remove_file(tx_path);
+                let _ = sync_dir(parent);
+            }
+        }
+        recovered_count += 1;
+    }
+
+    // 清理无对应事务文件的孤儿 staging 目录
+    for staging_path in orphan_stagings {
+        if staging_path.exists() {
+            let _ = std::fs::remove_dir_all(&staging_path);
+            let _ = sync_dir(parent);
+        }
+    }
+
+    Ok(recovered_count)
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -475,7 +821,16 @@ impl InstallState {
             if this.abort_if_cancelled() {
                 return;
             }
-            let mut transaction = match VenvTransaction::prepare(Path::new(&venv_dir), task_seq) {
+            let target_hint = match &channel {
+                InstallChannel::Exact(v) => v.as_str(),
+                _ => "",
+            };
+            let mut transaction = match VenvTransaction::prepare(
+                Path::new(&venv_dir),
+                task_seq,
+                target_hint,
+                Path::new(&pin_path),
+            ) {
                 Ok(transaction) => transaction,
                 Err(error) => {
                     this.set(|g| {
@@ -759,6 +1114,11 @@ impl InstallState {
                             g.error = error;
                         });
                         return;
+                    }
+
+                    // 健康检查通过，落盘 HealthChecked 事务状态
+                    if let Err(e) = transaction.health_checked() {
+                        eprintln!("[Supervisor] record health checked failed: {e}");
                     }
 
                     if this.cancelled() {
@@ -1159,7 +1519,8 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&python, permissions).unwrap();
         let active = dir.join("venv");
-        let mut transaction = VenvTransaction::prepare_with_python(&active, 1, &python).unwrap();
+        let pin = dir.join("pin");
+        let mut transaction = VenvTransaction::prepare_with_python(&active, 1, "2.0.0", &pin, &python).unwrap();
         assert!(transaction.python().exists());
         assert!(!active.exists(), "暂存提交前不得创建活动 venv");
         transaction.activate().unwrap();
@@ -1309,4 +1670,215 @@ mod tests {
         assert!(!install_pid.exists(), "install.pid 未清理");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn recover_prepared_cleans_staging_and_leaves_active_untouched() {
+        let dir = fake_venv("rec-prepared");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        // 模拟执行到 AfterPrepare 并崩溃
+        let suffix = "9999.1";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("marker"), "staging-data").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Prepared,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(recovered, 1);
+        assert!(!staged.exists(), "Prepared 的暂存目录必须被清理");
+        assert!(!tx_file.exists(), "事务文件必须被清理");
+        assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_activated_rolls_back_to_previous_active_env() {
+        let dir = fake_venv("rec-activated");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.2";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        // 模拟已激活状态:老环境被改名为 backup,新环境已占据 active
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "new-halfway").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Activated,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old", "必须回滚为旧环境");
+        assert!(!backup.exists(), "回滚后 backup 目录不残留");
+        assert!(!tx_file.exists(), "事务文件已清理");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_activated_fresh_install_removes_active_and_leaves_uninstalled() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-fresh-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+
+        let suffix = "9999.3";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        // 首次安装没有旧环境(had_active: false)，模拟激活后被 kill
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "fresh-unhealthy").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Activated,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: false,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(recovered, 1);
+        assert!(!active.exists(), "首次安装回滚后不得保留活动环境");
+        assert!(!pin.exists(), "首次安装回滚后不得留有版本钉(保持未安装)");
+        assert!(!tx_file.exists(), "事务文件已清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_health_checked_rolls_back_conservatively() {
+        let dir = fake_venv("rec-healthchecked");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.4";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        // 健康检查后、版本钉写入前断电:保守回滚原环境
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "new-checked").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::HealthChecked,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old", "保守路径必须回滚原环境");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
+        assert!(!backup.exists());
+        assert!(!tx_file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_committed_preserves_new_env_and_cleans_backup() {
+        let dir = fake_venv("rec-committed");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "2.0.0\n").unwrap();
+
+        let suffix = "9999.5";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        // 版本钉写入后、备份清理前断电:保留新环境和版本钉，只清理旧备份
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("old-data"), "old").unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "new-committed").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Committed,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "new-committed", "新环境必须保留");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "2.0.0\n", "新版本钉必须保留");
+        assert!(!backup.exists(), "旧备份必须清理");
+        assert!(!tx_file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_staging_directories_are_cleaned_on_recovery() {
+        let dir = fake_venv("rec-orphan");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+
+        let orphan1 = dir.join(".venv.staging.orphan-1");
+        let orphan2 = dir.join(".venv.staging.orphan-2");
+        std::fs::create_dir_all(&orphan1).unwrap();
+        std::fs::create_dir_all(&orphan2).unwrap();
+
+        let _ = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert!(!orphan1.exists(), "孤儿 staging-1 必须被清理");
+        assert!(!orphan2.exists(), "孤儿 staging-2 必须被清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

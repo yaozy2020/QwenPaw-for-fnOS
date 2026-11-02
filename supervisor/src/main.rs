@@ -157,6 +157,18 @@ fn main() {
     // 凭 install.pid 找到候选,核对 /proc cmdline 身份(防 PID 复用误杀)后整组回收。
     cleanup_orphan_install(&cfg.var_dir);
 
+    // venv 事务恢复:上次被 SIGKILL/断电遗留的中间状态自愈(必须在收养内核与开放 API 前完成)
+    let pin_file = format!("{}/qwenpaw-version", cfg.var_dir);
+    match install::recover_pending_transactions(
+        std::path::Path::new(&cfg.kernel_venv),
+        std::path::Path::new(&pin_file),
+        Some(&*logf),
+    ) {
+        Ok(n) if n > 0 => logf(&format!("recovered {n} pending venv transaction(s)")),
+        Ok(_) => {}
+        Err(e) => logf(&format!("recover pending transactions error: {e}")),
+    }
+
     // supervisor 自身 pid(平台 stop 的目标)
     std::fs::write(&cfg.supervisor_pid_file, format!("{}\n", std::process::id())).ok();
 
