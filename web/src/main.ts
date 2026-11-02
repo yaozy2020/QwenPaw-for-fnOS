@@ -350,7 +350,10 @@ const API_BASE = (function() {
         const cardMount = document.getElementById("statusCardMount");
         if (cardMount) {
           renderStatusCard({
-            installed: false,
+            // 不可达时安装状态"未知",不能写 false。
+            // false 的语义是"确定未安装",会被下游当作事实派生逻辑,
+            // 造成"状态不可达"与"内核未安装"同时出现的矛盾提示。
+            installed: null,
             running: false,
             pid: "-",
             startAt: null,
