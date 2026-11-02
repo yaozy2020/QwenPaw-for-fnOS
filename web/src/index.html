@@ -309,7 +309,12 @@
       </div>
       <div class="upgrade-terminal-body" id="upTerminal"></div>
       <div class="modal-actions">
-        <button class="btn-primary btn-block" id="btnUpClose" onclick="closeUpgradeModal()" style="display:none;">完成并返回控制台</button>
+        <!-- 常驻出口:任务执行中也能关掉弹窗(转后台继续跑),
+             避免后端失联时页面被永久锁死 -->
+        <button class="btn-outline btn-block" id="btnUpMinimize"
+                onclick="minimizeUpgradeModal()">转到后台运行</button>
+        <button class="btn-primary btn-block" id="btnUpClose"
+                onclick="closeUpgradeModal()" style="display:none;">完成并返回控制台</button>
       </div>
     </div>
   </div>

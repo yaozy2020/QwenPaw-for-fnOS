@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-venv-recovery.sh — venv 事务持久化与 6 个中断点 SIGKILL 故障注入自愈回归
+# test-venv-recovery.sh — venv 事务持久化与 7 个中断点 SIGKILL 故障注入自愈回归
 # 验证：暂存复制完成、原目录改名后、新目录激活后、健康检查后、版本钉写入后、提交完成后
 # 每个中断点注入 SIGKILL 后，重启监督者均能自愈恢复，且：
 # 1. 只有一个权威活动环境
@@ -18,7 +18,7 @@ FAIL=0
 ok() { echo "  [  OK ] $1"; }
 bad() { echo "  [FAIL] $1"; FAIL=1; }
 
-echo "========== venv 事务持久化与 6 个中断点 SIGKILL 故障注入自愈测试 =========="
+echo "========== venv 事务持久化与 7 个中断点 SIGKILL 故障注入自愈测试 =========="
 
 MOCK_BASE="$(mktemp -d)"
 trap 'rm -rf "$MOCK_BASE"' EXIT INT TERM
@@ -205,26 +205,30 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
 }
 
 # 1. 暂存复制完成后注入 SIGKILL
-run_crash_test "after_prepare" "断点 1/6: 暂存复制完成后 SIGKILL" "1.0.0"
+run_crash_test "after_prepare" "断点 1/7: 暂存复制完成后 SIGKILL" "1.0.0"
 
 # 2. 原目录改名后注入 SIGKILL
-run_crash_test "after_rename_backup" "断点 2/6: 原目录改名后 SIGKILL" "1.0.0"
+run_crash_test "after_rename_backup" "断点 2/7: 原目录改名后 SIGKILL" "1.0.0"
 
 # 3. 新目录激活后注入 SIGKILL
-run_crash_test "after_activate" "断点 3/6: 新目录激活后 SIGKILL" "1.0.0"
+run_crash_test "after_activate" "断点 3/7: 新目录激活后 SIGKILL" "1.0.0"
 
 # 4. 健康检查后、版本钉写入前注入 SIGKILL
-run_crash_test "after_health_checked" "断点 4/6: 健康检查后、版本钉写入前 SIGKILL" "1.0.0"
+run_crash_test "after_health_checked" "断点 4/7: 健康检查后、版本钉写入前 SIGKILL" "1.0.0"
 
 # 5. 版本钉写入后、备份清理前注入 SIGKILL
-run_crash_test "after_pin_written" "断点 5/6: 版本钉写入后、备份清理前 SIGKILL" "2.0.0"
+run_crash_test "after_pin_written" "断点 5/7: 版本钉写入后、备份清理前 SIGKILL" "2.0.0"
 
 # 6. 提交完成后注入 SIGKILL
-run_crash_test "after_commit" "断点 6/6: 提交完成后 SIGKILL" "2.0.0"
+run_crash_test "after_commit" "断点 6/7: 提交完成后 SIGKILL" "2.0.0"
+
+# 7. 新内核已拉起并通过健康检查、事务尚未 commit 时 SIGKILL
+#    关键:恢复阶段必须先停进程再回滚磁盘,否则留下"进程新版 + 磁盘旧版"
+run_crash_test "after_spawn_before_commit" "断点 7/7: 内核已拉起、未提交时 SIGKILL" "1.0.0"
 
 echo "======================================================================"
 if [ $FAIL -eq 0 ]; then
-    echo "ALL 6 CRASH INJECTION TESTS PASSED"
+    echo "ALL 7 CRASH INJECTION TESTS PASSED"
     exit 0
 else
     echo "FAILED CRASH INJECTION TESTS"

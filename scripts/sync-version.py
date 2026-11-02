@@ -5,6 +5,7 @@ sync-version.py — 从 manifest 同步版本号到派生位置（README badge�
 
 设计：manifest 是版本号唯一真相源（SSOT）。
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -17,12 +18,6 @@ def read_manifest_version() -> str:
         if line.strip().startswith("version"):
             return line.split("=", 1)[1].strip()
     raise RuntimeError("manifest 中未找到 version")
-
-
-def cargo_version_target() -> str:
-    """Cargo.toml 用 PEP 440 风格版本号(Cargo 不认 fnOS 的 2.1.0-8 构建后缀),
-    这里由 manifest 派生出 'x.y.z' 或 'x.y.z-rc.N' 形式。"""
-    return version.split("-")[0] if "-" not in version else version
 
 
 def sync_readme(version: str) -> bool:
@@ -44,6 +39,12 @@ def sync_readme(version: str) -> bool:
 def main():
     version = read_manifest_version()
     check = "--check" in sys.argv
+    # tag 用于 rc 序号下界判定:发布时由 RELEASE_TAG / GITHUB_REF 注入
+    tag = os.environ.get("RELEASE_TAG", "")
+    if not tag:
+        ref = os.environ.get("GITHUB_REF", "")
+        if ref.startswith("refs/tags/"):
+            tag = ref[len("refs/tags/"):]
     print(f"manifest version = {version}")
     print(f"mode = {'check' if check else 'sync'}")
     print("-" * 60)
@@ -65,12 +66,29 @@ def main():
         ct = cargo.read_text(encoding="utf-8")
         m = re.search(r'^version = "(.+?)"$', ct, flags=re.M)
         cur = m.group(1) if m else "(missing)"
-        # 允许 x.y.z-rc.N 这种带预发布后缀的形式;构建号(N)不进 crate 版本
-        want = version if "-" in version and not re.match(r"^\d+\.\d+\.\d+-\d+$", version) else version.split("-")[0]
-        if re.match(r"^\d+\.\d+\.\d+-\d+$", version):
-            # manifest 形如 2.1.0-8:构建号不回写 crate 版本,沿用当前预发布串
-            want = cur if re.match(r"^\d+\.\d+\.\d+(-rc\.\d+)?$", cur) else version.split("-")[0]
-        ok = (cur == want)
+        # manifest 可能是 x.y.z、x.y.z-rc.N 或 x.y.z-N(构建号)。
+        # 构建号不写进 crate 版本(Cargo 不接受该形式),但主干 x.y.z 必须一致,
+        # 不能像以前那样在 x.y.z-N 形态下直接 want=cur —— 那等于放弃校验。
+        base = version.split("-")[0]
+        m_cur = re.match(r"^(\d+\.\d+\.\d+)(?:-(.+))?$", cur)
+        if not m_cur:
+            ok = False
+            want = f"{base}[-rc.N]"
+        else:
+            cur_base, cur_suffix = m_cur.group(1), m_cur.group(2)
+            # ① 主干必须一致
+            ok = cur_base == base
+            want = base
+            if not ok:
+                want = f"{base}[-rc.N]"
+            elif cur_suffix:
+                # ② 允许 rc.N 预发布串,但序号不得低于 tag 的 rc 序号
+                m_tag_rc = re.search(r"-rc\.(\d+)$", tag) if tag else None
+                m_cur_rc = re.match(r"^rc\.(\d+)$", cur_suffix)
+                if m_cur_rc and m_tag_rc:
+                    if int(m_cur_rc.group(1)) < int(m_tag_rc.group(1)):
+                        ok = False
+                        want = f"{base}-rc.{m_tag_rc.group(1)}"
         targets.append(("supervisor/Cargo.toml", cur, ok))
         if not check and not ok and m:
             cargo.write_text(

@@ -87,6 +87,10 @@ jobs:
           (cd supervisor && cargo test --locked)
           (cd supervisor && cargo clippy --locked --all-targets -- -D warnings)
 
+      # [4b] 生命周期回归(不需要二进制,可在前置阶段跑)
+      - name: Lifecycle regression
+        run: bash scripts/lint.sh
+
       - name: Prepare build environment
         run: |
           npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
@@ -124,6 +128,11 @@ jobs:
           cp "$DIR1/$FPK_NAME.sha256" "${{ github.workspace }}/$FPK_NAME.sha256"
           echo "fpk_name=$FPK_NAME" >> "$GITHUB_OUTPUT"
           echo "fpk_sha256=$SHA1" >> "$GITHUB_OUTPUT"
+
+      # [5b] 真实 SIGKILL 崩溃注入。必须放在 release 二进制就绪之后
+      # (脚本读 supervisor/target/release/qwenpaw-supervisor)。
+      - name: Crash injection (7 real SIGKILL points)
+        run: bash scripts/test-venv-recovery.sh
 
       # [6] FPK 内容全量审计
       - name: Audit generated FPK

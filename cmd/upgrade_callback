@@ -49,7 +49,10 @@ if ! kernel_installed; then
     MIRROR_URL="$(map_mirror_url "${PYPI_MIRROR}")"
     PIP_OPTS=""
     [ -n "${MIRROR_URL}" ] && PIP_OPTS="-i ${MIRROR_URL}"
-    sync_pip_mirror "${PYPI_MIRROR}" 1
+    # force=0:沿用用户已持久化的选择。venv 重建是被动修复路径,
+    # 不该因为一次重试就静默改写用户的镜像配置。
+    # 只有向导显式传入新选择时才允许覆盖。
+    sync_pip_mirror "${PYPI_MIRROR}" 0
 
     # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）。
     if VERSION_PIN="$(read_valid_version_pin "${PIN_FILE}")"; then

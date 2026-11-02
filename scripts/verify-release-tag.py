@@ -42,19 +42,42 @@ def parse_tag(tag: str) -> tuple[str, bool]:
     raise ValueError(f"无法识别的 Tag 格式: '{tag}'。期望格式如 'v2.1.0' 或 'v2.1.0-rc.2'")
 
 
-def previous_build_number() -> int | None:
-    """从已有 git 标签解析出最大的 FPK 构建号,用于保证构建号单调递增。
-    本地/CI 无 git 或无比对基线时返回 None(跳过检查)。"""
+def _git(*args: str) -> str | None:
     try:
-        out = subprocess.check_output(
-            ["git", "tag", "-l", "v*"],
-            cwd=ROOT, encoding="utf-8", stderr=subprocess.DEVNULL,
+        return subprocess.check_output(
+            ["git", *args], cwd=ROOT, encoding="utf-8", stderr=subprocess.DEVNULL
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    numbers = [int(m.group(1)) for m in
-               (re.match(r"^v\d+\.\d+\.\d+-(\d+)$", t.strip()) for t in out.split())
-               if m]
+
+
+def previous_build_number(release_base: str, exclude_tag: str = "") -> int | None:
+    """返回同一 release 主干(x.y.z)下已发布过的最大 FPK 构建号。
+
+    基线来源是"各 tag 指向提交里的 manifest 版本",而不是 tag 名本身 ——
+    tag 用 v2.1.0-rc.2 这类语义名,构建号写在 manifest 里,
+    只从 tag 名提取会永远零匹配,让整条检查形同虚设。
+
+    比较必须限定在同 x.y.z 域内:2.2.0-1 相对 2.1.0-8 是合法的构建号重置,
+    跨域比较会把它误判为倒退。
+    """
+    tags = _git("tag", "-l", "v*")
+    if tags is None:
+        return None
+    numbers: list[int] = []
+    for tag in (t.strip() for t in tags.split() if t.strip()):
+        # 排除正在发布的这个 tag 自己:它已指向当前 manifest,否则必然"自我倒退"
+        if tag == exclude_tag:
+            continue
+        content = _git("show", f"{tag}:manifest")
+        if not content:
+            continue
+        m = re.search(r"^version\s*=\s*(\S+)\s*$", content, flags=re.M)
+        if not m:
+            continue
+        mb = re.fullmatch(r"(\d+\.\d+\.\d+)-(\d+)", m.group(1))
+        if mb and mb.group(1) == release_base:
+            numbers.append(int(mb.group(2)))
     return max(numbers) if numbers else None
 
 
@@ -103,7 +126,8 @@ def main():
     m_build = re.search(r"-(\d+)$", actual_manifest)
     if m_build:
         build_no = int(m_build.group(1))
-        prev = previous_build_number()
+        release_base = actual_manifest.rsplit("-", 1)[0]
+        prev = previous_build_number(release_base, tag)
         if prev is not None and build_no <= prev:
             print(
                 f"ERROR: FPK 构建号倒退！manifest={actual_manifest} (build={build_no}) "
@@ -111,7 +135,10 @@ def main():
                 file=sys.stderr,
             )
             return 1
-        print(f"构建号单调性: 上一个 {prev if prev is not None else '(无)'} → 本次 {build_no}")
+        if prev is None:
+            print(f"构建号单调性: {release_base} 域内无历史基线, 跳过比较 (本次 {build_no})")
+        else:
+            print(f"构建号单调性: {release_base} 域内上一个 {prev} → 本次 {build_no}")
 
     if github_output_mode:
         import os

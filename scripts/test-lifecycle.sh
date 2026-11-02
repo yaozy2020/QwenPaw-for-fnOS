@@ -205,6 +205,15 @@ else
     bad "upgrade_init 阿里源回显异常: $out6d"
 fi
 
+# 6.5 官方源回显(曾漏:lib.sh 落盘 pypi.org 后回显回落成默认 aliyun)
+echo "https://pypi.org/simple" > "${T}/up_var/pip-mirror"
+out6e="$(TRIM_PKGVAR="${T}/up_var" bash "$ROOT/cmd/upgrade_init")"
+if [ "$out6e" = "wizard_pypi_mirror=official" ]; then
+    ok "upgrade_init 官方源正常回显"
+else
+    bad "upgrade_init 官方源回显异常(应为 official): $out6e"
+fi
+
 # ── [7] 配置修改回调 (config_callback) ──
 mkdir -p "${T}/cb_var" "${T}/cb_dest/cmd" "${T}/cb_dest/ui"
 cat > "${T}/cb_dest/ui/config" <<'EOF'

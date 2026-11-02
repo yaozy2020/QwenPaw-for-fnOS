@@ -24,6 +24,11 @@ const API_BASE = (function() {
     let refreshTimer = null;
     let upgradePollTimer = null;
     let upgradeStartedAt = 0;
+    // 轮询总超时:任务真挂起(upgrading 恒 true / 后端失联)时给用户一条逃逸路径
+    const UPGRADE_POLL_MAX_MS = 10 * 60 * 1000;
+    // 连续失败阈值:api.cgi 502 会走 catch,累计到此值即切"连接中断"终态
+    const UPGRADE_POLL_FAIL_MAX = 6; // ~30s(5s 间隔)
+    let pollFailureStreak = 0;
     let upPollLastAt = 0;
     // 任务跟踪:不再靠"phase 是否跳变"猜结果(首拍已是终态会漏判),按 seq 归属
     let upgradeSeenPhase = null;          // 首拍 phase(变化检测)
@@ -232,6 +237,12 @@ const API_BASE = (function() {
           }, cardMount);
         }
         setServiceActions(Boolean(data.running), data.installed !== false, false);
+        // 从降级态恢复时必须解禁,否则一次断连后按钮永久禁用
+        const upBtnOk = document.getElementById("btnUpgradeAction");
+        if (upBtnOk) {
+          upBtnOk.disabled = false;
+          upBtnOk.title = "";
+        }
 
         if (notInstalled) {
           // 内核未安装（首次安装模式）：提示去版本管理安装
@@ -364,6 +375,25 @@ const API_BASE = (function() {
         }
         setStatusUptime("—"); // 保持 meta 位稳定,与卡内"状态不可达"呼应
         setServiceActions(false, false, true); // 不可达时不给操作入口
+
+        // degraded 不变量必须覆盖全部入口,不能只收三个服务按钮 ——
+        // 否则会出现"状态不可达"与"可发起安装/卸载"同屏的矛盾
+        const upBtn = document.getElementById("btnUpgradeAction");
+        if (upBtn) {
+          upBtn.disabled = true;
+          upBtn.title = "控制台无法连接监督者，暂不可操作";
+        }
+        const unBtn = document.getElementById("btnUninstallKernel");
+        if (unBtn) unBtn.style.display = "none";
+        for (const tipId of ["kernelInstallTip", "installRunningTip"]) {
+          const tip = document.getElementById(tipId);
+          if (tip) tip.style.display = "none";
+        }
+        // 鉴权区的颜色也是状态派生的,不可达时要复位,否则残留上一次的绿/红
+        for (const id of ["valAuthStatus", "valAdminStatus"]) {
+          const el = document.getElementById(id);
+          if (el) el.style.color = "var(--text-muted)";
+        }
         const valVersion = document.getElementById("valVersion");
         if (valVersion) valVersion.innerText = "无法获取";
         const valAuth = document.getElementById("valAuthStatus");
@@ -763,6 +793,7 @@ const API_BASE = (function() {
         }
       } catch (e) { /* 基线未知时轮询退回 phase 跳变判定 */ }
 
+      pollFailureStreak = 0;
       openUpgradeModal(false, baseline);
 
       // 触发安装:fetch(keepalive) 为主 —— 能读到受理响应(成功 seq / busy 提示),
@@ -815,6 +846,11 @@ const API_BASE = (function() {
     }
 
     function openUpgradeModal(attach, baselineSeq) {
+      // 重新打开时复位:minimize 可见、close 隐藏
+      const minBtnReset = document.getElementById("btnUpMinimize");
+      if (minBtnReset) minBtnReset.style.display = "block";
+      const closeBtnReset = document.getElementById("btnUpClose");
+      if (closeBtnReset) closeBtnReset.style.display = "none";
       const modal = document.getElementById("upgradeModal");
       if (!modal) return;
       // 跟踪状态统一在此初始化(先于首次轮询,避免竞态)
@@ -855,6 +891,15 @@ const API_BASE = (function() {
       fetchLogs();
     }
 
+    // 后台运行:关闭弹窗但**不中断**任务,轮询继续,回到控制台可通过
+    // installRunningTip 重新进入。与 closeUpgradeModal 的区别就在这里。
+    function minimizeUpgradeModal() {
+      const modal = document.getElementById("upgradeModal");
+      if (modal) modal.classList.remove("active");
+      showToast("已转入后台运行，可在控制台查看进度");
+      fetchStatus();
+    }
+
     async function pollUpgradeLogs() {
       // 节流守卫:上游慢时不叠加请求(800ms 轮询 × 慢响应曾是界面卡顿源之一)
       const now = Date.now();
@@ -877,6 +922,8 @@ const API_BASE = (function() {
             }
           }
         }
+
+        pollFailureStreak = 0;
 
         if (statusRes.ok) {
           const sdata = await statusRes.json();
@@ -911,6 +958,8 @@ const API_BASE = (function() {
             document.getElementById("upTitle").innerText = "升级指令未送达";
             document.getElementById("upSubTitle").innerText = "请检查网络后关闭本窗口重试";
             document.getElementById("btnUpClose").style.display = "block";
+            const minBtn = document.getElementById("btnUpMinimize");
+            if (minBtn) minBtn.style.display = "none";
             return;
           }
 
@@ -921,6 +970,8 @@ const API_BASE = (function() {
             document.getElementById("upSpinner").style.display = "none";
             document.getElementById("upDoneIcon").style.display = "inline-block";
             document.getElementById("btnUpClose").style.display = "block";
+            const minBtn = document.getElementById("btnUpMinimize");
+            if (minBtn) minBtn.style.display = "none";
 
             // 终态必须用"操作发起时"的动作,不能重算:
             // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
@@ -939,6 +990,26 @@ const API_BASE = (function() {
         }
       } catch (e) {
         console.error("pollUpgradeLogs err:", e);
+        // 关键路径:supervisor 挂掉时 statusRes.ok 为 false 或直接抛错,
+        // 上面那个"未送达守卫"位于 if (statusRes.ok) 内,根本不会执行。
+        // 这里必须自己兜底,否则弹窗唯一出口 btnUpClose 永远 display:none,
+        // 整个页面被永久锁死。
+        pollFailureStreak += 1;
+        const elapsed = Date.now() - upgradeStartedAt;
+        const timedOut = elapsed > UPGRADE_POLL_MAX_MS;
+        if (timedOut || pollFailureStreak >= UPGRADE_POLL_FAIL_MAX) {
+          clearInterval(upgradePollTimer);
+          upgradePollTimer = null;
+          document.getElementById("upSpinner").style.display = "none";
+          document.getElementById("upTitle").innerText =
+            timedOut ? "任务仍未结束" : "与控制台连接中断";
+          document.getElementById("upSubTitle").innerText = timedOut
+            ? "安装任务仍在后台执行，可关闭本窗口；稍后在控制台查看进度或日志"
+            : "无法连接监督者。任务可能仍在后台执行，可关闭本窗口稍后重试";
+          document.getElementById("upDoneIcon").style.display = "inline-block";
+          document.getElementById("upDoneIcon").style.color = "var(--danger)";
+          document.getElementById("btnUpClose").style.display = "block";
+        }
       }
     }
 
@@ -1051,7 +1122,7 @@ const API_BASE = (function() {
       fetchStatus, fetchLogs, controlService, changeServicePort, resetAuth,
       checkOrUpgrade, checkOnlineVersions, pickVersion, toggleHistoryDropdown,
       saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
-      closeUpgradeModal, logGoPrev, logGoNext, logGoLatest,
+      closeUpgradeModal, minimizeUpgradeModal, logGoPrev, logGoNext, logGoLatest,
       toggleMirrorDropdown, pickMirror, attachRunningInstall,
       // 遗漏会直接报 "uninstallKernel is not defined"(内联 onclick 找不到该符号)
       uninstallKernel,

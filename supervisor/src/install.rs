@@ -228,6 +228,9 @@ pub enum CrashPoint {
     AfterHealthChecked,
     AfterPinWritten,
     AfterCommit,
+    /// 新内核已被拉起并通过健康检查,但事务尚未 commit —— 监督者此刻被杀,
+    /// 会留下"进程是新版、磁盘是旧版"的组合,只有恢复阶段主动停进程才能纠正。
+    AfterSpawnBeforeCommit,
 }
 
 static TEST_CRASH_POINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -242,6 +245,7 @@ pub fn set_test_crash_point(cp: Option<CrashPoint>) {
         Some(CrashPoint::AfterHealthChecked) => 4,
         Some(CrashPoint::AfterPinWritten) => 5,
         Some(CrashPoint::AfterCommit) => 6,
+        Some(CrashPoint::AfterSpawnBeforeCommit) => 7,
     };
     TEST_CRASH_POINT.store(val, Ordering::SeqCst);
 }
@@ -255,6 +259,7 @@ fn check_crash_point(point: CrashPoint) {
         CrashPoint::AfterHealthChecked => current_test == 4,
         CrashPoint::AfterPinWritten => current_test == 5,
         CrashPoint::AfterCommit => current_test == 6,
+        CrashPoint::AfterSpawnBeforeCommit => current_test == 7,
     };
 
     let env_name = match point {
@@ -264,6 +269,7 @@ fn check_crash_point(point: CrashPoint) {
         CrashPoint::AfterHealthChecked => "after_health_checked",
         CrashPoint::AfterPinWritten => "after_pin_written",
         CrashPoint::AfterCommit => "after_commit",
+        CrashPoint::AfterSpawnBeforeCommit => "after_spawn_before_commit",
     };
     let matches_env = std::env::var("QWENPAW_CRASH_POINT")
         .map(|v| v.eq_ignore_ascii_case(env_name))
@@ -591,11 +597,19 @@ fn restore_previous_pin(record: &VenvTxRecord, log: Option<&dyn Fn(&str)>) {
         }
         None => {}
     }
-}/// 监督者启动恢复:恢复未完成事务(崩溃/SIGKILL/断电自愈)
+}
+
+/// 监督者启动恢复:恢复未完成事务(崩溃/SIGKILL/断电自愈)。
+///
+/// `stop_kernel` 在"需要回滚的事务"出现时被调用一次,用于停掉可能由该事务
+/// 拉起的内核进程。崩溃恢复只回滚磁盘是不够的:健康检查窗口内监督者被杀时,
+/// 新内核仍存活,随后收养会得到"进程新版 + 磁盘旧版"的错配 ——
+/// 运行中进程的依赖目录已被回滚抽走,只能靠重启才恢复。
 pub fn recover_pending_transactions(
     venv_dir: &Path,
     pin_path: &Path,
     log: Option<&dyn Fn(&str)>,
+    stop_kernel: Option<&dyn Fn()>,
 ) -> std::io::Result<usize> {
     let parent = match venv_dir.parent() {
         Some(p) if p.exists() => p,
@@ -696,6 +710,16 @@ pub fn recover_pending_transactions(
             // BackedUp / Activated / HealthChecked：新环境尚未 Commit,一律回滚到旧环境。
             // 三者共用同一回滚语义,差别只在“活动路径当前是谁”,由目录现状判定。
             TxPhase::BackedUp | TxPhase::Activated | TxPhase::HealthChecked => {
+                // 先停进程再回滚磁盘:顺序反了会让运行中的内核瞬间失去依赖目录
+                if let Some(stop) = stop_kernel {
+                    if let Some(logf) = log {
+                        logf(&format!(
+                            "recovery: 停止由中断安装可能拉起的内核 (tx {})",
+                            record.tx_id
+                        ));
+                    }
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop));
+                }
                 rollback_record(record, parent, pin_path, log);
                 let _ = std::fs::remove_file(tx_path);
                 let _ = sync_dir(parent);
@@ -1307,6 +1331,10 @@ impl InstallState {
                         });
                         return;
                     }
+
+                    // 新内核此时已拉起并探活成功,但事务仍是 Activated。
+                    // 这里被杀会留下"进程新版 + 磁盘旧版",由恢复阶段停进程纠正。
+                    check_crash_point(CrashPoint::AfterSpawnBeforeCommit);
 
                     // 健康检查通过,落盘 HealthChecked(同时快照旧版本钉)。
                     // 落盘失败意味着无法保证之后可回滚,必须中止而不是继续往前走。
@@ -1928,7 +1956,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(recovered, 1);
         assert!(!staged.exists(), "Prepared 的暂存目录必须被清理");
         assert!(!tx_file.exists(), "事务文件必须被清理");
@@ -1968,7 +1996,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(recovered, 1);
         assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old", "必须回滚为旧环境");
         assert!(!backup.exists(), "回滚后 backup 目录不残留");
@@ -2008,7 +2036,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(recovered, 1);
         assert!(!active.exists(), "首次安装回滚后不得保留活动环境");
         assert!(!pin.exists(), "首次安装回滚后不得留有版本钉(保持未安装)");
@@ -2047,7 +2075,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(recovered, 1);
         assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old", "保守路径必须回滚原环境");
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
@@ -2088,7 +2116,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(recovered, 1);
         assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "new-committed", "新环境必须保留");
         assert_eq!(std::fs::read_to_string(&pin).unwrap(), "2.0.0\n", "新版本钉必须保留");
@@ -2108,7 +2136,7 @@ mod tests {
         std::fs::create_dir_all(&orphan1).unwrap();
         std::fs::create_dir_all(&orphan2).unwrap();
 
-        let _ = recover_pending_transactions(&active, &pin, None).unwrap();
+        let _ = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert!(!orphan1.exists(), "孤儿 staging-1 必须被清理");
         assert!(!orphan2.exists(), "孤儿 staging-2 必须被清理");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2152,7 +2180,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(recovered, 1);
         assert!(active.exists(), "活动环境必须被恢复,绝不允许消失");
         assert_eq!(
@@ -2195,7 +2223,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert!(active.exists(), "被事务引用的备份必须归位,而不是当孤儿删掉");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2230,7 +2258,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(
             std::fs::read_to_string(&pin).unwrap(),
             "1.0.0\n",
@@ -2293,7 +2321,7 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert!(active.exists(), "活动环境必须恢复,不得与备份一起消失");
         assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old");
         assert!(!backup.exists(), "备份归位后不得残留");
@@ -2335,12 +2363,94 @@ mod tests {
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert_eq!(
             std::fs::read_to_string(active.join("installed")).unwrap(),
             "old",
             "备份必须归位;若被当孤儿删除则活动环境会保留新版本"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    // ── 工单2 回归:崩溃恢复必须先停进程再回滚磁盘 ──
+    #[test]
+    fn recovery_stops_kernel_before_rolling_back() {
+        let dir = fake_venv("rec-stop-first");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.12";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "new-spawned").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Activated,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: None,
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let o = Arc::clone(&order);
+        let stop = move || o.lock().unwrap().push("stop");
+
+        recover_pending_transactions(&active, &pin, None, Some(&stop)).unwrap();
+
+        let calls = order.lock().unwrap().clone();
+        assert_eq!(calls, vec!["stop"], "需要回滚的事务必须触发内核停止且只停一次");
+        assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Prepared(旧环境未动)不得停内核,避免误杀用户正在用的实例
+    #[test]
+    fn recovery_does_not_stop_kernel_for_prepared_phase() {
+        let dir = fake_venv("rec-no-stop");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.13";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+        std::fs::create_dir_all(&staged).unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Prepared,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: None,
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let h = Arc::clone(&hit);
+        let stop = move || h.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        recover_pending_transactions(&active, &pin, None, Some(&stop)).unwrap();
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst),
+            "Prepared 阶段旧环境未动,不得停掉正在运行的内核");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2362,7 +2472,7 @@ mod tests {
         std::fs::write(&trash_pin, "old-pin").unwrap();
         std::fs::write(&tmp_pin, "tmp-pin").unwrap();
 
-        let _ = recover_pending_transactions(&active, &pin, None).unwrap();
+        let _ = recover_pending_transactions(&active, &pin, None, None).unwrap();
         assert!(!trash_venv.exists(), "卸载残留 .venv.uninstall 必须清理");
         assert!(!orphan_rollback.exists(), "孤儿 .venv.rollback 必须清理");
         assert!(!trash_pin.exists(), "版本钉卸载残留必须清理");

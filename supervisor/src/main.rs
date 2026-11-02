@@ -207,10 +207,17 @@ fn main() {
 
     // venv 事务恢复:上次被 SIGKILL/断电遗留的中间状态自愈(必须在收养内核与开放 API 前完成)
     let pin_file = format!("{}/qwenpaw-version", cfg.var_dir);
+    // 回滚前先停掉可能由中断安装拉起的内核:只回滚磁盘会留下
+    // "进程新版 + 磁盘旧版"的错配,而该进程的依赖已被抽走。
+    let stop_for_recovery = {
+        let k = Arc::clone(&kernel);
+        move || k.stop_sync()
+    };
     match install::recover_pending_transactions(
         std::path::Path::new(&cfg.kernel_venv),
         std::path::Path::new(&pin_file),
         Some(&*logf),
+        Some(&stop_for_recovery),
     ) {
         Ok(n) if n > 0 => logf(&format!("recovered {n} pending venv transaction(s)")),
         Ok(_) => {}
