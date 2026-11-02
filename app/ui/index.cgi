@@ -53,8 +53,12 @@ fi
 if [ ! -f "$TARGET_FILE" ]; then
     echo "Status: 404 Not Found"
     echo "Content-Type: text/plain; charset=utf-8"
+    echo "X-Content-Type-Options: nosniff"
     echo ""
-    echo "404 Not Found: ${REL_PATH}"
+    # REL_PATH 完全来自请求,原样回显等于把攻击者可控的任意长字符串
+    # (可含换行)写进响应体。截断并去掉控制字符。
+    safe_path=$(printf '%s' "$REL_PATH" | tr -d '\000-\037\177' | cut -c1-200)
+    echo "404 Not Found: ${safe_path}"
     exit 0
 fi
 

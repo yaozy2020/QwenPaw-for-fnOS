@@ -87,7 +87,13 @@ case "$action" in
         ;;
     logs)
         lines=$(qget lines)
-        path="/logs?tail=${lines:-80}"
+        # lines 必须数字白名单:直接拼进 URL 的任意用户输入可注入
+        # `&`/`#` 改写查询串,非数字值也会让监督者按默认值或报错。
+        case "$lines" in
+            ''|*[!0-9]*) lines=80 ;;
+        esac
+        [ "${#lines}" -gt 6 ] && lines=100000
+        path="/logs?tail=${lines}"
         ;;
     clear_logs)
         method="POST"
@@ -110,7 +116,13 @@ case "$action" in
         if command -v python3 >/dev/null 2>&1; then
             body=$(python3 -c 'import json,sys; print(json.dumps({"version": sys.argv[1] or "latest", "mirror": sys.argv[2]}))' "${ver:-latest}" "${mir}")
         else
-            body="{\"version\":\"${ver//\"/\\\"}\",\"mirror\":\"${mir//\"/\\\"}\"}"
+            # 无 python3 的退化路径必须先转义反斜杠再转义引号,
+            # 否则 mirror=...\ 这类输入会产出非法 JSON(尾部转义掉收尾引号)。
+            ver_esc=${ver//\\/\\\\}
+            ver_esc=${ver_esc//\"/\\\"}
+            mir_esc=${mir//\\/\\\\}
+            mir_esc=${mir_esc//\"/\\\"}
+            body="{\"version\":\"${ver_esc:-latest}\",\"mirror\":\"${mir_esc}\"}"
         fi
         ;;
     uninstall_kernel)

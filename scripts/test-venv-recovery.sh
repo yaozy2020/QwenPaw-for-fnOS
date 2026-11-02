@@ -104,6 +104,8 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
     local log="$test_dir/supervisor.log"
     export QWENPAW_PYTHON_BIN="$mock_py"
     export QWENPAW_CRASH_POINT="$point"
+    # 生产构建默认不响应故障注入,测试须显式开启
+    export QWENPAW_ENABLE_CRASH_POINT=1
     export TRIM_PKGHOME="$test_dir/home"
     export TRIM_PKGVAR="$test_dir/var"
     export TRIM_DATA_SHARE_PATHS="$test_dir/share"

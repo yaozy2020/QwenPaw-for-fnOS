@@ -115,18 +115,57 @@ pub fn sanitize_mirror(m: &str) -> String {
 /// 0600 权限的原子写:临时文件 → fsync → rename。半写内容不会出现在目标路径。
 pub(crate) fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let tmp = format!("{}.tmp", path);
+    // tmp 名带 pid:固定 "{path}.tmp" 在并发写(如变更端口与状态落盘同时发生)
+    // 时会互相截断,rename 出空文件或对方的内容。
+    let tmp = format!("{}.tmp.{}", path, std::process::id());
     {
         let mut f = std::fs::OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .write(true)
-            .truncate(true)
             .mode(0o600)
             .open(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
+        let write_result = f
+            .write_all(content.as_bytes())
+            .and_then(|_| f.sync_all());
+        if let Err(e) = write_result {
+            drop(f);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
     }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// 清扫 var_dir 下的原子写/临时落盘残骸(`*.tmp` 与 `*.tmp.<pid>`)。
+///
+/// 这些文件只在"写入途中被 SIGKILL/断电"时才会留下。它们本身无害,但:
+/// 老实现用固定 tmp 名,残骸会让后续 create_new 直接失败;
+/// 长期累积也会把"目录里有陌生文件"变成常态,掩盖真正的事务残留。
+/// 只在启动恢复阶段调用(此时无人正在写),按 mtime 之外的保守规则一律视为残骸。
+pub(crate) fn sweep_stale_tmp_files(var_dir: &str) -> usize {
+    let mut removed = 0usize;
+    let Ok(entries) = std::fs::read_dir(var_dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_tmp = name.contains(".tmp");
+        if !is_tmp {
+            continue;
+        }
+        // 只清理普通文件;目录型残留由事务恢复各自处理,不在此处误删。
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 pub fn truncate_utf8(raw: &str, max_bytes: usize) -> String {
@@ -271,9 +310,16 @@ fn check_crash_point(point: CrashPoint) {
         CrashPoint::AfterCommit => "after_commit",
         CrashPoint::AfterSpawnBeforeCommit => "after_spawn_before_commit",
     };
-    let matches_env = std::env::var("QWENPAW_CRASH_POINT")
-        .map(|v| v.eq_ignore_ascii_case(env_name))
-        .unwrap_or(false);
+    // 故障注入是测试设施,只应在 debug 构建与显式开启时生效。
+    // 若随生产二进制发行,任何能设置环境变量的人(同用户/子进程继承)
+    // 都能让监督者在安装中途 SIGKILL 自己 —— 那是可被外部触发的自毁开关。
+    // 生产需显式 QWENPAW_ENABLE_CRASH_POINT=1 才启用,默认关闭。
+    let crash_env_allowed = cfg!(debug_assertions)
+        || std::env::var("QWENPAW_ENABLE_CRASH_POINT").map(|v| v == "1").unwrap_or(false);
+    let matches_env = crash_env_allowed
+        && std::env::var("QWENPAW_CRASH_POINT")
+            .map(|v| v.eq_ignore_ascii_case(env_name))
+            .unwrap_or(false);
 
     if matches_test || matches_env {
         #[cfg(unix)]
@@ -2643,6 +2689,28 @@ mod tests {
             "残缺内容不得被复制进新环境"
         );
         drop(tx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_stale_tmp_files_removes_only_regular_tmp_files() {
+        let dir = std::env::temp_dir().join(format!("qp-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_str().unwrap().to_string();
+
+        let keep = dir.join("qwenpaw-version");
+        std::fs::write(&keep, "2.1.0").unwrap();
+        std::fs::write(dir.join("service_port.tmp"), "x").unwrap();
+        std::fs::write(dir.join("service_port.tmp.4242"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("venv.tmpdir")).unwrap();
+
+        let removed = sweep_stale_tmp_files(&root);
+        assert_eq!(removed, 2, "两个 tmp 普通文件都应被清理");
+        assert!(keep.exists(), "正式文件不得被清理");
+        assert!(!dir.join("service_port.tmp").exists());
+        assert!(!dir.join("service_port.tmp.4242").exists());
+        assert!(dir.join("venv.tmpdir").exists(), "目录型残留交给事务恢复处理");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

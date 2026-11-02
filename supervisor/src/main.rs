@@ -171,16 +171,29 @@ fn main() {
                 panic!("无法生成安全 Token(随机源不可用),拒绝以弱凭据启动: {e}");
             });
             use std::os::unix::fs::OpenOptionsExt;
+            // 首写必须原子:直接 truncate 已有文件再写,若此时被 SIGKILL/断电,
+            // 磁盘会留下空文件或半截 Token —— 下次启动读到长度 <32 会重新生成,
+            // 已拿到旧 Token 的前端(或正在重连的 SSE)就会全部 401。
+            // 改为写同目录唯一 tmp -> fsync -> rename,读者只会看到旧值或新值。
+            let tmp_path = format!(
+                "{}.tmp.{}",
+                cfg.token_file,
+                std::process::id()
+            );
             let mut f = std::fs::OpenOptions::new()
-                .create(true)
+                .create_new(true)
                 .write(true)
-                .truncate(true)
                 .mode(0o600)
-                .open(&cfg.token_file)
-                .unwrap_or_else(|e| panic!("create token file: {e}"));
+                .open(&tmp_path)
+                .unwrap_or_else(|e| panic!("create token tmp file: {e}"));
             f.write_all(t.as_bytes())
                 .unwrap_or_else(|e| panic!("write token file: {e}"));
             f.sync_all().ok();
+            drop(f);
+            std::fs::rename(&tmp_path, &cfg.token_file).unwrap_or_else(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                panic!("commit token file: {e}")
+            });
             // 写入后复核(防 umask/外部因素),失败即退出而非带病运行
             #[cfg(unix)]
             {
@@ -206,6 +219,13 @@ fn main() {
     // 孤儿安装清理:监督者异常退出时 pip(独立进程组)可能仍存活并继续改 venv。
     // 凭 install.pid 找到候选,核对 /proc cmdline 身份(防 PID 复用误杀)后整组回收。
     cleanup_orphan_install(&cfg.var_dir);
+
+    // 临时文件残骸清扫:必须在事务恢复之前,否则 service_port.tmp.* 之类的
+    // 半截文件会被后续 create_new 撞上而让写入永久失败。
+    let swept = crate::install::sweep_stale_tmp_files(&cfg.var_dir);
+    if swept > 0 {
+        logf(&format!("已清扫 {swept} 个临时文件残留"));
+    }
 
     // venv 事务恢复:上次被 SIGKILL/断电遗留的中间状态自愈(必须在收养内核与开放 API 前完成)
     let pin_file = format!("{}/qwenpaw-version", cfg.var_dir);

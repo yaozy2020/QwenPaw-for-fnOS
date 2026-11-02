@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
-use std::{convert::Infallible, pin::Pin};
+use std::convert::Infallible;
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 
 use crate::{
@@ -286,14 +286,12 @@ async fn restart(State(state): State<AppState>, req: Request<axum::body::Body>) 
 async fn events(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
-) -> Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>> {
+) -> axum::response::Response {
     if !check_token(&state.token, &req) {
-        let denied: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = Box::pin(
-            tokio_stream::once(Ok(Event::default().event("snapshot").data(
-                json!({"ok": false, "error": "invalid token"}).to_string(),
-            ))),
-        );
-        return Sse::new(denied).keep_alive(KeepAlive::default());
+        // 鉴权失败必须返回 401,不能返 200 + 一条错误事件:
+        // 200 会让调用方(含扫描器、探测脚本)认为端点无需鉴权,
+        // 且 EventSource 层面无法区分"连上了但被拒"与正常流。
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
     let snapshot_state = state.clone();
     let first = tokio::task::spawn_blocking(move || render_snapshot(&snapshot_state))
@@ -307,7 +305,7 @@ async fn events(
     let merged: std::pin::Pin<
         Box<dyn Stream<Item = Result<Event, Infallible>> + Send>,
     > = Box::pin(tokio_stream::StreamExt::chain(first_stream, snap_stream));
-    Sse::new(merged).keep_alive(KeepAlive::default())
+    Sse::new(merged).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// 日志尾部读取:只读文件末尾窗口(默认 256KB),不整文件加载 —— 日志文件可长期
@@ -822,7 +820,9 @@ async fn wait_healthy_blocking(state: &AppState) -> bool {
 }
 
 fn write_ui_config(path: &std::path::Path, config: &serde_json::Value) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    // tmp 名必须唯一:固定 "config.tmp" 在两路并发(如变更端口 + UI 并发保存)时
+    // 会互相截断对方写入中的文件,rename 出一个半截 JSON。
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let mut bytes = serde_json::to_vec_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     bytes.push(b'\n');
