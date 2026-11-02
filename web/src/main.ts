@@ -379,7 +379,7 @@ const API_BASE = (function() {
       }
       const ok = await showModal({
         title: "仅卸载 QwenPaw 内核",
-        message: `将停止服务并删除 QwenPaw v${currentRunningVersion} 的运行环境与版本钉。\n\n用户配置、会话记忆、工作数据和管理员认证都会保留，控制台也不会卸载。之后可重新选择版本安装。确认继续？`,
+        message: `将停止服务并删除 QwenPaw v${currentRunningVersion} 的运行环境与版本钉。\n\n• 用户配置、会话记忆与管理员认证均完整保留，之后可随时重新安装。\n• 注意：受飞牛 fnOS 桌面会话缓存限制，桌面图标隐藏可能需刷新浏览器页面生效。确认继续？`,
         type: "danger",
         confirmText: "仅卸载内核，保留数据"
       });

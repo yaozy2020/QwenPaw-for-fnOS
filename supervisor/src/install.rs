@@ -499,6 +499,8 @@ pub fn recover_pending_transactions(
 
     let mut tx_files = Vec::new();
     let mut orphan_stagings = Vec::new();
+    let mut orphan_uninstalls = Vec::new();
+    let mut candidate_rollbacks = Vec::new();
 
     for entry in read_dir.flatten() {
         let name = entry.file_name();
@@ -507,6 +509,10 @@ pub fn recover_pending_transactions(
             tx_files.push(entry.path());
         } else if name_str.starts_with(".venv.staging.") {
             orphan_stagings.push(entry.path());
+        } else if name_str.starts_with(".venv.uninstall.") {
+            orphan_uninstalls.push(entry.path());
+        } else if name_str.starts_with(".venv.rollback.") {
+            candidate_rollbacks.push(entry.path());
         }
     }
 
@@ -605,11 +611,39 @@ pub fn recover_pending_transactions(
         recovered_count += 1;
     }
 
-    // 清理无对应事务文件的孤儿 staging 目录
+    // 清理历史残留暂存目录与卸载垃圾 (P2 启动自愈治理)
     for staging_path in orphan_stagings {
         if staging_path.exists() {
             let _ = std::fs::remove_dir_all(&staging_path);
             let _ = sync_dir(parent);
+        }
+    }
+    for uninstall_path in orphan_uninstalls {
+        if uninstall_path.exists() {
+            let _ = std::fs::remove_dir_all(&uninstall_path);
+            let _ = sync_dir(parent);
+        }
+    }
+    for rollback_path in candidate_rollbacks {
+        if rollback_path.exists() {
+            let _ = std::fs::remove_dir_all(&rollback_path);
+            let _ = sync_dir(parent);
+        }
+    }
+
+    // 清理 var 目录下的残留临时文件 (如 .qwenpaw-version.uninstall.* 等)
+    if let Some(var_dir) = pin_path.parent() {
+        if var_dir.exists() {
+            if let Ok(rd) = std::fs::read_dir(var_dir) {
+                for entry in rd.flatten() {
+                    let n = entry.file_name();
+                    let s = n.to_string_lossy();
+                    if s.starts_with(".qwenpaw-version.uninstall.") || s == ".qwenpaw-version.tmp" {
+                        let _ = std::fs::remove_file(entry.path());
+                        let _ = sync_dir(var_dir);
+                    }
+                }
+            }
         }
     }
 
@@ -1878,6 +1912,33 @@ mod tests {
         let _ = recover_pending_transactions(&active, &pin, None).unwrap();
         assert!(!orphan1.exists(), "孤儿 staging-1 必须被清理");
         assert!(!orphan2.exists(), "孤儿 staging-2 必须被清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn startup_recovery_cleans_uninstall_trash_and_orphan_rollbacks() {
+        let dir = fake_venv("rec-trash");
+        let active = dir.join("venv");
+        let var = dir.join("var");
+        std::fs::create_dir_all(&var).unwrap();
+        let pin = var.join("qwenpaw-version");
+
+        let trash_venv = dir.join(".venv.uninstall.123.456");
+        let orphan_rollback = dir.join(".venv.rollback.789.012");
+        let trash_pin = var.join(".qwenpaw-version.uninstall.123.456");
+        let tmp_pin = var.join(".qwenpaw-version.tmp");
+
+        std::fs::create_dir_all(&trash_venv).unwrap();
+        std::fs::create_dir_all(&orphan_rollback).unwrap();
+        std::fs::write(&trash_pin, "old-pin").unwrap();
+        std::fs::write(&tmp_pin, "tmp-pin").unwrap();
+
+        let _ = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert!(!trash_venv.exists(), "卸载残留 .venv.uninstall 必须清理");
+        assert!(!orphan_rollback.exists(), "孤儿 .venv.rollback 必须清理");
+        assert!(!trash_pin.exists(), "版本钉卸载残留必须清理");
+        assert!(!tmp_pin.exists(), "版本钉临时文件必须清理");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
