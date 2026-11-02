@@ -69,13 +69,14 @@ jobs:
           done
 
       # [4] 静态检查与门禁
-      - name: Preflight + AUDIT + Unit Tests
+      - name: Preflight + AUDIT + Unit Tests + strict Clippy
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
           (cd supervisor && cargo test --locked)
+          (cd supervisor && cargo clippy --locked --all-targets -- -D warnings)
 
       - name: Prepare build environment
         run: |

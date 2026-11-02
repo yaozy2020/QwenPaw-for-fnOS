@@ -63,7 +63,7 @@ if [ -z "$SC_BIN" ]; then
     fi
 fi
 if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then
-    TARGETS=(cmd/main cmd/supervisor_ctl.sh cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback app/ui/api.cgi app/ui/index.cgi build.sh scripts/test-lifecycle.sh)
+    TARGETS=(cmd/main cmd/supervisor_ctl.sh cmd/install_callback cmd/upgrade_callback cmd/config_callback cmd/uninstall_callback app/ui/api.cgi app/ui/index.cgi build.sh scripts/test-lifecycle.sh scripts/test-venv-recovery.sh)
     if "$SC_BIN" -S error "${TARGETS[@]/#/"$ROOT/"}" 2>&1; then
         echo "  [  OK ] error 级问题为 0（warning 级见上方输出，不拦截）"
     else

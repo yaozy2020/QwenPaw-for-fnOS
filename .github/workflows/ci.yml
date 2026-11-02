@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -90,3 +92,8 @@ jobs:
           test -x target/release/qwenpaw-supervisor
           file target/release/qwenpaw-supervisor
           sha256sum target/release/qwenpaw-supervisor
+
+      # 真实 SIGKILL 故障注入:逐个中断点杀进程,重启后验证自愈。
+      # 单元测试只验证纯函数语义,这条才真正覆盖"断电/被 KILL"的磁盘状态。
+      - name: Venv transaction crash-injection (6 real SIGKILL points)
+        run: bash scripts/test-venv-recovery.sh

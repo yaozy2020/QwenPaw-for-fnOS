@@ -97,8 +97,8 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
 
     # 生成 Token
     local token="test_secret_token_12345678901234567890"
-    echo "$token" > "$test_dir/var/supervisor.token"
-    chmod 600 "$test_dir/var/supervisor.token"
+    echo "$token" > "$test_dir/var/supervisor-token"
+    chmod 600 "$test_dir/var/supervisor-token"
 
     # 启动 supervisor 并注入 CRASH_POINT
     local log="$test_dir/supervisor.log"
@@ -108,10 +108,14 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
     export TRIM_PKGVAR="$test_dir/var"
     export TRIM_DATA_SHARE_PATHS="$test_dir/share"
     export TRIM_PKGETC="$test_dir/etc"
-    export TRIM_PORT_NUM="$sup_port"
     export SUPERVISOR_PORT="$sup_port"
-    export QWENPAW_KERNEL_PORT="$kernel_port"
-    export QWENPAW_AUTOSTART="false"
+    # 内核端口读自 TRIM_SERVICE_PORT;同时隔离 TRIM_APPDEST,
+    # 避免本地跑测试时碰到真实 /var/apps/qwenpaw 的 UI 配置
+    export TRIM_SERVICE_PORT="$kernel_port"
+    export TRIM_APPDEST="$test_dir/appdest"
+    export SUPERVISOR_AUTOSTART="0"
+    mkdir -p "$test_dir/appdest/ui"
+    printf '{\n  ".url": {\n    "qwenpaw.main": {"title": "QwenPaw", "icon": "images/icon.png", "type": "url", "protocol": "http", "port": "%s", "url": "/", "allUsers": true}\n  }\n}\n' "$kernel_port" > "$test_dir/appdest/ui/config"
 
     "$BIN" > "$log" 2>&1 &
     local sup_pid=$!
@@ -125,12 +129,35 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
     done
 
     # 触发安装升级到 2.0.0
-    curl -s -X POST "http://127.0.0.1:$sup_port/kernel/install" \
+    local install_resp
+    install_resp=$(curl -s -X POST "http://127.0.0.1:$sup_port/kernel/install" \
         -H "X-Supervisor-Token: $token" \
         -H "Content-Type: application/json" \
-        -d '{"version":"2.0.0","mirror":""}' >/dev/null 2>&1 || true
+        -d '{"version":"2.0.0","mirror":""}' 2>&1) || true
+    # 注意:崩溃点可能早于 HTTP 响应写出(如 after_prepare),此时 curl 拿到空响应,
+    # 空响应不能判定为"请求被拒"。只有明确的错误 JSON 才算失败。
+    if printf '%s' "$install_resp" | grep -q '"ok": *false\|"ok":false\|"error"'; then
+        bad "$desc 失败: 安装请求被拒绝 (响应: ${install_resp:0:200})"
+        kill -9 "$sup_pid" "$mock_srv_pid" 2>/dev/null || true
+        wait "$sup_pid" 2>/dev/null || true
+        return
+    fi
 
-    # 等待进程因 SIGKILL 退出 (或者在崩溃点终止)
+    # 等待进程因 SIGKILL 退出。必须有超时 —— 崩溃点未触发时监督者会一直活着,
+    # 裸 wait 会永久阻塞整个测试。
+    local waited=0
+    while kill -0 "$sup_pid" 2>/dev/null && [ "$waited" -lt 300 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$sup_pid" 2>/dev/null; then
+        bad "$desc 失败: 崩溃点未触发,监督者仍在运行 (30s 超时)"
+        kill -9 "$sup_pid" 2>/dev/null || true
+        wait "$sup_pid" 2>/dev/null || true
+        kill -9 "$mock_srv_pid" 2>/dev/null || true
+        wait "$mock_srv_pid" 2>/dev/null || true
+        return
+    fi
     wait "$sup_pid" 2>/dev/null || true
 
     # 清除 CRASH_POINT 环境变量，准备重启验证自愈
@@ -162,10 +189,11 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
     local residual_staging=$(ls -d "$test_dir/home"/.venv.staging.* 2>/dev/null | wc -l)
     local residual_backup=$(ls -d "$test_dir/home"/.venv.rollback.* 2>/dev/null | wc -l)
 
-    # 停止恢复后的 supervisor 和 mock server
-    kill "$rec_pid" 2>/dev/null || true
+    # 停止恢复后的 supervisor 和 mock server。
+    # 用 SIGKILL:优雅停服会走 15s 内核宽限期,6 个用例累加必然拖爆外层超时
+    kill -9 "$rec_pid" 2>/dev/null || true
     wait "$rec_pid" 2>/dev/null || true
-    kill "$mock_srv_pid" 2>/dev/null || true
+    kill -9 "$mock_srv_pid" 2>/dev/null || true
     wait "$mock_srv_pid" 2>/dev/null || true
 
     if [ "$active_ver" = "$expect_ver" ] && [ "$pin_ver" = "$expect_ver" ] && \

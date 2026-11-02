@@ -187,10 +187,17 @@ struct Inner {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TxPhase {
+    /// 暂存环境已就绪,活动环境未动
     Prepared,
+    /// 旧环境已改名为 backup,新环境尚未就位(活动路径此刻可能不存在)
+    BackedUp,
+    /// 新环境已激活到活动路径
     Activated,
+    /// 新环境通过健康检查,版本钉尚未改写
     HealthChecked,
+    /// 新环境、版本钉、旧备份清理全部完成
     Committed,
+    /// 已回滚
     RolledBack,
 }
 
@@ -205,9 +212,15 @@ pub struct VenvTxRecord {
     pub had_active: bool,
     pub target_version: String,
     pub pin_path: std::path::PathBuf,
+    /// 健康检查通过时快照的旧版本钉原文。回滚时据此把钉写回,
+    /// 消除“新钉已写、环境已回滚”的不一致窗口。
+    #[serde(default)]
+    pub previous_pin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 故障注入中断点(仅用于测试与故障演练,不参与生产逻辑)
+#[allow(clippy::enum_variant_names)]
 pub enum CrashPoint {
     AfterPrepare,
     AfterActiveRenamedToBackup,
@@ -355,6 +368,7 @@ impl VenvTransaction {
             had_active,
             target_version: target_version.to_string(),
             pin_path: pin_path.to_path_buf(),
+            previous_pin: None,
         };
 
         if let Err(e) = write_tx_record(&tx_file, &record) {
@@ -382,6 +396,10 @@ impl VenvTransaction {
         if self.record.had_active && self.record.active.exists() {
             std::fs::rename(&self.record.active, &self.record.backup)?;
             let _ = sync_dir(parent);
+            // 关键:改名之后、激活之前必须把“已切走旧环境”落盘。
+            // 否则此刻崩溃,事务仍是 Prepared,恢复会当作“原环境未动”而删掉唯一可用的备份。
+            self.record.phase = TxPhase::BackedUp;
+            write_tx_record(&self.tx_file, &self.record)?;
             check_crash_point(CrashPoint::AfterActiveRenamedToBackup);
         }
 
@@ -400,45 +418,13 @@ impl VenvTransaction {
         Ok(())
     }
 
-    pub fn health_checked(&mut self) -> std::io::Result<()> {
-        self.record.phase = TxPhase::HealthChecked;
-        write_tx_record(&self.tx_file, &self.record)?;
-        check_crash_point(CrashPoint::AfterHealthChecked);
-        Ok(())
-    }
-
+    /// 运行时回滚。与崩溃恢复共用 rollback_record,保证两条路径口径一致。
     pub fn rollback(&mut self) -> std::io::Result<()> {
         let parent = self.record.active.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
         })?;
 
-        if self.record.had_active {
-            if self.record.active.exists() {
-                let _ = std::fs::remove_dir_all(&self.record.active);
-            }
-            if self.record.backup.exists() {
-                let _ = std::fs::rename(&self.record.backup, &self.record.active);
-                let _ = sync_dir(parent);
-            }
-        } else {
-            // 首次安装没有旧环境：回滚后保持未安装，不留空版本钉
-            if self.record.active.exists() {
-                let _ = std::fs::remove_dir_all(&self.record.active);
-                let _ = sync_dir(parent);
-            }
-            if self.record.pin_path.exists() {
-                let _ = std::fs::remove_file(&self.record.pin_path);
-            }
-        }
-
-        if self.record.staged.exists() {
-            let _ = std::fs::remove_dir_all(&self.record.staged);
-            let _ = sync_dir(parent);
-        }
-        if self.record.backup.exists() {
-            let _ = std::fs::remove_dir_all(&self.record.backup);
-            let _ = sync_dir(parent);
-        }
+        rollback_record(&self.record, parent, &self.record.pin_path, None);
 
         self.record.phase = TxPhase::RolledBack;
         let _ = std::fs::remove_file(&self.tx_file);
@@ -447,13 +433,41 @@ impl VenvTransaction {
         Ok(())
     }
 
-    pub fn commit(mut self) -> std::io::Result<()> {
+    /// 健康检查通过。此时把旧版本钉内容快照进事务记录,
+    /// 让“新环境已激活、版本钉尚未生效”的窗口里也能把旧钉原样写回。
+    pub fn health_checked(&mut self) -> std::io::Result<()> {
+        self.record.previous_pin = match std::fs::read_to_string(&self.record.pin_path) {
+            Ok(s) => Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        self.record.phase = TxPhase::HealthChecked;
+        write_tx_record(&self.tx_file, &self.record)?;
+        check_crash_point(CrashPoint::AfterHealthChecked);
+        Ok(())
+    }
+
+    /// 在事务约束下改写版本钉:先落盘 Committed,再写钉。
+    /// 顺序不能反 —— 写完钉但未落 Committed 时崩溃,恢复会回滚环境却以为钉还是旧的。
+    pub fn commit(&mut self, pin_content: Option<&str>) -> std::io::Result<()> {
         let parent = self.record.active.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
         })?;
 
         self.record.phase = TxPhase::Committed;
         write_tx_record(&self.tx_file, &self.record)?;
+
+        // Committed 落盘之后才允许改写版本钉。此后崩溃只会留下“新环境+新钉”,
+        // 恢复走 Committed 分支保留二者,不再回滚。
+        if let Some(content) = pin_content {
+            if let Err(e) = atomic_write_0600(&self.record.pin_path.to_string_lossy(), content) {
+                // 钉写失败说明新环境无法被后续流程稳定复现,必须回滚,
+                // 并把 Committed 退回 HealthChecked,让恢复与运行时口径一致
+                self.record.phase = TxPhase::HealthChecked;
+                let _ = write_tx_record(&self.tx_file, &self.record);
+                return Err(e);
+            }
+        }
         check_crash_point(CrashPoint::AfterPinWritten);
 
         if self.record.backup.exists() {
@@ -481,7 +495,97 @@ impl Drop for VenvTransaction {
     }
 }
 
-/// 监督者启动恢复:恢复未完成事务(崩溃/SIGKILL/断电自愈)
+/// 回滚一个尚未 Committed 的事务,语义由“磁盘目录现状 + 是否曾有旧环境”共同决定。
+/// 崩溃恢复与运行时失败回滚共用此实现,避免两条路径各自演化出不同的恢复口径。
+///
+/// 关键约束:回滚结束时活动路径必须存在且为旧环境(或首次安装时彻底不存在),
+/// 且版本钉必须与活动环境一致。任何情况下都不得删除唯一可用的旧环境。
+fn rollback_record(
+    record: &VenvTxRecord,
+    parent: &Path,
+    pin_path: &Path,
+    log: Option<&dyn Fn(&str)>,
+) {
+    if record.had_active {
+        // 1. 活动路径当前若存在,它要么是新环境(Activated/HealthChecked),
+        //    要么是没被切走的旧环境(backup 不存在)。只有前者可以删。
+        if record.backup.exists() {
+            if record.active.exists() {
+                let _ = std::fs::remove_dir_all(&record.active);
+                let _ = sync_dir(parent);
+            }
+            // 2. 旧环境归位
+            if let Err(e) = std::fs::rename(&record.backup, &record.active) {
+                if let Some(logf) = log {
+                    logf(&format!(
+                        "rollback: 旧环境归位失败 {} -> {}: {e}",
+                        record.backup.display(),
+                        record.active.display()
+                    ));
+                }
+            }
+            let _ = sync_dir(parent);
+        } else if !record.active.exists() {
+            // backup 与新环境都不存在,活动环境也丢了 —— 已是既成损坏,如实记录
+            if let Some(logf) = log {
+                logf(&format!(
+                    "rollback: 事务 {} 未找到可用旧环境(active/backup 均缺失)",
+                    record.tx_id
+                ));
+            }
+        }
+        // 环境回滚后,版本钉必须回到旧值,否则会留下“旧内核 + 新版本钉”
+        restore_previous_pin(record, log);
+    } else {
+        // 首次安装没有旧环境:回滚后保持“未安装”,不留空版本钉
+        if record.active.exists() {
+            let _ = std::fs::remove_dir_all(&record.active);
+            let _ = sync_dir(parent);
+        }
+        for pin in [record.pin_path.as_path(), pin_path] {
+            if pin.exists() {
+                let _ = std::fs::remove_file(pin);
+                if let Some(p) = pin.parent() {
+                    let _ = sync_dir(p);
+                }
+            }
+        }
+    }
+
+    // 3. 无论哪条分支,暂存与备份残留都必须清掉
+    if record.staged.exists() {
+        let _ = std::fs::remove_dir_all(&record.staged);
+        let _ = sync_dir(parent);
+    }
+    if record.backup.exists() {
+        let _ = std::fs::remove_dir_all(&record.backup);
+        let _ = sync_dir(parent);
+    }
+}
+
+/// 把版本钉恢复到事务开始前的状态。
+/// - 旧环境存在且记录中留有旧钉原文 → 原样写回(含“原本没有钉”的删除语义)
+/// - 从未记录过快照(崩在 health_checked 之前) → 版本钉从未被本事务改写,无需处理
+fn restore_previous_pin(record: &VenvTxRecord, log: Option<&dyn Fn(&str)>) {
+    let pin_path = record.pin_path.to_string_lossy().to_string();
+    match record.previous_pin.as_deref() {
+        Some(prev) => {
+            if let Err(e) = atomic_write_0600(&pin_path, prev) {
+                if let Some(logf) = log {
+                    logf(&format!("rollback: 旧版本钉恢复失败 {pin_path}: {e}"));
+                }
+            }
+        }
+        None if record.phase == TxPhase::HealthChecked && record.pin_path.exists() => {
+            // 快照明确为“无钉”:删掉可能已被写入的新钉
+            let _ = std::fs::remove_file(&record.pin_path);
+            if let Some(p) = record.pin_path.parent() {
+                let _ = sync_dir(p);
+            }
+        }
+        None => {}
+    }
+}/// 监督者启动恢复:恢复未完成事务(崩溃/SIGKILL/断电自愈)
 pub fn recover_pending_transactions(
     venv_dir: &Path,
     pin_path: &Path,
@@ -542,8 +646,8 @@ pub fn recover_pending_transactions(
         }
 
         match record.phase {
+            // Prepared：旧环境从未被动过(改名之前必先落盘 BackedUp)。删暂存,活动环境与备份都不碰。
             TxPhase::Prepared => {
-                // Prepared：删除暂存环境，原环境不动
                 if record.staged.exists() {
                     let _ = std::fs::remove_dir_all(&record.staged);
                     let _ = sync_dir(parent);
@@ -551,36 +655,10 @@ pub fn recover_pending_transactions(
                 let _ = std::fs::remove_file(tx_path);
                 let _ = sync_dir(parent);
             }
-            TxPhase::Activated | TxPhase::HealthChecked => {
-                // Activated、HealthChecked：默认回滚，保守路径
-                if record.had_active {
-                    if record.active.exists() {
-                        let _ = std::fs::remove_dir_all(&record.active);
-                    }
-                    if record.backup.exists() {
-                        let _ = std::fs::rename(&record.backup, &record.active);
-                        let _ = sync_dir(parent);
-                    }
-                } else {
-                    // 首次安装没有旧环境：回滚后保持未安装，不留空版本钉
-                    if record.active.exists() {
-                        let _ = std::fs::remove_dir_all(&record.active);
-                        let _ = sync_dir(parent);
-                    }
-                    if record.pin_path.exists() {
-                        let _ = std::fs::remove_file(&record.pin_path);
-                    } else if pin_path.exists() {
-                        let _ = std::fs::remove_file(pin_path);
-                    }
-                }
-                if record.staged.exists() {
-                    let _ = std::fs::remove_dir_all(&record.staged);
-                    let _ = sync_dir(parent);
-                }
-                if record.backup.exists() {
-                    let _ = std::fs::remove_dir_all(&record.backup);
-                    let _ = sync_dir(parent);
-                }
+            // BackedUp / Activated / HealthChecked：新环境尚未 Commit,一律回滚到旧环境。
+            // 三者共用同一回滚语义,差别只在“活动路径当前是谁”,由目录现状判定。
+            TxPhase::BackedUp | TxPhase::Activated | TxPhase::HealthChecked => {
+                rollback_record(&record, parent, pin_path, log);
                 let _ = std::fs::remove_file(tx_path);
                 let _ = sync_dir(parent);
             }
@@ -624,11 +702,24 @@ pub fn recover_pending_transactions(
             let _ = sync_dir(parent);
         }
     }
+    // 备份目录只在“没有未决事务引用它”时才可视为垃圾。
+    // 有事务文件的一律由上面的恢复分支处理,这里绝不代删 —— 那是唯一的旧环境。
     for rollback_path in candidate_rollbacks {
-        if rollback_path.exists() {
-            let _ = std::fs::remove_dir_all(&rollback_path);
-            let _ = sync_dir(parent);
+        if !rollback_path.exists() {
+            continue;
         }
+        let referenced = tx_files.iter().any(|tx| {
+            std::fs::read_to_string(tx)
+                .ok()
+                .and_then(|c| serde_json::from_str::<VenvTxRecord>(&c).ok())
+                .map(|r| r.backup == rollback_path)
+                .unwrap_or(false)
+        });
+        if referenced {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&rollback_path);
+        let _ = sync_dir(parent);
     }
 
     // 清理 var 目录下的残留临时文件 (如 .qwenpaw-version.uninstall.* 等)
@@ -1150,9 +1241,20 @@ impl InstallState {
                         return;
                     }
 
-                    // 健康检查通过，落盘 HealthChecked 事务状态
+                    // 健康检查通过,落盘 HealthChecked(同时快照旧版本钉)。
+                    // 落盘失败意味着无法保证之后可回滚,必须中止而不是继续往前走。
                     if let Err(e) = transaction.health_checked() {
-                        eprintln!("[Supervisor] record health checked failed: {e}");
+                        let mut error = format!("安装状态落盘失败 (tx_persist_failed): {e}");
+                        error = match transaction.rollback() {
+                            Ok(()) => format!("{error}；已恢复原内核环境"),
+                            Err(e) => format!("{error}；恢复原内核环境失败: {e}"),
+                        };
+                        this.set(|g| {
+                            g.running = false;
+                            g.phase = Phase::Failed;
+                            g.error = error;
+                        });
+                        return;
                     }
 
                     if this.cancelled() {
@@ -1161,25 +1263,28 @@ impl InstallState {
                         return;
                     }
 
-                    let pin_result = if actual.is_empty() {
-                        Ok(())
+                    // 版本钉改写收进事务:先落 Committed 再写钉
+                    let pin_content = if actual.is_empty() {
+                        None
                     } else {
-                        atomic_write_0600(&pin_path, &format!("{actual}\n"))
+                        Some(format!("{actual}\n"))
                     };
-                    match pin_result {
+                    match transaction.commit(pin_content.as_deref()) {
                         Ok(()) => {
-                            let cleanup = transaction.commit();
                             this.set(|g| {
                                 g.running = false;
                                 g.phase = Phase::Done;
-                                g.message = match cleanup {
-                                    Ok(()) => format!("安装完成 v{actual}，服务已就绪"),
-                                    Err(e) => format!("安装完成 v{actual}，服务已就绪；旧环境备份清理失败: {e}"),
+                                g.message = if actual.is_empty() {
+                                    "安装完成，服务已就绪".to_string()
+                                } else {
+                                    format!("安装完成 v{actual}，服务已就绪")
                                 };
                             });
                         }
                         Err(e) => {
-                            let mut error = format!("版本钉写入失败 (pin_write_failed): {e}");
+                            // commit 失败(含版本钉写入失败)一律回滚并报 Failed,
+                            // 绝不向前端报 Done
+                            let mut error = format!("安装提交失败 (commit_failed): {e}");
                             error = match transaction.rollback() {
                                 Ok(()) => format!("{error}；已恢复原内核环境"),
                                 Err(e) => format!("{error}；恢复原内核环境失败: {e}"),
@@ -1559,7 +1664,7 @@ mod tests {
         assert!(!active.exists(), "暂存提交前不得创建活动 venv");
         transaction.activate().unwrap();
         assert!(active.join("bin/python3").exists());
-        transaction.commit().unwrap();
+        transaction.commit(None).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "提交后仅保留基础 Python 和活动 venv");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1730,6 +1835,7 @@ mod tests {
             had_active: true,
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
+            previous_pin: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -1769,6 +1875,7 @@ mod tests {
             had_active: true,
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
+            previous_pin: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -1808,6 +1915,7 @@ mod tests {
             had_active: false,
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
+            previous_pin: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -1831,7 +1939,7 @@ mod tests {
         let backup = dir.join(format!(".venv.rollback.{suffix}"));
         let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
 
-        // 健康检查后、版本钉写入前断电:保守回滚原环境
+        // 健康检查后、版本钉写入前断电:新环境已就位,版本钉仍是旧值(快照已落盘)
         std::fs::rename(&active, &backup).unwrap();
         std::fs::create_dir_all(&active).unwrap();
         std::fs::write(active.join("installed"), "new-checked").unwrap();
@@ -1846,6 +1954,7 @@ mod tests {
             had_active: true,
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
+            previous_pin: Some("1.0.0\n".into()),
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -1886,6 +1995,7 @@ mod tests {
             had_active: true,
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
+            previous_pin: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -1915,6 +2025,148 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+
+    // ── P0 回归:旧环境已改名、新环境尚未激活(BackedUp 阶段)时崩溃 ──
+    // 曾经的缺陷:该窗口磁盘记录仍是 Prepared,恢复按"原环境未动"处理,
+    // 只删 staging 与事务文件,随后把唯一可用的旧环境备份当孤儿 rollback 删除,
+    // 结果活动 venv 消失、版本钉却残留。
+    #[test]
+    fn recover_backed_up_restores_previous_environment() {
+        let dir = fake_venv("rec-backedup");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.6";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        // 旧环境已改名为 backup,活动路径此刻不存在(staging 尚未改名过去)
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("installed"), "new-staged").unwrap();
+        assert!(!active.exists(), "该中断点活动路径本就不存在");
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::BackedUp,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: None,
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        let recovered = recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(recovered, 1);
+        assert!(active.exists(), "活动环境必须被恢复,绝不允许消失");
+        assert_eq!(
+            std::fs::read_to_string(active.join("installed")).unwrap(),
+            "old",
+            "必须恢复为旧环境内容"
+        );
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n", "版本钉必须保持旧值");
+        assert!(!backup.exists(), "备份不得残留");
+        assert!(!staged.exists(), "暂存不得残留");
+        assert!(!tx_file.exists(), "事务文件必须消费");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── P0 回归:孤儿 rollback 清理不得误删仍被未决事务引用的备份 ──
+    #[test]
+    fn orphan_rollback_cleanup_skips_backups_referenced_by_live_transaction() {
+        let dir = fake_venv("rec-live-ref");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.7";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+        std::fs::rename(&active, &backup).unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::BackedUp,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: None,
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        recover_pending_transactions(&active, &pin, None).unwrap();
+        assert!(active.exists(), "被事务引用的备份必须归位,而不是当孤儿删掉");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── P1 回归:回滚必须把版本钉写回旧值 ──
+    #[test]
+    fn rollback_restores_previous_pin_snapshot() {
+        let dir = fake_venv("rec-pin-snapshot");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "2.0.0\n").unwrap();
+
+        let suffix = "9999.8";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "new").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::HealthChecked,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: Some("1.0.0\n".into()),
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&pin).unwrap(),
+            "1.0.0\n",
+            "环境回滚后版本钉必须同步回到旧值,不允许出现'旧内核+新钉'"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── P1 回归:commit 失败必须返回 Err,不得静默报成功 ──
+    #[test]
+    fn commit_propagates_pin_write_failure() {
+        let dir = fake_venv("commit-pin-fail");
+        let active = dir.join("venv");
+        // 把 pin 指向一个不存在的目录,令写入必然失败
+        let pin = dir.join("no-such-dir").join("pin");
+
+        let mut transaction =
+            VenvTransaction::prepare_with_python(&active, 9, "2.0.0", &pin, Path::new("/bin/true"))
+                .unwrap();
+        transaction.activate().unwrap();
+        transaction.health_checked().unwrap();
+        let result = transaction.commit(Some("2.0.0\n"));
+        assert!(result.is_err(), "版本钉写入失败必须向上传播,不能报 Done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn startup_recovery_cleans_uninstall_trash_and_orphan_rollbacks() {

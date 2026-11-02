@@ -1,11 +1,16 @@
-//! PEP 440 版本解析、稳定/Beta 分类与语义排序
-//! 后端唯一权威实现：统一 CGI、监督者与前端三方口径。
+//! PEP 440 版本解析、稳定/Beta 分类与语义排序。
+//! 后端唯一实现：统一 CGI、监督者与前端三方口径。
+//!
+//! 覆盖范围（非完整 PEP 440）：epoch、release、pre/post/dev 阶段与编号。
+//! 未实现 local version(`+abc`)、隐式 post(`1.0-1`)与任意 dash/underscore 归一化的全部细节。
+//! 对 QwenPaw 实际存在的版本号足够；遇到未知后缀会保守归入 dev 且不做静默丢弃。
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pep440Version {
     pub raw: String,
+    pub epoch: u64,
     pub release: Vec<u64>,
     pub stage: u8, // 0=dev, 1=alpha, 2=beta, 3=rc, 4=final, 5=post
     pub stage_num: u64,
@@ -21,6 +26,10 @@ impl PartialOrd for Pep440Version {
 
 impl Ord for Pep440Version {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // 0. epoch 是 PEP 440 的最高位
+        if self.epoch != other.epoch {
+            return self.epoch.cmp(&other.epoch);
+        }
         // 1. release 元组依次比对
         let max_len = self.release.len().max(other.release.len());
         for i in 0..max_len {
@@ -54,6 +63,15 @@ impl Pep440Version {
             return None;
         }
 
+        // epoch:`1!2.0`。PEP 440 规定 epoch 参与最高位比较,忽略会把 1!2.0 排到 2.0 之后
+        let (epoch, clean) = match clean.split_once('!') {
+            Some((e, rest)) => {
+                let e: u64 = e.trim().parse().ok()?;
+                (e, rest)
+            }
+            None => (0, clean),
+        };
+
         // 分离 release 部分与后缀部分
         // 例如 2.3.0b2 -> release: [2, 3, 0], rest: "b2"
         let mut idx = 0;
@@ -68,15 +86,13 @@ impl Pep440Version {
                 current_num = Some(current_num.unwrap_or(0) * 10 + digit);
                 idx += 1;
             } else if b == b'.' {
-                if let Some(n) = current_num.take() {
-                    release.push(n);
-                    idx += 1;
-                    // 如果点后面不是数字，则可能是 .dev, .post, .b 等后缀
-                    if idx < bytes.len() && !bytes[idx].is_ascii_digit() {
-                        break;
-                    }
-                } else {
-                    return None;
+                // 点前必须是数字,否则是 .dev/.post 之类的后缀分隔符或非法输入
+                let n = current_num.take()?;
+                release.push(n);
+                idx += 1;
+                // 如果点后面不是数字，则可能是 .dev, .post, .b 等后缀
+                if idx < bytes.len() && !bytes[idx].is_ascii_digit() {
+                    break;
                 }
             } else {
                 // 遇到非数字且非点，进入后缀解析阶段
@@ -126,6 +142,7 @@ impl Pep440Version {
 
         Some(Self {
             raw: raw.to_string(),
+            epoch,
             release,
             stage,
             stage_num,
@@ -271,6 +288,16 @@ mod tests {
         assert!(rc.is_beta());
         assert!(!final_v.is_beta());
         assert!(!post.is_beta());
+    }
+
+    #[test]
+    fn epoch_outranks_release() {
+        // PEP 440:1!2.0 > 2.0
+        let a = Pep440Version::parse("1!2.0").unwrap();
+        let b = Pep440Version::parse("2.0").unwrap();
+        assert!(a > b, "epoch 必须优先于 release 比较");
+        assert_eq!(a.epoch, 1);
+        assert_eq!(b.epoch, 0);
     }
 
     #[test]

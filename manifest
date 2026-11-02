@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 2.1.0-2
+version                    = 2.1.0-8
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS —— 将个人 AI 助理 QwenPaw 一键部署到飞牛 NAS 的轻量外壳包。</p><h3>外壳特性</h3><p>极简运维控制台（服务启停、日志、内核版本管理、端口修改），内核经 PyPI 镜像在线安装，外壳与内核版本双轨制（外壳升级不影响内核），控制台资源预压缩传输。</p><h3>QwenPaw 内核</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作，定时任务，能力由 Skills 决定且可无限扩展；支持 Ollama 本地大模型完全离线运行，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = x86
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "v2.1.0-rc.2: 落地 venv 独立事务持久化与断电/SIGKILL 启动自愈状态机; 原生 RC/正式版双模发布自动化与可重现双构建审计门禁; 彻底消除运维异步阻塞, 状态接口无锁即时响应; 统一收敛 PEP 440 权威版本语义与动作推导; 抽取生命周期公共库"
+changelog                  = "v2.1.0-rc.3: 修复旧环境改名后断电导致活动 venv 与唯一备份同时丢失的 P0 缺陷(新增 BackedUp 事务阶段,磁盘状态先于目录切换落盘); 版本钉纳入事务,回滚时恢复旧钉,消除旧内核配新钉的不一致窗口; 恢复与运行时回滚统一为同一实现,孤儿备份清理不再误删在用备份; FPK 构建号与 RC 序号解耦并强制单调递增; 崩溃恢复脚本修正并接入 CI 与 Release 门禁"
