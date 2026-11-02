@@ -93,7 +93,8 @@ jobs:
 
           echo "=== 第一次构建 ==="
           FPK_OUT="$DIR1" bash build.sh
-          FPK_NAME=$(basename $(ls "$DIR1"/qwenpaw_v*.fpk))
+          FPK_FILE=$(ls "$DIR1"/qwenpaw*.fpk | head -n 1)
+          FPK_NAME=$(basename "$FPK_FILE")
           SHA1=$(sha256sum "$DIR1/$FPK_NAME" | awk '{print $1}')
 
           echo "=== 第二次构建 ==="
