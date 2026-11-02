@@ -322,6 +322,8 @@ button:disabled, .btn:disabled {
   gap: var(--sp-2);
   margin-top: auto;
 }
+/* hidden 属性必须真正生效:通用 button/布局规则会覆盖 UA 的 [hidden]{display:none} */
+.card-actions > button[hidden] { display: none !important; }
 .card-note {
   font-size: var(--fs-sm);
   color: var(--text-muted);
