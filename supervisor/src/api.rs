@@ -214,9 +214,16 @@ async fn start(State(state): State<AppState>, req: Request<axum::body::Body>) ->
     if !state.kernel.installed() {
         return err_json(StatusCode::CONFLICT, "QwenPaw 内核尚未安装,请在「版本更新」中选择版本安装");
     }
-    match state.kernel.spawn() {
+    let kernel = Arc::clone(&state.kernel);
+    let res = tokio::task::spawn_blocking(move || kernel.spawn())
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
         Ok(pid) => {
-            state.events.publish(render_snapshot(&state));
+            let snap_state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                snap_state.events.publish(render_snapshot(&snap_state));
+            });
             Json(json!({"ok": true, "success": true, "message": "QwenPaw 已启动", "pid": pid}))
                 .into_response()
         }
@@ -236,7 +243,10 @@ async fn stop(State(state): State<AppState>, req: Request<axum::body::Body>) -> 
         Err(response) => return *response,
     };
     state.kernel.stop().await;
-    state.events.publish(render_snapshot(&state));
+    let snap_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        snap_state.events.publish(render_snapshot(&snap_state));
+    });
     Json(json!({"ok": true, "success": true, "message": "QwenPaw 已停止"})).into_response()
 }
 
@@ -249,9 +259,16 @@ async fn restart(State(state): State<AppState>, req: Request<axum::body::Body>) 
         Err(response) => return *response,
     };
     state.kernel.stop().await;
-    match state.kernel.spawn() {
+    let kernel = Arc::clone(&state.kernel);
+    let res = tokio::task::spawn_blocking(move || kernel.spawn())
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
         Ok(pid) => {
-            state.events.publish(render_snapshot(&state));
+            let snap_state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                snap_state.events.publish(render_snapshot(&snap_state));
+            });
             Json(json!({"ok": true, "success": true, "message": "QwenPaw 已重启", "pid": pid})).into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -491,9 +508,19 @@ print(json.dumps({'releases': sorted(parser.versions), 'latest_stable': ''}))";
     .await;
     match output {
         Ok(Ok(o)) if o.status.success() => {
-            let payload: serde_json::Value =
-                serde_json::from_slice(&o.stdout).unwrap_or(json!({"ok": false}));
-            Json(payload).into_response()
+            let parsed_raw: Result<serde_json::Value, _> = serde_json::from_slice(&o.stdout);
+            if let Ok(val) = parsed_raw {
+                if let Some(releases_arr) = val.get("releases").and_then(|r| r.as_array()) {
+                    let raw_versions: Vec<String> = releases_arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    let cur_ver = state.kernel.kernel_version();
+                    let response_data = crate::version::build_version_list(&raw_versions, &cur_ver);
+                    return Json(response_data).into_response();
+                }
+            }
+            err_json(StatusCode::BAD_GATEWAY, "解析 PyPI 镜像版本失败")
         }
         _ => err_json(StatusCode::BAD_GATEWAY, "查询所选 PyPI 镜像失败"),
     }
@@ -592,13 +619,19 @@ async fn kernel_uninstall(
         Err(response) => return *response,
     };
     state.kernel.stop().await;
-    let warnings = match remove_kernel_files(
-        std::path::Path::new(&state.home_dir),
-        std::path::Path::new(&state.var_dir),
-    ) {
+    let home = state.home_dir.clone();
+    let var = state.var_dir.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        remove_kernel_files(std::path::Path::new(&home), std::path::Path::new(&var))
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+
+    let warnings = match res {
         Ok(warnings) => warnings,
         Err(e) => {
-            let _ = state.kernel.spawn();
+            let kernel = Arc::clone(&state.kernel);
+            let _ = tokio::task::spawn_blocking(move || kernel.spawn()).await;
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &e);
         }
     };
@@ -608,7 +641,10 @@ async fn kernel_uninstall(
         state.kernel.port(),
         false,
     );
-    state.events.publish(render_snapshot(&state));
+    let snap_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        snap_state.events.publish(render_snapshot(&snap_state));
+    });
     let mut message = "内核已卸载，用户配置、记忆与管理员认证已保留".to_string();
     if !warnings.is_empty() {
         message.push_str(&format!("；{}", warnings.join("；")));
@@ -691,15 +727,23 @@ async fn kernel_reset_auth(
         );
     }
     state.kernel.stop().await;
-    let spawn_result = state.kernel.spawn();
+    let kernel = Arc::clone(&state.kernel);
+    let spawn_result = tokio::task::spawn_blocking(move || kernel.spawn())
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
     let mut healthy = spawn_result.is_ok();
     if spawn_result.is_ok() {
         healthy = wait_healthy_blocking(&state).await;
     }
     if healthy {
-        // 重启成功才真正删除备份;删除失败必须告知(备份里留着旧口令哈希)
-        let backup_removed = std::fs::remove_file(&backup);
-        state.events.publish(render_snapshot(&state));
+        let backup_c = backup.clone();
+        let backup_removed = tokio::task::spawn_blocking(move || std::fs::remove_file(&backup_c))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        let snap_state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            snap_state.events.publish(render_snapshot(&snap_state));
+        });
         let msg = match backup_removed {
             Ok(_) => "管理员密码已重置,服务已重启".to_string(),
             Err(e) => format!(
@@ -709,19 +753,25 @@ async fn kernel_reset_auth(
         };
         Json(json!({"ok": true, "success": true, "message": msg})).into_response()
     } else {
-        // 回滚(P1-02):先停止失败的新实例 —— 它可能仍存活只是不健康,
-        // 不停则恢复后旧实例 spawn 会撞 "already running",回滚静默失效
         state.kernel.stop().await;
-        // 恢复认证文件;失败必须如实上报(备份仍在,不丢认证)
-        let restore = std::fs::rename(&backup, &auth);
-        let respawn = state.kernel.spawn();
-        // 旧实例同样要通过健康检查,才允许宣称"已恢复"
+        let backup_c = backup.clone();
+        let auth_c = auth.clone();
+        let restore = tokio::task::spawn_blocking(move || std::fs::rename(&backup_c, &auth_c))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        let kernel = Arc::clone(&state.kernel);
+        let respawn = tokio::task::spawn_blocking(move || kernel.spawn())
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
         let respawn_healthy = if respawn.is_ok() {
             wait_healthy_blocking(&state).await
         } else {
             false
         };
-        state.events.publish(render_snapshot(&state));
+        let snap_state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            snap_state.events.publish(render_snapshot(&snap_state));
+        });
         let detail = match spawn_result {
             Err(e) => format!("服务重启失败: {e}"),
             Ok(_) => "服务重启后健康检查未通过".to_string(),
@@ -874,20 +924,29 @@ async fn port(
     // 2) 重启内核到新端口
     state.kernel.set_port(req.port);
     state.kernel.stop().await;
-    let spawn_result = state.kernel.spawn();
+    let kernel = Arc::clone(&state.kernel);
+    let spawn_result = tokio::task::spawn_blocking(move || kernel.spawn())
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
     let mut healthy = spawn_result.is_ok();
     if healthy {
         healthy = wait_healthy_blocking(&state).await;
     }
     let mut ui_error = None;
     if healthy {
-        if let Err(e) = sync_ui_port(std::path::Path::new(&state.ui_config_file), req.port) {
+        let ui_conf = state.ui_config_file.clone();
+        let target_p = req.port;
+        let sync_res = tokio::task::spawn_blocking(move || sync_ui_port(std::path::Path::new(&ui_conf), target_p)).await;
+        if let Err(e) = sync_res.unwrap_or_else(|e| Err(std::io::Error::other(e))) {
             healthy = false;
             ui_error = Some(e);
         }
     }
     if healthy {
-        state.events.publish(render_snapshot(&state));
+        let snap_state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            snap_state.events.publish(render_snapshot(&snap_state));
+        });
         Json(json!({
             "ok": true, "success": true,
             "message": format!("端口已更改为 {},服务已重启", req.port),
@@ -895,21 +954,29 @@ async fn port(
         }))
         .into_response()
     } else {
-        // 回滚(P1-02):先停止失败的新实例 —— 它可能仍存活只是不健康,
-        // 不停则旧实例 spawn 会撞 "already running",回滚静默失效
         state.kernel.stop().await;
-        // 恢复旧端口配置;写回失败必须如实上报,不得宣称"已回滚"
-        let restore = std::fs::write(&port_file, format!("{}\n", old_port));
-        let ui_restore = sync_ui_port(std::path::Path::new(&state.ui_config_file), old_port);
+        let port_file_c = port_file.clone();
+        let restore = tokio::task::spawn_blocking(move || std::fs::write(&port_file_c, format!("{old_port}\n")))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        let ui_conf = state.ui_config_file.clone();
+        let ui_restore = tokio::task::spawn_blocking(move || sync_ui_port(std::path::Path::new(&ui_conf), old_port))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
         state.kernel.set_port(old_port);
-        let rollback = state.kernel.spawn();
-        // 旧实例同样要通过健康检查,才允许宣称"已回滚"(与正向路径同一标准)
+        let kernel = Arc::clone(&state.kernel);
+        let rollback = tokio::task::spawn_blocking(move || kernel.spawn())
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
         let rolled_healthy = if rollback.is_ok() {
             wait_healthy_blocking(&state).await
         } else {
             false
         };
-        state.events.publish(render_snapshot(&state));
+        let snap_state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            snap_state.events.publish(render_snapshot(&snap_state));
+        });
         let detail = match ui_error {
             Some(e) => format!("桌面入口端口同步失败: {e}"),
             None => match spawn_result {
@@ -1028,5 +1095,33 @@ mod tests {
         assert_eq!(value[".url"]["qwenpaw.console"]["type"], "iframe");
         assert!(!dir.join("config.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn slow_operation_does_not_block_status_and_rejects_concurrent_ops() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let operations = Arc::clone(&lock);
+
+        // 模拟耗时运维操作（持有互斥锁）
+        let guard = operations.clone().try_lock_owned().unwrap();
+        let slow_task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(guard);
+        });
+
+        // 1. 并发运维变更立即返回 409 Conflict
+        let concurrent_err = try_operation(&operations).unwrap_err();
+        assert_eq!(concurrent_err.status(), StatusCode::CONFLICT);
+
+        // 2. 状态查询不被拖住，毫秒级即时响应
+        let start = std::time::Instant::now();
+        let inst = InstallState::new(Arc::new(|_| {}), Arc::new(|| Ok(0)));
+        let snap = inst.snapshot();
+        assert!(!snap.running);
+        assert!(start.elapsed() < std::time::Duration::from_millis(50), "status 绝不被耗时运维操作拖住");
+
+        slow_task.await.unwrap();
+        // 慢操作结束后锁成功释放
+        assert!(try_operation(&operations).is_ok());
     }
 }

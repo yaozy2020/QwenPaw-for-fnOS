@@ -25,12 +25,7 @@ fi
 if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
     echo "${INIT_PORT}" > "${TRIM_PKGVAR}/service_port"
-    
-    for ui_cfg in "${TRIM_APPDEST}/ui/config" "/var/apps/qwenpaw/ui/config"; do
-        if [ -w "${ui_cfg}" ]; then
-            sed -i 's/"port": *"[^"]*"/"port": "'"${INIT_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
-        fi
-    done
+    sync_ui_config_port "${INIT_PORT}"
     for mf in "${TRIM_APPDEST}/manifest" "/var/apps/qwenpaw/manifest"; do
         if [ -w "${mf}" ]; then
             sed -i 's/^service_port *= *[0-9]*/service_port               = '"${INIT_PORT}"'/g' "${mf}" 2>/dev/null || true
@@ -99,30 +94,13 @@ fi
 log_msg "虚拟环境激活成功"
 
 PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
+MIRROR_URL="$(map_mirror_url "${PYPI_MIRROR}")"
 PIP_OPTS=""
+[ -n "${MIRROR_URL}" ] && PIP_OPTS="-i ${MIRROR_URL}"
+log_msg "下载源设定为: ${PYPI_MIRROR} (${MIRROR_URL:-官方源})"
 
-if [ "$PYPI_MIRROR" = "tsinghua" ]; then
-    log_msg "使用清华源安装"
-    PIP_OPTS="-i https://pypi.tuna.tsinghua.edu.cn/simple"
-elif [ "$PYPI_MIRROR" = "aliyun" ]; then
-    log_msg "使用阿里云源安装"
-    PIP_OPTS="-i https://mirrors.aliyun.com/pypi/simple/"
-elif [ "$PYPI_MIRROR" = "ustc" ]; then
-    log_msg "使用中科大源安装"
-    PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
-fi
-
-# 向导选择的下载源落盘为控制台初始默认(控制台"下载源"选择器可随时改写;
-# 仅在文件不存在时落盘,不覆盖用户已有选择 —— 源选择自此不再止步于安装时)
-case "$PYPI_MIRROR" in
-    tsinghua) MIRROR_URL="https://pypi.tuna.tsinghua.edu.cn/simple" ;;
-    aliyun)   MIRROR_URL="https://mirrors.aliyun.com/pypi/simple/" ;;
-    ustc)     MIRROR_URL="https://pypi.mirrors.ustc.edu.cn/simple/" ;;
-    *)        MIRROR_URL="" ;;
-esac
-if [ -n "$MIRROR_URL" ] && [ ! -f "${VAR_DIR}/pip-mirror" ]; then
-    printf '%s\n' "$MIRROR_URL" > "${VAR_DIR}/pip-mirror" 2>/dev/null || true
-fi
+# 向导选择的下载源落盘为控制台初始默认(不覆盖用户已有选择)
+sync_pip_mirror "${PYPI_MIRROR}" 0
 
 log_msg "正在升级虚拟环境 pip..."
 if ! python3 -m pip install --upgrade pip $PIP_OPTS; then

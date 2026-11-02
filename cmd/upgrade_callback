@@ -38,35 +38,18 @@ if [ ! -d "${VENV_DIR}" ]; then
     fi
 
     PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
+    MIRROR_URL="$(map_mirror_url "${PYPI_MIRROR}")"
     PIP_OPTS=""
-    if [ "$PYPI_MIRROR" = "tsinghua" ]; then
-        PIP_OPTS="-i https://pypi.tuna.tsinghua.edu.cn/simple"
-    elif [ "$PYPI_MIRROR" = "aliyun" ]; then
-        PIP_OPTS="-i https://mirrors.aliyun.com/pypi/simple/"
-    elif [ "$PYPI_MIRROR" = "ustc" ]; then
-        PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
-    fi
-
-    # 向导选择的下载源同步持久化到控制台
-    case "$PYPI_MIRROR" in
-        tsinghua) MIRROR_URL="https://pypi.tuna.tsinghua.edu.cn/simple" ;;
-        aliyun)   MIRROR_URL="https://mirrors.aliyun.com/pypi/simple/" ;;
-        ustc)     MIRROR_URL="https://pypi.mirrors.ustc.edu.cn/simple/" ;;
-        *)        MIRROR_URL="" ;;
-    esac
-    if [ -n "$MIRROR_URL" ]; then
-        printf '%s\n' "$MIRROR_URL" > "${VAR_DIR}/pip-mirror" 2>/dev/null || true
-    fi
+    [ -n "${MIRROR_URL}" ] && PIP_OPTS="-i ${MIRROR_URL}"
+    sync_pip_mirror "${PYPI_MIRROR}" 1
 
     # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）。
-    # 钉值必须过白名单 —— 它会拼成 `qwenpaw=={pin}` 进 pip 参数
-    VERSION_PIN="$(tr -d '[:space:]' < "${PIN_FILE}" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
-    if [ -n "${VERSION_PIN}" ] && valid_version_pin "${VERSION_PIN}"; then
+    if VERSION_PIN="$(read_valid_version_pin "${PIN_FILE}")"; then
         TARGET_PKG="qwenpaw==${VERSION_PIN}"
         log_msg "按版本钉恢复内核: ${TARGET_PKG}"
-    elif [ -n "${VERSION_PIN}" ]; then
+    elif [ -f "${PIN_FILE}" ]; then
         TARGET_PKG="qwenpaw"
-        log_msg "WARN: 版本钉内容非法(${VERSION_PIN})，按向导渠道安装"
+        log_msg "WARN: 版本钉内容非法，按向导渠道安装"
     else
         TARGET_PKG="qwenpaw"
         if [ "${wizard_channel:-stable}" = "beta" ]; then

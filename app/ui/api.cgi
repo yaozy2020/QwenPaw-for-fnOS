@@ -227,7 +227,9 @@ import json, re, sys
 out = {"success": False, "versions": [], "latest_stable": "", "message": ""}
 try:
     d = json.load(sys.stdin)
-    if not isinstance(d, dict) or d.get("ok") is False or not isinstance(d.get("releases"), list):
+    if isinstance(d, dict) and isinstance(d.get("versions"), list) and d.get("success") is True:
+        out = d
+    elif not isinstance(d, dict) or d.get("ok") is False or not isinstance(d.get("releases"), list):
         out["message"] = (d.get("message") or d.get("error") or "查询 PyPI 失败") if isinstance(d, dict) else "监督者响应形状异常"
     else:
         def vkey(v):

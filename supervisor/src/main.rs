@@ -8,6 +8,7 @@ mod events;
 mod install;
 mod kernel;
 mod procfs;
+mod version;
 
 use std::{
     io::Write,

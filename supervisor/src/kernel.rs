@@ -203,9 +203,10 @@ impl KernelManager {
     }
 
     /// 三段式停止:组 TERM(宽限 10s)→ 单 KILL → 组 KILL 清扫。
-    /// 组信号仅在内核为自身进程组长(setsid 启动)时启用,防误伤同组平台进程。
-    pub async fn stop(&self) {
-        self.stop_sync();
+    /// 异步非阻塞接口:将阻塞的睡眠轮询放进 spawn_blocking,不占用 Tokio 工作线程
+    pub async fn stop(self: &std::sync::Arc<Self>) {
+        let this = std::sync::Arc::clone(self);
+        let _ = tokio::task::spawn_blocking(move || this.stop_sync()).await;
     }
 
     pub fn stop_sync(&self) {

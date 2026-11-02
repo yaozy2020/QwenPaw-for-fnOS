@@ -95,3 +95,53 @@ stop_supervisor() {
     rm -f "${VAR_DIR}/qwenpaw.pid" 2>/dev/null || true
     return 0
 }
+
+# ── 镜像源 URL 映射（统一 install/upgrade/cgi 口径）──
+map_mirror_url() {
+    case "$1" in
+        tsinghua) echo "https://pypi.tuna.tsinghua.edu.cn/simple" ;;
+        aliyun)   echo "https://mirrors.aliyun.com/pypi/simple/" ;;
+        ustc)     echo "https://pypi.mirrors.ustc.edu.cn/simple/" ;;
+        http://*|https://*) echo "$1" ;;
+        *)        echo "" ;;
+    esac
+}
+
+# ── 持久化镜像源到 pip-mirror ──
+sync_pip_mirror() {
+    local mirror="$1"
+    local force="${2:-0}"
+    local url
+    url="$(map_mirror_url "${mirror}")"
+    if [ -n "${url}" ]; then
+        if [ "${force}" = "1" ] || [ ! -f "${VAR_DIR}/pip-mirror" ]; then
+            mkdir -p "${VAR_DIR}" 2>/dev/null || true
+            printf '%s\n' "${url}" > "${VAR_DIR}/pip-mirror" 2>/dev/null || true
+        fi
+    fi
+}
+
+# ── 读取合法版本钉（0=存在且合法；输出版本号）──
+read_valid_version_pin() {
+    local pin_file="${1:-${VAR_DIR}/qwenpaw-version}"
+    [ -f "${pin_file}" ] || return 1
+    local raw
+    raw="$(tr -d '[:space:]' < "${pin_file}" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
+    if [ -n "${raw}" ] && valid_version_pin "${raw}"; then
+        echo "${raw}"
+        return 0
+    fi
+    return 1
+}
+
+# ── 桌面入口端口同步（收敛 install_callback 与 config_callback 重复逻辑）──
+sync_ui_config_port() {
+    local port="$1"
+    [ -n "${port}" ] || return 0
+    local appdest="${TRIM_APPDEST:-/var/apps/qwenpaw}"
+    for ui_cfg in "${appdest}/ui/config" "/var/apps/qwenpaw/ui/config"; do
+        if [ -w "${ui_cfg}" ]; then
+            sed -i 's/"port": *"[^"]*"/"port": "'"${port}"'"/g' "${ui_cfg}" 2>/dev/null || true
+        fi
+    done
+}

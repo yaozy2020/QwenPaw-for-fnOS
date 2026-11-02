@@ -565,23 +565,35 @@ const API_BASE = (function() {
 
     let currentRunningVersion = "";
 
-    // 降级判定:优先用服务端排序结果(桥内 python 按 PEP 440 语义排序,经 lint
-    // 钉死 2.10.0>2.9.9、稳定>预发布);两个版本都在列表外时退回本地启发式比较。
-    // 纯本地 `-100+数字` 比较曾把 alpha/beta/rc 排错
+    // 降级判定:优先读取后端权威 action (upgrade/downgrade/reinstall/install);
+    // 列表外版本退回索引与比较
     function isDowngradeOf(current: string, selected: string): boolean {
+      const item = rawVersionList.find(v => v.version === selected);
+      if (item && item.action) {
+        return item.action === "downgrade";
+      }
       const ci = rawVersionList.findIndex(v => v.version === current);
       const si = rawVersionList.findIndex(v => v.version === selected);
-      // rawVersionList 为降序(索引 0 最新,索引大则版本老)。若选定版本的索引大于当前运行索引,即为降级
       if (ci >= 0 && si >= 0) return si > ci;
       return compareVersion(current, selected) > 0;
     }
 
     function isSameVersion(current: string, selected: string): boolean {
-      return Boolean(current && selected && compareVersion(current, selected) === 0);
+      if (!current || !selected) return false;
+      const item = rawVersionList.find(v => v.version === selected);
+      if (item && item.action === "reinstall") return true;
+      return current.replace(/^v/i, "").trim() === selected.replace(/^v/i, "").trim();
     }
 
     function currentInstallAction(): string {
       if (!currentRunningVersion) return "安装";
+      const item = rawVersionList.find(v => v.version === selectedVersion);
+      if (item && item.action) {
+        if (item.action === "reinstall") return "重新安装";
+        if (item.action === "downgrade") return "降级";
+        if (item.action === "upgrade") return "升级";
+        if (item.action === "install") return "安装";
+      }
       if (isSameVersion(currentRunningVersion, selectedVersion)) return "重新安装";
       return isDowngradeOf(currentRunningVersion, selectedVersion) ? "降级" : "升级";
     }
