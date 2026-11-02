@@ -88,9 +88,36 @@ BIN_DIR = os.path.join(PROJ_DIR, "tools", "fpkstudio-bin")
 FPKSTUDIO_BIN = os.path.join(BIN_DIR, "fpkstudio")
 FNPACK_BIN = os.path.join(PROJ_DIR, "tools", "fnpack")
 
+# fpkstudio 需要的 fnpack 打包器。同为入库二进制,必须与 fpkstudio 同样钉死 SHA256,
+# 否则"一严一松"会让这条路径成为供应链缺口。
+FNPACK_SHA256_FILE = os.path.join(PROJ_DIR, "tools", "fnpack.sha256")
+
 # fpkstudio v1.2.1 官方发布二进制 SHA256 与下载源
 EXPECTED_FPKSTUDIO_SHA256 = "68aa3e7cdcf1148f19b1539fc445f82124961a85794373ecc9776c2970267efd"
 FPKSTUDIO_DOWNLOAD_URL = "https://github.com/shuangji66/Fndepot/releases/download/2026.10.25/fpkstudio-1.2.1-x86.fpk"
+
+def verify_fnpack():
+    """校验 tools/fnpack 的 SHA256。供应链上不允许存在未经校验的入库二进制。"""
+    import hashlib
+    if not os.path.exists(FNPACK_BIN):
+        raise SystemExit(f"ERROR: 缺少打包器 {FNPACK_BIN}")
+    expected = ""
+    if os.path.exists(FNPACK_SHA256_FILE):
+        with open(FNPACK_SHA256_FILE, encoding="utf-8") as f:
+            expected = f.read().split()[0].strip().lower()
+    if not expected:
+        raise SystemExit(f"ERROR: 缺少 {FNPACK_SHA256_FILE},无法校验 fnpack 完整性")
+    h = hashlib.sha256()
+    with open(FNPACK_BIN, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+    if actual != expected:
+        raise SystemExit(
+            f"ERROR: fnpack SHA256 校验失败: 期望 {expected}, 实际 {actual}"
+        )
+    print(f"[fpkstudio] fnpack SHA256 校验通过 ({actual[:16]}...)")
+
 
 class UnixHTTPConnection(http.client.HTTPConnection):
     def __init__(self, socket_path):
@@ -169,6 +196,7 @@ def main():
         env["FPKSTUDIO_DATA_DIR"] = data_dir
         env["FPKSTUDIO_SOCKET"] = socket_path
         env["FPKSTUDIO_FNPACK"] = FNPACK_BIN
+        verify_fnpack()
         env["FPKSTUDIO_LOG_LEVEL"] = "warn"
 
         proc = subprocess.Popen([FPKSTUDIO_BIN], env=env)

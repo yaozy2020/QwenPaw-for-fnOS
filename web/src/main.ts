@@ -306,6 +306,32 @@ const API_BASE = (function() {
 
       } catch (e) {
         console.error("fetchStatus err:", e);
+        // 无法连接后端(502/网络错误/会话过期)时必须把徽章切到未知态。
+        // 否则徽章保留 index.html 里的初始红色/上一次的绿色,用户会以为服务在跑。
+        const badge = document.getElementById("statusBadge");
+        if (badge) {
+          badge.className = "badge badge-warning";
+          badge.innerHTML = `<span class="pulse-dot"></span> 状态不可达`;
+        }
+        const cardMount = document.getElementById("statusCardMount");
+        if (cardMount) {
+          renderStatusCard({
+            installed: false,
+            running: false,
+            pid: "-",
+            startAt: null,
+            cpu: null,
+            memKB: null,
+          }, cardMount);
+        }
+        const valVersion = document.getElementById("valVersion");
+        if (valVersion) valVersion.innerText = "无法获取";
+        const valAuth = document.getElementById("valAuthStatus");
+        if (valAuth) valAuth.innerText = "无法获取";
+        const valDesc = document.getElementById("valAuthDesc");
+        if (valDesc) {
+          valDesc.innerText = "控制台无法连接监督者（可能服务重启中或会话已过期）。这不代表内核已停止，稍后会自动重试。";
+        }
       }
     }
 

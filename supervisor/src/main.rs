@@ -21,10 +21,52 @@ use events::Events;
 use install::InstallState;
 use kernel::KernelManager;
 
+/// 对 VAR_DIR/supervisor.lock 取独占 flock(LOCK_EX|LOCK_NB)。
+/// 返回的 File 必须在整个进程生命周期内保持打开 —— drop 即释放锁。
+/// 日志锁解毒取用。日志写入途中的 panic(FIFO/满盘/EPIPE)会毒化 Mutex,
+/// 之后每次 `.unwrap()` 都连锁 panic,监督者从此彻底哑火。
+/// 日志是最后的诊断手段,必须比业务状态更宽容:中毒也照写。
+fn lock_log(log: &Mutex<std::fs::File>) -> std::sync::MutexGuard<'_, std::fs::File> {
+    match log.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            log.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn acquire_instance_lock(var_dir: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let path = std::path::Path::new(var_dir).join("supervisor.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
 fn main() {
     let cfg = Config::load();
     std::fs::create_dir_all(&cfg.var_dir).ok();
     std::fs::create_dir_all(&cfg.share_dir).ok();
+
+    // 单实例锁:平台重试或 start 竞态可能拉起第二个监督者。
+    // 没有这把锁时只能靠端口 bind 失败间接收敛,而退出前已经动过 pid 文件与日志。
+    // 锁在进程存活期间一直持有(fd 不关闭),进程崩溃时内核自动释放。
+    let _instance_lock = match acquire_instance_lock(&cfg.var_dir) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("[Supervisor] already running or cannot lock: {e}");
+            std::process::exit(0);
+        }
+    };
 
     // 日志治理:启动时对超过 10MB 的自产日志做单代轮转(保 1 代旧文件)。
     // 内核仍持有旧 fd 时其后续写入会落在改名后的文件里,代价可接受;
@@ -43,7 +85,7 @@ fn main() {
     let logf: Arc<dyn Fn(&str) + Send + Sync> = {
         let log = Arc::clone(&log);
         Arc::new(move |msg: &str| {
-            let mut g = log.lock().unwrap();
+            let mut g = lock_log(&log);
             let _ = writeln!(g, "[Supervisor] +{}s {}", started.elapsed().as_secs(), msg);
         })
     };
@@ -69,7 +111,7 @@ fn main() {
     let events = Events::new();
     let kernel_for_install = Arc::clone(&kernel);
     let ui_config_for_install = cfg.ui_config_file.clone();
-    let install = InstallState::new(
+    let install = InstallState::with_stop(
         {
             let log = Arc::clone(&log);
             Arc::new(move |snap: install::InstallSnapshot| {
@@ -80,10 +122,10 @@ fn main() {
                         kernel_for_install.port(),
                         kernel_for_install.installed(),
                     ) {
-                        let _ = writeln!(log.lock().unwrap(), "[Supervisor] sync desktop kernel entry failed: {e}");
+                        let _ = writeln!(lock_log(&log), "[Supervisor] sync desktop kernel entry failed: {e}");
                     }
                 }
-                let mut g = log.lock().unwrap();
+                let mut g = lock_log(&log);
                 let _ = writeln!(
                     g,
                     "[Supervisor] install seq={} phase={:?} fetched={} msg={}",
@@ -104,6 +146,11 @@ fn main() {
         {
             let kernel = Arc::clone(&kernel);
             Arc::new(move || kernel.spawn())
+        },
+        {
+            // 安装取消/回滚前必须先停掉已拉起的新内核
+            let kernel = Arc::clone(&kernel);
+            Arc::new(move || kernel.stop_sync())
         },
     );
 

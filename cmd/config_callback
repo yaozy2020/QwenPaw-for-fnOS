@@ -4,8 +4,8 @@
 # （旧 qwenpaw.pid 从未被当前 cmd/main 写入,按它停止等于没停,改端口从不生效）
 
 PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
-APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"
-[ ! -d "${APPDEST}" ] && APPDEST="/var/apps/qwenpaw"
+# 回退根必须与 cmd/lib.sh 一致,否则两个脚本对同一份 ui/config 指向不同路径
+APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw}"
 
 LOG_FILE="${PKGVAR}/qwenpaw-config.log"
 PORT_FILE="${PKGVAR}/service_port"
@@ -39,7 +39,7 @@ if [ -n "${NEW_PORT}" ]; then
     fi
 
     # 核心：动态同步改写飞牛系统的 ui/config，彻底解决常规卡片端口不一致问题！
-    for ui_cfg in "${APPDEST}/ui/config" "/var/apps/qwenpaw/ui/config"; do
+    for ui_cfg in "${APPDEST}/ui/config" "${APPDEST}/target/ui/config"; do
         if [ -w "${ui_cfg}" ]; then
             if ! sed -i 's/"port": *"[^"]*"/"port": "'"${NEW_PORT}"'"/g' "${ui_cfg}" 2>/dev/null; then
                 log_msg "ERROR: 桌面入口端口同步失败: ${ui_cfg}"

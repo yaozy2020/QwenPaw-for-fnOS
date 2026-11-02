@@ -102,6 +102,8 @@ map_mirror_url() {
         tsinghua) echo "https://pypi.tuna.tsinghua.edu.cn/simple" ;;
         aliyun)   echo "https://mirrors.aliyun.com/pypi/simple/" ;;
         ustc)     echo "https://pypi.mirrors.ustc.edu.cn/simple/" ;;
+        # 向导提供 "official" 选项:显式给出官方源,不要依赖"空串即官方"的隐式行为
+        official) echo "https://pypi.org/simple" ;;
         http://*|https://*) echo "$1" ;;
         *)        echo "" ;;
     esac
@@ -138,8 +140,10 @@ read_valid_version_pin() {
 sync_ui_config_port() {
     local port="$1"
     [ -n "${port}" ] || return 0
-    local appdest="${TRIM_APPDEST:-/var/apps/qwenpaw}"
-    for ui_cfg in "${appdest}/ui/config" "/var/apps/qwenpaw/ui/config"; do
+    # 飞牛部署布局是 TRIM_APPDEST=/var/apps/qwenpaw/target,ui/config 在其下;
+    # 本地布局则直接落在应用根。两种都要试,不能只认一种。
+    local base="${TRIM_APPDEST:-/var/apps/qwenpaw}"
+    for ui_cfg in "${base}/ui/config" "${base}/target/ui/config"; do
         if [ -w "${ui_cfg}" ]; then
             sed -i 's/"port": *"[^"]*"/"port": "'"${port}"'"/g' "${ui_cfg}" 2>/dev/null || true
         fi

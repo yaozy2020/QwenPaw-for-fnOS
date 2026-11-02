@@ -11,8 +11,9 @@
 # 　　　　　放置应用包 /ui 路径下，记得 chmod +x index.cgi 赋权
 # 　许可证: MIT
 
-# 【注意】修改你自己的静态文件根目录，以本应用为例：
-BASE_PATH="/var/apps/qwenpaw/target/www"
+# 【注意】静态文件根目录。优先用平台注入的 TRIM_APPDEST,
+# 否则在非标准安装布局(本地调试/镜像重定位)下会指向不存在的路径。
+BASE_PATH="${TRIM_APPDEST:-/var/apps/qwenpaw/target}/www"
 
 # 1. 从 REQUEST_URI 里拿到 index.cgi 后面的路径
 #    例如：/cgi/ThirdParty/qwenpaw/index.cgi/index.html?foo=bar   

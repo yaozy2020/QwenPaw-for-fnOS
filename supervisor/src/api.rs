@@ -684,7 +684,7 @@ async fn kernel_pin(
         return err_json(StatusCode::BAD_REQUEST, "版本钉仅接受合法的精确版本号");
     }
     let pin_path = format!("{}/qwenpaw-version", state.var_dir);
-    match std::fs::write(&pin_path, format!("{}\n", req.version)) {
+    match crate::install::atomic_write_0600(&pin_path, &format!("{}\n", req.version)) {
         Ok(_) => {
             state.events.publish(render_snapshot(&state));
             Json(json!({"ok": true, "message": format!("版本钉已更新: {}", req.version)}))
@@ -915,7 +915,7 @@ async fn port(
     let old_port = state.kernel.port();
 
     // 1) 落盘新端口(写失败即中止,此时内核未动,无回滚必要)
-    if let Err(e) = std::fs::write(&port_file, format!("{}\n", req.port)) {
+    if let Err(e) = crate::install::atomic_write_0600(&port_file, &format!("{}\n", req.port)) {
         return err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("写入端口配置失败: {e}"),
@@ -956,7 +956,9 @@ async fn port(
     } else {
         state.kernel.stop().await;
         let port_file_c = port_file.clone();
-        let restore = tokio::task::spawn_blocking(move || std::fs::write(&port_file_c, format!("{old_port}\n")))
+        let restore = tokio::task::spawn_blocking(move || {
+            crate::install::atomic_write_0600(&port_file_c, &format!("{old_port}\n"))
+        })
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(e)));
         let ui_conf = state.ui_config_file.clone();

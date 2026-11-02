@@ -7,13 +7,6 @@ PYTHON_BIN="${QWENPAW_PYTHON_BIN:-/var/apps/python312/target/bin/python3}"
 LIB_LOG_FILE="${VAR_DIR}/qwenpaw-install.log"
 export HOME="${WORKING_DIR}"
 
-MARKER="${WORKING_DIR}/.qwenpaw_keep_runtime"
-if [ -f "${MARKER}" ]; then
-    log_msg "检测到保留运行环境标记，跳过安装，仅修正权限"
-    exit 0
-fi
-
-
 # 1. 提取并持久化安装向导中设置的端口，同步至飞牛系统元数据
 INIT_PORT="${wizard_port:-${service_port:-${wizard_service_port:-18088}}}"
 if [ "${INIT_PORT}" = "19091" ]; then INIT_PORT="18088"; fi
@@ -26,11 +19,6 @@ if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
     echo "${INIT_PORT}" > "${TRIM_PKGVAR}/service_port"
     sync_ui_config_port "${INIT_PORT}"
-    for mf in "${TRIM_APPDEST}/manifest" "/var/apps/qwenpaw/manifest"; do
-        if [ -w "${mf}" ]; then
-            sed -i 's/^service_port *= *[0-9]*/service_port               = '"${INIT_PORT}"'/g' "${mf}" 2>/dev/null || true
-        fi
-    done
     log_msg "安装端口已设定并同步为: ${INIT_PORT}"
 fi
 
@@ -59,7 +47,7 @@ esac
 log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
 
 # 运行环境与内核均健在 → 外壳升级/重装不重装内核（版本双轨制），仅刷新版本钉
-# （MARKER 在 TRIM_PKGHOME 下会随 fpk 升级被清掉，因此以 venv 实际状态为准）
+# 以 venv 实际状态为准(不依赖任何标记文件:TRIM_PKGHOME 会随 fpk 升级被清掉)
 if [ -x "${VENV_DIR}/bin/python3" ] && "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1; then
     CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
     log_msg "检测到运行环境与内核（${CUR_VER:-?}）均健在，跳过内核重装（双轨制：内核升级请走控制台版本管理）"

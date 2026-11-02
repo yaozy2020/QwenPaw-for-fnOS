@@ -36,6 +36,9 @@ start_process() {
     fi
     # VAR_DIR 先建:日志重定向与 PID 落盘都依赖它(全新安装时平台可能尚未创建)
     mkdir -p "${VAR_DIR}" 2>/dev/null || true
+    # status 已改为无副作用(避免把 fork→exec 窗口内刚写的 pid 删掉),
+    # 陈旧 PID 文件在这里显式清一次,否则 supervisor_register_start 会撞上旧内容。
+    rm -f "${PID_FILE}" "${PID_FILE}.starttime" 2>/dev/null || true
     # TRIM_* 环境变量由平台注入本脚本,子进程继承;监督者据此定位数据目录
     nohup "$SUP_BIN" >> "${LOG_FILE}" 2>&1 &
     # 记录 PID + starttime 戳:stop/status 据此核对进程身份(P1-01)。

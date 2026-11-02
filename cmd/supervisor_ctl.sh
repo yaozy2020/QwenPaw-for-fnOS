@@ -106,7 +106,9 @@ supervisor_status() {
             return 0
         fi
     fi
-    rm -f "$pid_file" "${pid_file}.starttime" 2>/dev/null || true
+    # 只读路径不得有副作用:start 的流程是 fork → exec → 立刻查状态,
+    # 此刻 /proc 里还没有身份信息,带删除的检查会把刚写好的 pid 文件删掉,
+    # 造成"启动成功却报失败"。陈旧文件由 supervisor_safe_stop / start 显式清理。
     return 3
 }
 

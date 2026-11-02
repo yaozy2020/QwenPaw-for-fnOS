@@ -69,7 +69,14 @@ if supervisor_status "${T}/supervisor.pid"; then
 else
     ok "status 对陈旧 PID 返回未运行"
 fi
-[ -f "${T}/supervisor.pid" ] && bad "status 未清理陈旧 PID 文件"
+# status 已改为只读(清理副作用会把 start 在 fork→exec 窗口内刚写的 pid 删掉,
+# 造成"启动成功却报失败")。这里断言的是"不得有副作用",陈旧文件交由
+# supervisor_safe_stop / start 显式清理。
+if [ -f "${T}/supervisor.pid" ]; then
+    ok "status 为只读查询，未删除 PID 文件（副作用已移除）"
+else
+    bad "status 仍有删除副作用（会误删 start 刚写入的 pid）"
+fi
 echo "$victim" > "${T}/supervisor.pid"
 rc=0
 supervisor_safe_stop "${T}/supervisor.pid" || rc=$?

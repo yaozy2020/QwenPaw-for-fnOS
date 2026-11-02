@@ -23,8 +23,16 @@ secure_var_perms
 # 停止旧监督者(统一 supervisor.pid 口径;监督者 TERM 会级联停内核并回收 pip)
 stop_supervisor
 
-if [ ! -d "${VENV_DIR}" ]; then
-    log_msg "venv 缺失，重建虚拟环境 ${VENV_DIR}..."
+# 目录存在不等于内核可用:python 可能被删、元数据可能残缺。
+# 只看 [ -d ] 会让"pip 失败 → 平台重试 → 目录已存在 → 跳过修复 → 报成功"，
+# 而回调本身要求可重入自愈，这条路径恰恰最需要自愈。
+if ! kernel_installed; then
+    if [ -d "${VENV_DIR}" ]; then
+        log_msg "venv 存在但内核不可用(缺 python 或元数据)，重建 ${VENV_DIR}..."
+        rm -rf "${VENV_DIR}"
+    else
+        log_msg "venv 缺失，重建虚拟环境 ${VENV_DIR}..."
+    fi
     if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
         log_msg "ERROR: 虚拟环境创建失败: ${VENV_DIR}"
         notify_user "QwenPaw 虚拟环境创建失败，请检查 Python 运行环境与磁盘权限。"
@@ -51,11 +59,10 @@ if [ ! -d "${VENV_DIR}" ]; then
         TARGET_PKG="qwenpaw"
         log_msg "WARN: 版本钉内容非法，按向导渠道安装"
     else
+        # 升级向导没有渠道选项(只有镜像),无钉时按稳定版恢复。
+        # 曾经的分支读 ${wizard_channel},而该变量全仓无任何来源,是死代码。
         TARGET_PKG="qwenpaw"
-        if [ "${wizard_channel:-stable}" = "beta" ]; then
-            TARGET_PKG="--pre qwenpaw"
-        fi
-        log_msg "无版本钉，按向导渠道安装: ${TARGET_PKG}"
+        log_msg "无版本钉，按稳定版安装: ${TARGET_PKG}"
     fi
 
     PIP_LOG=$(mktemp)

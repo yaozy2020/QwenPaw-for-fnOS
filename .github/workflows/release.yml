@@ -48,16 +48,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            ASSET_COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
-            if [ "$ASSET_COUNT" -gt 0 ]; then
+          # fail-closed:查询本身失败(网络/鉴权)时不能当作"release 不存在"放行,
+          # 否则不可变性检查在最需要生效的时候恰好失效。
+          if ! ERR=$(gh release view "$TAG" --json assets --jq '.assets | length' 2>&1); then
+            case "$ERR" in
+              *"release not found"*|*"Not Found"*)
+                echo "Release $TAG 尚未创建，校验通过。"
+                ;;
+              *)
+                echo "::error::无法确认 Release $TAG 是否已存在，拒绝继续（避免误覆盖）: $ERR"
+                exit 1
+                ;;
+            esac
+          else
+            ASSET_COUNT="$ERR"
+            if [ "${ASSET_COUNT:-0}" -gt 0 ]; then
               echo "::error::Release $TAG 已经存在且包含 $ASSET_COUNT 个已发布资产。严禁覆盖或重写已有 Release！"
               exit 1
-            else
-              echo "Release $TAG 存在但无资产，允许继续发布。"
             fi
-          else
-            echo "Release $TAG 尚未创建，校验通过。"
+            echo "Release $TAG 存在但无资产，允许继续发布。"
           fi
 
       # [3] 文件权限检查

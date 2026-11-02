@@ -213,7 +213,20 @@ def main():
     old = out.read_text(encoding="utf-8") if out.exists() else ""
 
     def _stable(s: str) -> str:
-        return re.sub(r"^- \*\*生成时间\*\*：.*$", "- **生成时间**：__DYNAMIC__", s, flags=re.M)
+        """归一化时变内容,只比对稳定区。
+
+        生成时间与"最近发布记录"都随时变;后者尤其危险 —— 每次推 tag 都会让集合变化,
+        若把它纳入 --check 断言,就得在每次发版后手工补一个"再生报告"提交,
+        否则 CI 立刻变红。这两段只用于人读,不参与门禁。
+        """
+        s = re.sub(r"^- \*\*生成时间\*\*：.*$", "- **生成时间**：__DYNAMIC__", s, flags=re.M)
+        s = re.sub(
+            r"## 最近发布记录\n.*?(?=\n---\n)",
+            "## 最近发布记录\n\n__DYNAMIC__\n",
+            s,
+            flags=re.S,
+        )
+        return s
 
     if check:
         if _stable(new) != _stable(old):

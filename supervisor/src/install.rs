@@ -113,7 +113,7 @@ pub fn sanitize_mirror(m: &str) -> String {
 }
 
 /// 0600 权限的原子写:临时文件 → fsync → rename。半写内容不会出现在目标路径。
-fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()> {
+pub(crate) fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = format!("{}.tmp", path);
     {
@@ -763,6 +763,9 @@ pub struct InstallState {
     inner: Arc<Mutex<Inner>>,
     on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
     on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
+    /// 停止内核。取消或回滚时必须真正停掉刚拉起的实例,
+    /// 否则运行中的进程其磁盘路径会被回滚抽掉。
+    on_stop: Arc<dyn Fn() + Send + Sync>,
     /// pip 启动器:生产即 Command::spawn;测试注入可阻塞 spawner,
     /// 精确复现"运行态已建立、PID 未登记"的取消窗口(P1-04)。
     spawner: Arc<dyn PipSpawner>,
@@ -793,11 +796,24 @@ const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 impl InstallState {
+    /// 无停止回调的构造(测试与控制台状态快照用)。生产路径用 with_stop。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(
         on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
         on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     ) -> Self {
         Self::with_spawner(Arc::new(RealSpawner), on_change, on_success)
+    }
+
+    /// 带自定义停止回调的构造:生产路径用它,保证取消/回滚前先停内核。
+    pub fn with_stop(
+        on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
+        on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
+        on_stop: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        let mut me = Self::with_spawner(Arc::new(RealSpawner), on_change, on_success);
+        me.on_stop = on_stop;
+        me
     }
 
     fn with_spawner(
@@ -818,6 +834,7 @@ impl InstallState {
             })),
             on_change,
             on_success,
+            on_stop: Arc::new(|| {}),
             spawner,
         }
     }
@@ -942,7 +959,12 @@ impl InstallState {
 
         let this = self.clone();
         let on_success = std::sync::Arc::clone(&self.on_success);
+        let on_stop = std::sync::Arc::clone(&self.on_stop);
+        let guard = self.clone();
         std::thread::spawn(move || {
+            // 一次意外 panic(例如 FIFO/设备文件进入 copy_tree)会让 running 永久为 true,
+            // /kernel/install 从此永久 busy 直到重启。用 catch_unwind 兜住并落 Failed。
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if this.abort_if_cancelled() {
                 return;
             }
@@ -999,7 +1021,7 @@ impl InstallState {
                         .parent()
                         .map(|p| p.join("install.pid"))
                         .unwrap_or_default();
-                    let _ = std::fs::write(&pid_file, format!("{}\n", pid));
+                    let _ = atomic_write_0600(&pid_file.to_string_lossy(), &format!("{pid}\n"));
 
                     // P1-04:spawn 与登记之间到达的取消在此落地 —— cancel 当时看到
                     // pid=0 只落了标志,这里复核后整组回收(组 TERM → 短宽限 → 组
@@ -1223,6 +1245,10 @@ impl InstallState {
                     let health_ok =
                         spawn_result.is_ok() && wait_for_version(kernel_port, &actual, 30);
                     if !health_ok {
+                        {
+                            let stop = Arc::clone(&on_stop);
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()));
+                        }
                         let mut error = match spawn_result {
                             Err(e) => format!("内核启动失败 (spawn_failed): {e}"),
                             Ok(_) => {
@@ -1258,6 +1284,11 @@ impl InstallState {
                     }
 
                     if this.cancelled() {
+                        // 新内核已在运行(健康检查已通过)。必须先停掉它,
+                        // 否则回滚把磁盘上的活动环境换回旧版本,而运行中的进程
+                        // 仍指向被抽掉的路径。
+                        let stop = Arc::clone(&on_stop);
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stop()));
                         let _ = transaction.rollback();
                         this.finish_cancelled();
                         return;
@@ -1304,6 +1335,23 @@ impl InstallState {
                         g.error = e.to_string();
                     });
                 }
+            }
+            }));
+
+            if let Err(panic) = outcome {
+                let detail = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                guard.set(|g| {
+                    // 只有仍处于 running 的本次任务才改写,避免覆盖后续任务状态
+                    if g.running {
+                        g.running = false;
+                        g.phase = Phase::Failed;
+                        g.error = format!("安装线程异常终止 (panic): {detail}");
+                    }
+                });
             }
         });
         true
