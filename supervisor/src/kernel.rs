@@ -161,7 +161,8 @@ impl KernelManager {
         cmd.stderr(std::process::Stdio::from(log));
         let mut child = cmd.spawn().map_err(|e| format!("spawn kernel: {e}"))?;
         let pid = child.id() as i32;
-        let _ = std::fs::write(&self.cfg.pid_file, format!("{pid}\n"));
+        // 原子写:裸 write 在断电/并发下可能留下半截 pid,导致后续识别错乱
+        let _ = crate::install::atomic_write_0600(&self.cfg.pid_file, &format!("{pid}\n"));
         // 收尾线程:wait() 回收僵尸并落退出日志;std Child drop 不杀进程,
         // 内核生命周期仍由自身管理(与原 kill_on_drop(false) 语义一致)
         let log_path = self.cfg.log_file.clone();
@@ -289,7 +290,7 @@ impl KernelManager {
                 adopted = true;
                 st.tracked = best;
                 st.started_wall = procfs::started_wall(best);
-                let _ = std::fs::write(&self.cfg.pid_file, format!("{best}\n"));
+                let _ = crate::install::atomic_write_0600(&self.cfg.pid_file, &format!("{best}\n"));
             }
             pid = st.tracked;
             st.cache_pid = pid;

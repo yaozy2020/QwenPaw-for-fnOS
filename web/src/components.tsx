@@ -1,28 +1,35 @@
 // Preact 视图组件:纯函数 of 数据,不含轮询与业务时序。
 // 插值默认转义 —— 日志/版本号等外部数据不再依赖手工 escapeHtml(r7 同族风险点)。
-import { formatUptime, formatMem, type StatusData } from "./statusStore";
+import { formatMem, type StatusData } from "./statusStore";
 
 export function StatusCardView({ data }: { data: StatusData }) {
-  const notInstalled = data.installed === false;
-  const running = !notInstalled && data.running;
-  const stateText = notInstalled ? "内核未安装" : running ? "运行中 (Active)" : "已停止 (Stopped)";
-  const stateColor = notInstalled ? "var(--text-sub)" : running ? "var(--success)" : "var(--danger)";
-  const uptime = running && data.startAt ? formatUptime(Math.floor(Date.now() / 1000) - data.startAt) : "-";
-  const rows: [string, string][] = [
-    ["服务状态", stateText],
+  const degraded = Boolean(data.degraded);
+  const notInstalled = !degraded && data.installed === false;
+  const running = !degraded && !notInstalled && data.running;
+  // degraded(后端不可达)必须如实显示,不得伪装成"内核未安装"
+  const stateText = degraded ? "状态不可达" : notInstalled ? "内核未安装" : running ? "运行中" : "已停止";
+  const stateColor = degraded ? "var(--text-muted)"
+    : notInstalled ? "var(--text-sub)"
+    : running ? "var(--success)" : "var(--danger)";
+  const stats: [string, string][] = [
     ["进程 PID", running ? String(data.pid || "-") : "-"],
-    ["运行时长", uptime],
     ["CPU 占用", running && typeof data.cpu === "number" ? data.cpu.toFixed(1) + "%" : "-"],
     ["内存占用", running ? formatMem(data.memKB) : "-"],
   ];
   return (
     <>
-      {rows.map(([label, val]) => (
-        <div class="info-row" key={label}>
-          <span class="info-label">{label}</span>
-          <span class="info-val" style={label === "服务状态" ? { color: stateColor } : undefined}>{val}</span>
-        </div>
-      ))}
+      <div class="status-head">
+        <span class="status-dot" style={{ background: stateColor }}></span>
+        <span class="status-text" style={{ color: stateColor }}>{stateText}</span>
+      </div>
+      <div class="stat-grid">
+        {stats.map(([label, val]) => (
+          <div class="stat" key={label}>
+            <div class="stat-value">{val}</div>
+            <div class="stat-label">{label}</div>
+          </div>
+        ))}
+      </div>
     </>
   );
 }

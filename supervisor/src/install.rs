@@ -286,6 +286,12 @@ pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 由记录反推它所属的事务文件路径。
+/// tx_id 即文件名的 pid.seq 部分,保证恢复阶段不必额外保存路径字段。
+fn record_tx_path(record: &VenvTxRecord, parent: &Path) -> std::path::PathBuf {
+    parent.join(format!(".venv.transaction.{}.json", record.tx_id))
+}
+
 fn write_tx_record(tx_file: &Path, record: &VenvTxRecord) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = tx_file.with_extension("tmp");
@@ -622,10 +628,18 @@ pub fn recover_pending_transactions(
 
     tx_files.sort();
 
+    // 先把能解析的记录全部收集到内存,供后面的孤儿清理做引用判断。
+    // 关键:不能等到清理阶段再从磁盘重读 —— 那时 tx 文件已被本循环消费掉,
+    // 读取恒失败,引用检查会静默失效并把在用的 backup 当垃圾删掉。
+    let mut parsed_records: Vec<VenvTxRecord> = Vec::new();
+    let mut unreadable_tx = false;
+
     for tx_path in &tx_files {
         let content = match std::fs::read_to_string(tx_path) {
             Ok(c) => c,
             Err(_) => {
+                // 读不出来时不敢断言它没引用某个 backup,fail-closed
+                unreadable_tx = true;
                 let _ = std::fs::remove_file(tx_path);
                 continue;
             }
@@ -633,10 +647,19 @@ pub fn recover_pending_transactions(
         let record: VenvTxRecord = match serde_json::from_str(&content) {
             Ok(r) => r,
             Err(_) => {
+                unreadable_tx = true;
                 let _ = std::fs::remove_file(tx_path);
                 continue;
             }
         };
+        parsed_records.push(record);
+    }
+
+    for record in &parsed_records {
+        let tx_path = &record_tx_path(record, parent);
+        if !tx_path.exists() {
+            continue;
+        }
 
         if let Some(logf) = log {
             logf(&format!(
@@ -646,8 +669,23 @@ pub fn recover_pending_transactions(
         }
 
         match record.phase {
-            // Prepared：旧环境从未被动过(改名之前必先落盘 BackedUp)。删暂存,活动环境与备份都不碰。
+            // Prepared 有两条可能的历史:
+            //  a) 旧环境从未被动过 —— 删暂存即可,active/backup 都不碰;
+            //  b) rename(active→backup) 已执行,但 BackedUp 尚未落盘就断电 ——
+            //     此刻 active 缺失、backup 存在。必须把 backup 归位,
+            //     否则它就是唯一的旧环境副本,删了就彻底丢失。
+            // 用磁盘现状而非阶段字段判定,才能覆盖 b 这个更窄的窗口。
             TxPhase::Prepared => {
+                if record.had_active && !record.active.exists() && record.backup.exists() {
+                    let _ = std::fs::rename(&record.backup, &record.active);
+                    let _ = sync_dir(parent);
+                    if let Some(logf) = log {
+                        logf(&format!(
+                            "recover: 事务 {} 崩在 rename 与 BackedUp 落盘之间,已把旧环境备份归位",
+                            record.tx_id
+                        ));
+                    }
+                }
                 if record.staged.exists() {
                     let _ = std::fs::remove_dir_all(&record.staged);
                     let _ = sync_dir(parent);
@@ -658,7 +696,7 @@ pub fn recover_pending_transactions(
             // BackedUp / Activated / HealthChecked：新环境尚未 Commit,一律回滚到旧环境。
             // 三者共用同一回滚语义,差别只在“活动路径当前是谁”,由目录现状判定。
             TxPhase::BackedUp | TxPhase::Activated | TxPhase::HealthChecked => {
-                rollback_record(&record, parent, pin_path, log);
+                rollback_record(record, parent, pin_path, log);
                 let _ = std::fs::remove_file(tx_path);
                 let _ = sync_dir(parent);
             }
@@ -702,24 +740,27 @@ pub fn recover_pending_transactions(
             let _ = sync_dir(parent);
         }
     }
-    // 备份目录只在“没有未决事务引用它”时才可视为垃圾。
-    // 有事务文件的一律由上面的恢复分支处理,这里绝不代删 —— 那是唯一的旧环境。
-    for rollback_path in candidate_rollbacks {
-        if !rollback_path.exists() {
-            continue;
+    // 备份目录只在“确实没有任何事务引用它”时才可视为垃圾。
+    // 有记录引用的绝不代删 —— 那是唯一的旧环境。
+    // 判定依据是本次已解析到内存的记录(而非回读已被消费的 tx 文件),
+    // 且 fail-closed:只要存在读不出来的 tx 文件,就整体跳过清理,
+    // 宁可留一堆垃圾,也不能删掉可能是唯一副本的备份。
+    if unreadable_tx {
+        if let Some(logf) = log {
+            logf("recover: 存在无法解析的事务文件,跳过孤儿备份清理(fail-closed)");
         }
-        let referenced = tx_files.iter().any(|tx| {
-            std::fs::read_to_string(tx)
-                .ok()
-                .and_then(|c| serde_json::from_str::<VenvTxRecord>(&c).ok())
-                .map(|r| r.backup == rollback_path)
-                .unwrap_or(false)
-        });
-        if referenced {
-            continue;
+    } else {
+        for rollback_path in candidate_rollbacks {
+            if !rollback_path.exists() {
+                continue;
+            }
+            let referenced = parsed_records.iter().any(|r| r.backup == rollback_path);
+            if referenced {
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(&rollback_path);
+            let _ = sync_dir(parent);
         }
-        let _ = std::fs::remove_dir_all(&rollback_path);
-        let _ = sync_dir(parent);
     }
 
     // 清理 var 目录下的残留临时文件 (如 .qwenpaw-version.uninstall.* 等)
@@ -2213,6 +2254,93 @@ mod tests {
         transaction.health_checked().unwrap();
         let result = transaction.commit(Some("2.0.0\n"));
         assert!(result.is_err(), "版本钉写入失败必须向上传播,不能报 Done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+    // ── 验收保留意见回归:崩在 rename 与 BackedUp 落盘之间 ──
+    // 该窗口下磁盘记录仍是 Prepared,但 active 已缺失、backup 已存在。
+    // 曾经的 Prepared 分支只删 staging,随后孤儿清理把 backup 当垃圾删掉,
+    // 结果活动环境与唯一备份同时消失。
+    #[test]
+    fn recover_prepared_with_missing_active_restores_backup() {
+        let dir = fake_venv("rec-narrow-window");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.10";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        // rename 已执行,BackedUp 尚未落盘:active 消失,backup 持有旧环境
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        assert!(!active.exists() && backup.exists());
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Prepared,   // 关键:仍是 Prepared
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: None,
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        recover_pending_transactions(&active, &pin, None).unwrap();
+        assert!(active.exists(), "活动环境必须恢复,不得与备份一起消失");
+        assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old");
+        assert!(!backup.exists(), "备份归位后不得残留");
+        assert!(!staged.exists(), "暂存必须清理");
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 验收保留意见回归:引用检查不得失效 ──
+    // 主循环先消费 tx 文件,若清理阶段再从磁盘回读来判断引用,读取恒失败,
+    // fail-open 会把在用的 backup 当垃圾删掉。
+    #[test]
+    fn orphan_cleanup_uses_in_memory_records_not_reread_files() {
+        let dir = fake_venv("rec-ref-memory");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+
+        let suffix = "9999.11";
+        let staged = dir.join(format!(".venv.staging.{suffix}"));
+        let backup = dir.join(format!(".venv.rollback.{suffix}"));
+        let tx_file = dir.join(format!(".venv.transaction.{suffix}.json"));
+
+        std::fs::rename(&active, &backup).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(active.join("installed"), "new").unwrap();
+
+        let record = VenvTxRecord {
+            schema_version: 1,
+            tx_id: suffix.into(),
+            phase: TxPhase::Activated,
+            active: active.clone(),
+            staged: staged.clone(),
+            backup: backup.clone(),
+            had_active: true,
+            target_version: "2.0.0".into(),
+            pin_path: pin.clone(),
+            previous_pin: None,
+        };
+        write_tx_record(&tx_file, &record).unwrap();
+
+        recover_pending_transactions(&active, &pin, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(active.join("installed")).unwrap(),
+            "old",
+            "备份必须归位;若被当孤儿删除则活动环境会保留新版本"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
