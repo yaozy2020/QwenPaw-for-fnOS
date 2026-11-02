@@ -178,6 +178,12 @@ const API_BASE = (function() {
       setTimeout(() => t.classList.remove("show"), 2500);
     }
 
+    // 卡片标题 meta 位(运行时长)的唯一写入点:正常/降级两分支共用,防口径漂移
+    function setStatusUptime(text) {
+      const el = document.getElementById("statusUptime");
+      if (el) el.innerText = text;
+    }
+
     // 服务状态监控 (全空值保护，稳健守护)
     async function fetchStatus() {
       if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
@@ -297,12 +303,9 @@ const API_BASE = (function() {
           }
         }
 
-        const upEl = document.getElementById("statusUptime");
-        if (upEl) {
-          upEl.innerText = (!notInstalled && data.running && data.startAt)
-            ? "已运行 " + formatUptime(Math.floor(Date.now() / 1000) - data.startAt)
-            : "";
-        }
+        setStatusUptime((!notInstalled && data.running && data.startAt)
+          ? "已运行 " + formatUptime(Math.floor(Date.now() / 1000) - data.startAt)
+          : "");
 
         const portEl = document.getElementById("valPort");
         const activePort = data.port || "18088";
@@ -333,8 +336,7 @@ const API_BASE = (function() {
             degraded: true, // 如实显示"状态不可达",不得伪装成"内核未安装"
           }, cardMount);
         }
-        const upEl = document.getElementById("statusUptime");
-        if (upEl) upEl.innerText = "";
+        setStatusUptime("—"); // 保持 meta 位稳定,与卡内"状态不可达"呼应
         const valVersion = document.getElementById("valVersion");
         if (valVersion) valVersion.innerText = "无法获取";
         const valAuth = document.getElementById("valAuthStatus");
