@@ -10,6 +10,21 @@ if [ -f "${PORT_FILE}" ]; then
     [ -n "$p" ] && current_port="$p"
 fi
 
-# 飞牛向导初始化语法：直接导出或打印 JSON/变量
+# 回显日志级别:从落盘文件读取,对齐 wizard/config 中的 wizard_log_level 字段
+current_level="info"
+LEVEL_FILE="${PKGVAR}/qwenpaw-log-level"
+if [ -f "${LEVEL_FILE}" ]; then
+    l=$(head -n 1 "${LEVEL_FILE}" | tr -d '[:space:]')
+    case "$l" in
+        trace) current_level="debug" ;;
+        critical) current_level="error" ;;
+        error|warning|info|debug) current_level="$l" ;;
+    esac
+fi
+
+# 飞牛向导初始化语法:回显必须匹配向导中的 field 名称(wizard_port 与 wizard_log_level)
+# 同时保留 service_port 兼容历史读取
+echo "wizard_port=${current_port}"
 echo "service_port=${current_port}"
+echo "wizard_log_level=${current_level}"
 exit 0

@@ -14,23 +14,23 @@
                 "type": "select",
                 "field": "wizard_pypi_mirror",
                 "label": "PyPI 安装源（仅运行环境重建时使用）",
-                "initValue": "tsinghua",
+                "initValue": "aliyun",
                 "options": [
                     {
-                        "label": "PyPI 官方源 (国内用户推荐使用其他镜像源)",
-                        "value": "official"
+                        "label": "阿里云镜像源 (推荐 - 兼容公网与云服务器)",
+                        "value": "aliyun"
                     },
                     {
                         "label": "清华大学镜像源",
                         "value": "tsinghua"
                     },
                     {
-                        "label": "阿里云镜像源",
-                        "value": "aliyun"
-                    },
-                    {
                         "label": "中科大镜像源",
                         "value": "ustc"
+                    },
+                    {
+                        "label": "PyPI 官方源 (国内较慢)",
+                        "value": "official"
                     }
                 ],
                 "rules": [

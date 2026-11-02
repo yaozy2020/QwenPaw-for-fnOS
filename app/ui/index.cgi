@@ -118,6 +118,18 @@ accepts() {
     q_positive "$(q_of '*')"
 }
 
+# CSRF token: 访问 html 时若客户端尚未携带 cookie 则签发 SameSite=Lax cookie。
+# 现已改为纯 HTTP 标头传递与前端读取 document.cookie, 不修改 HTML 正文,
+# 因此完全兼容 brotli/gzip 预压缩传输(保持首屏从 57KB 压缩到 16KB 性能优势)。
+CSRF_NEW=0
+if [ "$ext" = "html" ] || [ "$ext" = "htm" ]; then
+    CSRF_TOKEN="$(printf '%s\n' "${HTTP_COOKIE:-}" | tr ';' '\n' | sed 's/^ *//' | grep '^qwenpaw_csrf=' | head -1 | cut -d= -f2-)"
+    if [ -z "$CSRF_TOKEN" ]; then
+        CSRF_TOKEN="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        CSRF_NEW=1
+    fi
+fi
+
 SEND_FILE="$TARGET_FILE"
 CONTENT_ENCODING=""
 if [ -f "${TARGET_FILE}.br" ] && accepts br; then
@@ -138,7 +150,11 @@ if [ "$ext" = "html" ] || [ "$ext" = "htm" ]; then
     echo "Cache-Control: no-cache, no-store, must-revalidate, max-age=0"
     echo "Pragma: no-cache"
     echo "Expires: 0"
+    if [ "$CSRF_NEW" -eq 1 ]; then
+        echo "Set-Cookie: qwenpaw_csrf=${CSRF_TOKEN}; Path=/; SameSite=Lax"
+    fi
 fi
 echo ""
 
+# 静态内容直接输出(支持协商压缩 br/gz 零篡改直出)
 cat "$SEND_FILE"

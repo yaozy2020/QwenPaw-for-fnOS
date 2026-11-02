@@ -52,6 +52,11 @@ start_process() {
         sleep 0.1
         waited=$((waited + 1))
     done
+    if ! supervisor_status "${PID_FILE}"; then
+        echo "supervisor failed to start" >&2
+        [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "QwenPaw 监督者启动失败，请检查 ${LOG_FILE}" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
+        return 1
+    fi
     return 0
 }
 

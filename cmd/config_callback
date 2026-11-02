@@ -11,8 +11,14 @@ LOG_FILE="${PKGVAR}/qwenpaw-config.log"
 PORT_FILE="${PKGVAR}/service_port"
 
 log_msg() {
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') - $1"
     mkdir -p "${PKGVAR}" 2>/dev/null || true
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null || true
+    echo "$msg" >> "${LOG_FILE}" 2>/dev/null || true
+    echo "$msg"
+    # 官方规范:严重错误同步写入 TRIM_TEMP_LOGFILE 供系统弹窗向用户呈现
+    if [[ "$1" == ERROR* ]]; then
+        [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "$1" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
+    fi
 }
 
 # 1. 严格使用飞牛标准注入的 wizard_port 变量
@@ -28,13 +34,36 @@ if [ -n "${NEW_PORT}" ] && echo "${NEW_PORT}" | grep -qE '^[0-9]+$' && [ "${NEW_
     # 核心：动态同步改写飞牛系统的 ui/config，彻底解决常规卡片端口不一致问题！
     for ui_cfg in "${APPDEST}/ui/config" "/var/apps/qwenpaw/ui/config"; do
         if [ -w "${ui_cfg}" ]; then
-            sed -i 's/"port": *"[0-9]*"/"port": "'"${NEW_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
+            sed -i 's/"port": *"[^"]*"/"port": "'"${NEW_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
             log_msg "已同步更新 ${ui_cfg} 端口为 ${NEW_PORT}"
         fi
     done
 fi
 
-# 2. 经统一入口重启（cmd/main stop 级联停内核;start 拉起监督者,监督者按
+# 2. 日志级别落盘:向导 wizard_log_level → {PKGVAR}/qwenpaw-log-level →
+#    监督者启动内核时读取并经 --log-level argv 下发（此前该值只 export 进
+#    脚本环境,监督者 spawn 的内核从不读取,任何选择都被静默忽略 —— 审查 F1）
+NEW_LOG_LEVEL="${wizard_log_level:-}"
+case "${NEW_LOG_LEVEL}" in
+    critical|error|warning|info|debug|trace)
+        LOG_LEVEL_FILE="${PKGVAR}/qwenpaw-log-level"
+        log_msg "检测到修改日志级别为: ${NEW_LOG_LEVEL}"
+        if printf '%s\n' "${NEW_LOG_LEVEL}" > "${LOG_LEVEL_FILE}.tmp" 2>/dev/null && \
+           mv "${LOG_LEVEL_FILE}.tmp" "${LOG_LEVEL_FILE}" 2>/dev/null; then
+            chmod 640 "${LOG_LEVEL_FILE}" 2>/dev/null || true
+        else
+            log_msg "ERROR: 日志级别写入 ${LOG_LEVEL_FILE} 失败(权限?),保持原值"
+        fi
+        ;;
+    "")
+        log_msg "未提供 wizard_log_level,保持现有日志级别"
+        ;;
+    *)
+        log_msg "WARN: 日志级别 '${NEW_LOG_LEVEL}' 不在白名单,忽略"
+        ;;
+esac
+
+# 3. 经统一入口重启（cmd/main stop 级联停内核;start 拉起监督者,监督者按
 #    service_port 文件自拉内核 —— 停止失败也继续尝试 start,以 status 为准）
 MAIN_SCRIPT="${APPDEST}/cmd/main"
 [ ! -f "${MAIN_SCRIPT}" ] && MAIN_SCRIPT="/var/apps/qwenpaw/cmd/main"

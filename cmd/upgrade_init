@@ -1,3 +1,18 @@
 #!/bin/bash
+# 飞牛升级设置初始化：回显当前生效的 PyPI 安装源配置
+PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
+MIRROR_FILE="${PKGVAR}/pip-mirror"
 
+current_mirror="aliyun"
+if [ -f "${MIRROR_FILE}" ]; then
+    m=$(head -n 1 "${MIRROR_FILE}" | tr -d '[:space:]')
+    case "$m" in
+        *tsinghua*) current_mirror="tsinghua" ;;
+        *aliyun*)   current_mirror="aliyun" ;;
+        *ustc*)     current_mirror="ustc" ;;
+        "")         current_mirror="official" ;;
+    esac
+fi
+
+echo "wizard_pypi_mirror=${current_mirror}"
 exit 0

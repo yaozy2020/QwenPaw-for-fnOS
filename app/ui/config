@@ -14,9 +14,10 @@
         "qwenpaw.main": {
             "title": "QwenPaw",
             "icon": "images/icon_{0}.png",
-            "type": "iframe",
+            "type": "url",
             "protocol": "http",
-            "port": "${wizard_port}",
+            "port": "18088",
+            "url": "/",
             "allUsers": false,
             "control": {
                 "accessPerm": "editable"

@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-2.0.0-12-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-16-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
@@ -221,6 +221,21 @@ QwenPaw-for-fnOS/
 ### 使用 Ollama 时 API Key 怎么填？
 
 连接 Ollama 时 API Key 字段不能为空，填写任意非空字符串（如 `ollama`）即可。
+
+### 点击「安装内核」或修改设置提示来源/CSRF 校验失败？
+
+这是由于网关反代重写 Host 头或页面 Token 未同步导致的：
+1. 请确保外壳已更新至 **≥ v2.0.0-14**（该版本采用 Double-Submit Cookie 机制，完全解耦网络拓扑与反向代理环境）。
+2. 在浏览器中按 **`Ctrl + Shift + R`** 强制刷新控制台页面，重新同步会话凭证后再行操作。
+
+### 内核安装失败或提示「Could not find a version ... / from versions: none」？
+
+这通常是网络环境访问当前镜像源异常引起的（例如部分高校开源镜像站对公有云机房 IP 或特定客户端存在频控/403 拦截）：
+- 打开控制台「版本更新」面板，将「下载源」切换为**「阿里云镜像源」**或官方 PyPI 源后重新尝试安装。
+
+### 手机端无法在应用中心手动上传 `.fpk` 文件？
+
+部分移动端浏览器对系统文件选取控件支持受限。推荐使用 PC 桌面浏览器；若在手机端操作，可先将 `.fpk` 文件放入 NAS 本地目录，再在应用中心手动安装弹窗中选择**「从 NAS 添加」**直接选取文件安装。
 
 ## 交流与反馈
 

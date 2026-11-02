@@ -7,14 +7,17 @@ WORKING_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
 PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
 PKGETC="${TRIM_PKGETC:-/var/apps/qwenpaw/etc}"
 SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
-[ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/vol2/@appshare/qwenpaw"
+[ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
 
-LOG_FILE="${PKGVAR}/qwenpaw-uninstall.log"
 KEEP_DATA="${wizard_keep_data:-keep}"
 
+# 对齐官方应用与 Harness 参考项目标准规范：
+# 日志直接输出到标准输出由系统捕获归档，若存在平台临时日志通道则同步写入。
+# 严禁在卸载过程中向目标删除目录 (${PKGVAR}) 写入私有日志，避免删除后重新 mkdir -p。
 log_msg() {
-    mkdir -p "${PKGVAR}" 2>/dev/null || true
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}" 2>/dev/null || true
+    local msg="$(date '+%Y-%m-%d %H:%M:%S') - $1"
+    echo "$msg"
+    [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "$msg" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
 }
 
 log_msg "开始执行 QwenPaw 卸载流程..."
@@ -40,12 +43,23 @@ keep | yes | true | 1)
     rm -rf "${WORKING_DIR}/venv" 2>/dev/null || true
     ;;
 remove | no | false | 0)
-    log_msg "用户选择彻底删除应用数据，正在清理所有目录..."
+    log_msg "用户选择彻底删除应用数据，正在清理应用目录..."
     rm -rf "${WORKING_DIR}" 2>/dev/null || true
     rm -rf "${PKGETC}" 2>/dev/null || true
-    rm -rf "${SHARE_DIR}" 2>/dev/null || true
-    rm -rf "/vol2/@appshare/qwenpaw" 2>/dev/null || true
+    # 只删除应用自己的 .qwenpaw 数据目录。共享根目录由 fnOS 管理，
+    # 且严禁使用不受 TRIM_* 约束的全局通配路径：生命周期测试会以临时
+    # TRIM_DATA_SHARE_PATHS 运行本回调，全局删除会绕过隔离误删真实数据。
+    case "${SHARE_DIR}" in
+        */.qwenpaw)
+            rm -rf "${SHARE_DIR}" 2>/dev/null || true
+            ;;
+        *)
+            log_msg "WARN: 拒绝删除非 .qwenpaw 数据目录: ${SHARE_DIR}"
+            ;;
+    esac
     rm -rf "${PKGVAR}" 2>/dev/null || true
+    log_msg "彻底删除完成，应用数据目录已清空。"
+    exit 0
     ;;
 *)
     log_msg "未知的 wizard_keep_data 选项: ${KEEP_DATA}，默认采取安全保护保留数据"

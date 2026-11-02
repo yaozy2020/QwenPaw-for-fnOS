@@ -51,46 +51,28 @@ if [ "$REQUEST_METHOD" != "$want_method" ]; then
     exit 0
 fi
 
-# ── 同源校验:仅约束变更类(POST)操作 ──
-# origin_authority: 从 Origin/Referer 提取 host[:port],与 Host 对齐比较。
-# 默认端口(80/443)两侧都可能省略,统一剥掉后再比,避免 https 反代误报。
-origin_authority() {
-    local s="$1"
-    s="${s#http://}"; s="${s#https://}"
-    s="${s%%/*}"          # Referer 去路径
-    s="${s%,}"            # 防御:末尾杂散逗号
-    printf '%s' "$s"
-}
-strip_default_port() {
-    local s="$1"
-    case "$s" in
-        *":80")  s="${s%:80}" ;;
-        *":443") s="${s%:443}" ;;
-    esac
-    printf '%s' "$s"
-}
-csrf_rejected() {
-    local host origin referer want got
-    host="${HTTP_HOST:-}"
-    [ -n "$host" ] || return 0        # 无 Host 非正常 HTTP 上下文,拒绝
-    origin="${HTTP_ORIGIN:-}"
-    referer="${HTTP_REFERER:-}"
-    if [ -n "$origin" ]; then
-        got="$(origin_authority "$origin")"
-    elif [ -n "$referer" ]; then
-        got="$(origin_authority "$referer")"
-    else
-        return 0                       # 浏览器必发 Origin;缺席即非浏览器伪造
+# ── CSRF 防御: Double-Submit Cookie (安全与部署拓扑/反代彻底解耦) ──
+# 机制: index.cgi 签发 SameSite=Lax cookie(qwenpaw_csrf), 控制台前端从
+# document.cookie 读取并通过 X-CSRF-Token 自定义头回传, 后端比对两者一致性。
+# 跨站攻击站点受同源策略限制无法读取跨域 Cookie, 亦无法在跨站请求中附加自定义 Header。
+# 支持 sendBeacon 退路经 _csrf 查询参数回传 Token。GET 读操作不校验。
+csrf_ok() {
+    local cookie_v token
+    cookie_v="$(printf '%s
+' "${HTTP_COOKIE:-}" | tr ';' '
+' | sed 's/^ *//' | grep '^qwenpaw_csrf=' | head -1 | cut -d= -f2-)"
+    [ -n "$cookie_v" ] || return 1
+    token="${HTTP_X_CSRF_TOKEN:-}"
+    if [ -z "$token" ]; then
+        token="$(qget _csrf)"
     fi
-    want="$(strip_default_port "$host")"
-    got="$(strip_default_port "$got")"
-    [ "$got" != "$want" ]
+    [ -n "$token" ] && [ "$token" = "$cookie_v" ]
 }
-if [ "$REQUEST_METHOD" = "POST" ] && csrf_rejected; then
+if [ "$REQUEST_METHOD" = "POST" ] && ! csrf_ok; then
     echo "Status: 403 Forbidden"
     echo "Content-Type: application/json"
     echo ""
-    echo '{"success":false,"message":"请求来源校验失败,请从 QwenPaw 控制台操作"}'
+    echo '{"success":false,"message":"CSRF 校验失败:请刷新控制台页面后重试"}'
     exit 0
 fi
 
@@ -197,12 +179,23 @@ case "$action" in
         ;;
 esac
 
-# 转发到监督者
+# 转发到监督者。Token 经 0600 临时头文件传给 curl(-H @file,curl≥7.55):
+# 命令行参数会完整出现在 /proc/<pid>/cmdline,同机任意用户可读 —— 与 Token
+# 文件 0600 的威胁模型不对等(审查 S1)。即用即删,trap 兜底异常退出。
+TOKHDR=$(mktemp "${TMPDIR:-/tmp}/qwenpaw-hdr.XXXXXX") || {
+    echo '{"success":false,"message":"内部错误:无法创建临时文件"}'
+    exit 1
+}
+chmod 600 "${TOKHDR}" 2>/dev/null || true
+printf 'X-Supervisor-Token: %s\n' "${TOKEN}" > "${TOKHDR}"
+trap 'rm -f "${TOKHDR}"' EXIT
 resp=$(curl -s --max-time 30 -X "$method" \
-    -H "X-Supervisor-Token: ${TOKEN}" \
+    -H @"${TOKHDR}" \
     -H "Content-Type: application/json" \
     ${body:+-d "$body"} \
     "${SUP}${path}")
+rm -f "${TOKHDR}"
+trap - EXIT
 
 # version_list:监督者交回 PyPI 全量原始键名;语义排序(2.10.0>2.9.9,稳定>
 # 预发布)、is_beta 判定、最新稳定版推导都在这里做 —— 控制台取 versions[0]
@@ -223,13 +216,24 @@ try:
         def vkey(v):
             m = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?(.*)", v)
             if not m:
-                return (0, 0, 0, -1, v)
+                return (0, 0, 0, -1, 0, 0)
             rest = m.group(4) or ""
-            rank = 1 if (rest == "" or rest.startswith(".post")) else 0
-            return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), rank, rest)
+            if not rest:
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), 4, 0, 0)
+            if ".post" in rest:
+                pnum = int(re.sub(r"\D", "", rest) or 0)
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), 5, 0, pnum)
+            c = rest.lstrip(".-").lower()
+            stage = 0
+            if c.startswith("dev"): stage = 0
+            elif c.startswith("a") or c.startswith("alpha"): stage = 1
+            elif c.startswith("b") or c.startswith("beta"): stage = 2
+            elif c.startswith("rc") or c.startswith("c") or c.startswith("pre"): stage = 3
+            num = int(re.sub(r"\D", "", c) or 0)
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0), stage, num, 0)
         names = sorted(map(str, d["releases"]), key=vkey, reverse=True)[:14]
         out["success"] = True
-        out["versions"] = [{"version": v, "is_beta": bool(re.search(r"(?:a|b|rc)[0-9]", v))} for v in names]
+        out["versions"] = [{"version": v, "is_beta": not bool(re.match(r"^\d+(\.\d+)*(\.post\d+)?$", v))} for v in names]
         out["latest_stable"] = next(
             (v for v in names if re.match(r"^\d+(\.\d+)*(\.post\d+)?$", v)),
             str(d.get("latest_stable", "")),

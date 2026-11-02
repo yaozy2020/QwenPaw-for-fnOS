@@ -26,10 +26,10 @@ stop_supervisor
 if [ ! -d "${VENV_DIR}" ]; then
     log_msg "venv 缺失，重建虚拟环境 ${VENV_DIR}..."
     "${PYTHON_BIN}" -m venv "${VENV_DIR}"
-    chmod -R 755 "${VENV_DIR}" 2>/dev/null || true
+    chmod -R 750 "${VENV_DIR}" 2>/dev/null || true  # 仅属主访问(审查 S3)
     source "${VENV_DIR}/bin/activate"
 
-    PYPI_MIRROR="${wizard_pypi_mirror:-tsinghua}"
+    PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
     PIP_OPTS=""
     if [ "$PYPI_MIRROR" = "tsinghua" ]; then
         PIP_OPTS="-i https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -37,6 +37,17 @@ if [ ! -d "${VENV_DIR}" ]; then
         PIP_OPTS="-i https://mirrors.aliyun.com/pypi/simple/"
     elif [ "$PYPI_MIRROR" = "ustc" ]; then
         PIP_OPTS="-i https://pypi.mirrors.ustc.edu.cn/simple/"
+    fi
+
+    # 向导选择的下载源同步持久化到控制台
+    case "$PYPI_MIRROR" in
+        tsinghua) MIRROR_URL="https://pypi.tuna.tsinghua.edu.cn/simple" ;;
+        aliyun)   MIRROR_URL="https://mirrors.aliyun.com/pypi/simple/" ;;
+        ustc)     MIRROR_URL="https://pypi.mirrors.ustc.edu.cn/simple/" ;;
+        *)        MIRROR_URL="" ;;
+    esac
+    if [ -n "$MIRROR_URL" ]; then
+        printf '%s\n' "$MIRROR_URL" > "${VAR_DIR}/pip-mirror" 2>/dev/null || true
     fi
 
     # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）。
@@ -83,7 +94,7 @@ fi
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
-chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true  # 会话记忆仅属主可读,不对同机其他用户放行(审查 S3)
 secure_var_perms
 
 log_msg "QwenPaw 外壳升级完成！"

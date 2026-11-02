@@ -1,8 +1,8 @@
 appname                    = qwenpaw
-version                    = 2.0.0-12
+version                    = 2.0.0-16
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS —— 将个人 AI 助理 QwenPaw 一键部署到飞牛 NAS 的轻量外壳包。</p><h3>外壳特性</h3><p>极简运维控制台（服务启停、日志、内核版本管理、端口修改），内核经 PyPI 镜像在线安装，外壳与内核版本双轨制（外壳升级不影响内核），控制台资源预压缩传输。</p><h3>QwenPaw 内核</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作，定时任务，能力由 Skills 决定且可无限扩展；支持 Ollama 本地大模型完全离线运行，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
-platform                   = all
+platform                   = x86
 source                     = thirdparty
 maintainer                 = AgentScope团队
 maintainer_url             = https://qwenpaw.agentscope.io
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "安全整改: 内核安装版本参数改 argv 直传(消除 Shell 注入), 桥接增加方法白名单与同源校验(405/403), Token 全生命周期 0600, 收回 docker 组与未用文件权限; 稳定性: 改端口/重置认证失败回滚, 版本钉元数据核实后原子写入, pip 安装纳入停止/卸载回收, 日志尾部读取与轮转, FPK 白名单打包+构建后审计, CI 增加 Rust test/clippy/build 门禁与执行位检查 移动端安装修复: 触发后确认后端受理(seq), 弹窗按任务跟踪不再漏判完成, 重开控制台可恢复查看进行中任务, pip 看门狗超时自动回收不永久锁死"
+changelog                  = "内核WebUI与安装闭环(v2.0.0-16): 注入 QWENPAW_CORS_ORIGINS 放行跨域,根治 WebUI 启动阶段 Script error 崩溃; 控制台初装弹窗三态化,消灭未装内核却提示升级确认的文案歧义; 主入口改为独立 URL 标签页直连; 架构与安全重构(v2.0.0-15): 网关代理CSRF防御改为Double-Submit Cookie机制(彻底解耦反代与网络拓扑,杜绝Host重写误杀403); 降级判定逻辑反转修复与SemVer分级比较; 控制台初装幽灵版本消除,默认推荐稳定版; 默认镜像源切换为阿里云(解决TUNA对机房IP频控403); 运行设置回显与日志级别防重置(config_init); 卸载全量删除零残留; 监督者状态全局锁优化(F5); 恢复HTML预压缩传输; 安全整改: 内核安装版本参数改 argv 直传(消除 Shell 注入), 桥接增加方法白名单, Token 全生命周期 0600; 稳定性: 改端口/重置认证失败回滚, 版本钉原子写入, pip 安装看门狗超时回收"

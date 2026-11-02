@@ -18,9 +18,14 @@ SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
 [ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
 
 # ── 内核运行环境（所有启动路径共用；新增变量只加这里）──
+# 注:运行态内核由监督者 spawn,日志级别的权威链路是向导落盘
+# {VAR_DIR}/qwenpaw-log-level → 监督者白名单校验 → --log-level argv 下发;
+# 此 export 仅覆盖安装/升级期脚本直接调起的 python(qwenpaw init 等),
+# 监督者 spawn 的内核 app 路径不读它(审查 F1)。
 export QWENPAW_WORKING_DIR="${SHARE_DIR}"
 export QWENPAW_LOG_LEVEL="${QWENPAW_LOG_LEVEL:-${wizard_log_level:-info}}"
 export QWENPAW_AUTH_ENABLED=true
+export QWENPAW_CORS_ORIGINS="*"
 export PATH="/var/apps/nodejs_v24/target/bin:$PATH"
 export QWENPAW_DEPENDENCY_STATE_DIR="${SHARE_DIR}/dependency-environments"
 

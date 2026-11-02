@@ -23,7 +23,7 @@ if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [
     
     for ui_cfg in "${TRIM_APPDEST}/ui/config" "/var/apps/qwenpaw/ui/config"; do
         if [ -w "${ui_cfg}" ]; then
-            sed -i 's/"port": *"[0-9]*"/"port": "'"${INIT_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
+            sed -i 's/"port": *"[^"]*"/"port": "'"${INIT_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
         fi
     done
     for mf in "${TRIM_APPDEST}/manifest" "/var/apps/qwenpaw/manifest"; do
@@ -33,6 +33,28 @@ if echo "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [
     done
     log_msg "安装端口已设定并同步为: ${INIT_PORT}"
 fi
+
+# 安装向导的日志级别落盘(wizard/install 收集 wizard_log_level):
+# {PKGVAR}/qwenpaw-log-level → 监督者启动内核时读取并经 --log-level argv 下发。
+# 此前该值只被 export 进脚本环境(lib.sh),监督者 spawn 的内核从不读取 —— 审查 F1。
+case "${wizard_log_level:-}" in
+    critical|error|warning|info|debug|trace)
+        mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
+        if printf '%s\n' "${wizard_log_level}" > "${TRIM_PKGVAR}/qwenpaw-log-level.tmp" 2>/dev/null && \
+           mv "${TRIM_PKGVAR}/qwenpaw-log-level.tmp" "${TRIM_PKGVAR}/qwenpaw-log-level" 2>/dev/null; then
+            chmod 640 "${TRIM_PKGVAR}/qwenpaw-log-level" 2>/dev/null || true
+            log_msg "内核日志级别已落盘: ${wizard_log_level}"
+        else
+            log_msg "WARN: 日志级别写入失败(权限?),内核将以 info 运行"
+        fi
+        ;;
+    "")
+        log_msg "向导未提供 wizard_log_level,内核将以 info 运行"
+        ;;
+    *)
+        log_msg "WARN: 向导日志级别 '${wizard_log_level}' 不在白名单,忽略"
+        ;;
+esac
 
 log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
 
@@ -56,13 +78,14 @@ fi
 log_msg "正在创建虚拟环境..."
 "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 log_msg "虚拟环境 ${VENV_DIR} 创建成功"
-chmod -R 755 "${VENV_DIR}" 2>/dev/null || true
+# 750:venv 仅属主(app 用户)需要访问,不对同机其他用户放行(审查 S3)
+chmod -R 750 "${VENV_DIR}" 2>/dev/null || true
 
 log_msg "正在激活虚拟环境..."
 source "${VENV_DIR}/bin/activate"
 log_msg "虚拟环境激活成功"
 
-PYPI_MIRROR="${wizard_pypi_mirror:-tsinghua}"
+PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
 PIP_OPTS=""
 
 if [ "$PYPI_MIRROR" = "tsinghua" ]; then
@@ -108,7 +131,9 @@ else
     log_msg "首次安装完成（外壳）。内核未预装——请打开 QwenPaw 控制台，在「版本更新」中选择版本安装。"
     log_msg "提示: 内核 wheel 约 40MB，控制台安装时从所选 PyPI 镜像下载。"
     chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
-    chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+    # 750:会话记忆/聊天记录仅需属主访问;本机实测 700 亦正常运行。755 曾把
+    # 这些数据对同机其他应用用户放行 —— 审查 S3。
+    chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true
     secure_var_perms
     log_msg "QwenPaw 安装成功！（内核待控制台安装）"
     exit 0
@@ -140,13 +165,20 @@ if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
     fi
 fi
 
-log_msg "正在初始化 QwenPaw..."
-echo "Yes" | python3 -m qwenpaw init --defaults
+# 已有数据时绝不再跑 init：init 会创建空 chats.json/jobs.json，并在
+# registry 为空时阻断 session 迁移，表现为"升级后会话全部消失"。
+# 仅真正首次安装（无 config/workspaces）才初始化。
+if [ -f "${SHARE_DIR}/config.json" ] || [ -d "${SHARE_DIR}/workspaces" ]; then
+    log_msg "检测到已有 QwenPaw 数据（config/workspaces），跳过 init 初始化"
+else
+    log_msg "正在初始化 QwenPaw..."
+    echo "Yes" | python3 -m qwenpaw init --defaults
+fi
 
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}" 2>/dev/null || true
-chmod -R 755 "${WORKING_DIR}" 2>/dev/null || true
+chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true
 # VAR_DIR 收敛为最小权限(目录 750/文件 640/Token 600),不再递归 755
 secure_var_perms
 chmod 755 "${TRIM_PKGETC}" 2>/dev/null || true

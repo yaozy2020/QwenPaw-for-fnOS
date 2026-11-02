@@ -27,6 +27,8 @@ pub struct KernelConfig {
     pub log_file: String,
     pub share_dir: String,
     pub etc_dir: String,
+    /// 内核日志级别(向导落盘 → config.rs 白名单校验),spawn 时经 --log-level 下发
+    pub log_level: String,
 }
 
 pub struct KernelManager {
@@ -101,11 +103,23 @@ impl KernelManager {
         // on_success 都在裸线程上,tokio Command 在无 runtime 上下文会 panic ——
         // 审计 B2 实测:panic + 日志锁毒化,一次 pip 失败砖死安装子系统)
         let mut cmd = std::process::Command::new(&bin);
-        cmd.args(["-m", "qwenpaw", "app", "--host", "0.0.0.0", "--port", &port.to_string()])
+        // --log-level 必须走 argv:上游 app 子命令只在 CLI 参数上消费日志级别
+        // (app_cmd.py --log-level,默认 info;QWENPAW_LOG_LEVEL 环境变量仅 tauri
+        // 入口读取,app 路径不读)。此前向导选择从未抵达内核 —— 审查 F1 根因。
+        cmd.args([
+            "-m", "qwenpaw", "app",
+            "--host", "0.0.0.0",
+            "--port", &port.to_string(),
+            "--log-level", &self.cfg.log_level,
+        ])
             .current_dir(&self.cfg.share_dir)
             .env("HOME", &self.cfg.etc_dir)
             .env("QWENPAW_WORKING_DIR", &self.cfg.share_dir)
             .env("QWENPAW_AUTH_ENABLED", "true")
+            .env("QWENPAW_CORS_ORIGINS", "*")
+            // app_cmd 启动后自身会为子进程(shared_worker 等)回写该变量;此处
+            // 显式注入保证 spawn 之初环境即一致
+            .env("QWENPAW_LOG_LEVEL", &self.cfg.log_level)
             .env(
                 "QWENPAW_DEPENDENCY_STATE_DIR",
                 format!("{}/dependency-environments", self.cfg.share_dir),
@@ -259,6 +273,8 @@ impl KernelManager {
         }
         let running = pid > 0 && procfs::process_alive(pid);
         let started_wall = if running { st.started_wall } else { None };
+        // F5:提前释放状态互斥锁,避免 300ms 的 CPU 采样 sleep 阻塞并发请求
+        drop(st);
         let (cpu, rss) = if running {
             let (u1, s1) = procfs::cpu_ticks(pid);
             std::thread::sleep(Duration::from_millis(300));

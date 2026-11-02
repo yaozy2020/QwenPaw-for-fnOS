@@ -562,7 +562,13 @@ impl InstallState {
                     } else if let Some(e) = wait_err {
                         format!("pip 进程等待异常: {e}")
                     } else if !exit_ok {
-                        "pip 安装失败,详见日志".to_string()
+                        let mut msg = "pip 安装失败,详见日志".to_string();
+                        if let Ok(content) = std::fs::read_to_string(&pip_log) {
+                            if let Some(err_line) = content.lines().rev().find(|l| l.contains("ERROR:") || l.contains("403 Forbidden") || l.contains("from versions: none")) {
+                                msg = format!("pip 安装失败: {}", err_line.trim());
+                            }
+                        }
+                        msg
                     } else {
                         String::new()
                     };

@@ -8,6 +8,18 @@ const API_BASE = (function() {
       return "/cgi/ThirdParty/qwenpaw/api.cgi";
     })();
 
+    // CSRF double-submit:index.cgi 签发 HttpOnly cookie(qwenpaw_csrf)并在页面
+    // 注入同值 window.CSRF_TOKEN;POST 回传 X-CSRF-Token 头,api.cgi 比对两者。
+    // 与代理/NAT/Host 重写完全无关(fnOS 网关会把 Host 重写为 localhost,
+    // 基于 Host/Origin 的同源校验在该形态下必然误杀 —— 2.0.0-13 实测)。
+    function getCsrfToken(): string {
+      return (document.cookie.match(/(?:^|;\s*)qwenpaw_csrf=([^;]+)/) || [])[1] || "";
+    }
+    const csrfHeaders = (): Record<string, string> => {
+      const t = getCsrfToken();
+      return t ? { "X-CSRF-Token": t } : {};
+    };
+
     let refreshTimer = null;
     let upgradePollTimer = null;
     let upgradeStartedAt = 0;
@@ -20,33 +32,45 @@ const API_BASE = (function() {
     let upgradeAttachMode = false;        // 附加模式:查看已在后端运行的任务
 
     let rawVersionList = [];
-    let selectedVersion = "2.3.0b1";
+    let userPickedVersion = false;
+    let selectedVersion = "2.2.2.post1";
     let latestStableVer = "2.2.2.post1";
-    let latestBetaVer = "2.3.0b1";
+    let latestBetaVer = "2.3.0b2";
 
     
-    // 语义化版本比对函数
-    function compareVersion(v1, v2) {
-      function parse(v) {
-        if (!v) return [0, 0, 0, 0];
+    // 语义化版本比对函数:分级权重 [major, minor, patch, stage, num]
+    // 严格对齐 dev(0) < a(1) < b(2) < rc(3) < formal(4) < post(5),数字段按整数比对
+    function compareVersion(v1: string, v2: string): number {
+      function parse(v: string) {
+        if (!v) return [0, 0, 0, 0, 0];
         const clean = v.replace(/^v/, "").trim();
         const m = clean.match(/^(\d+)\.(\d+)(?:\.(\d+))?(.*)$/);
-        if (!m) return [0, 0, 0, 0];
+        if (!m) return [0, 0, 0, 0, 0];
         const major = parseInt(m[1], 10);
         const minor = parseInt(m[2], 10);
         const patch = parseInt(m[3] || "0", 10);
         const extra = m[4] || "";
-        let extraScore = 0;
-        if (extra.includes(".post")) extraScore = 2;
-        else if (/^[ab]|rc|dev|pre/.test(extra.replace(/^[.-]/, ""))) {
-          const num = parseInt(extra.replace(/\D/g, "") || "0", 10);
-          extraScore = -100 + num;
+        let stage = 4; // 4 = 正式发版(无后缀)
+        let num = 0;
+        if (!extra) {
+          stage = 4;
+          num = 0;
+        } else if (extra.includes(".post")) {
+          stage = 5; // 5 = post 发版(高于正式版)
+          num = parseInt(extra.replace(/\D/g, "") || "0", 10);
+        } else {
+          const c = extra.replace(/^[.-]/, "").toLowerCase();
+          if (c.startsWith("dev")) stage = 0;
+          else if (c.startsWith("a") || c.startsWith("alpha")) stage = 1;
+          else if (c.startsWith("b") || c.startsWith("beta")) stage = 2;
+          else if (c.startsWith("rc") || c.startsWith("c") || c.startsWith("pre")) stage = 3;
+          num = parseInt(c.replace(/\D/g, "") || "0", 10);
         }
-        return [major, minor, patch, extraScore];
+        return [major, minor, patch, stage, num];
       }
       const a = parse(v1);
       const b = parse(v2);
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 5; i++) {
         if (a[i] > b[i]) return 1;
         if (a[i] < b[i]) return -1;
       }
@@ -253,7 +277,7 @@ const API_BASE = (function() {
 
       try {
         showToast(`正在保存新端口 ${newPort}...`);
-        const res = await fetch(`${API_BASE}?action=change_port&port=${newPort}`, { method: "POST" });
+        const res = await fetch(`${API_BASE}?action=change_port&port=${newPort}`, { method: "POST", headers: csrfHeaders() });
         const data = await res.json();
         if (data.success === false) {
           // 后端事务失败(端口冲突/回滚完成)必须如实呈现,不提示"已更改"
@@ -280,7 +304,7 @@ const API_BASE = (function() {
 
       try {
         showToast("正在请求重置...");
-        const res = await fetch(`${API_BASE}?action=reset_auth`, { method: "POST" });
+        const res = await fetch(`${API_BASE}?action=reset_auth`, { method: "POST", headers: csrfHeaders() });
         const data = await res.json();
         if (data.success === false) {
           showToast("重置失败: " + (data.message || "服务重启异常,请查看日志"));
@@ -306,7 +330,7 @@ const API_BASE = (function() {
 
       try {
         showToast(`正在发送${actionName}指令...`);
-        const res = await fetch(`${API_BASE}?action=${act}`, { method: "POST" });
+        const res = await fetch(`${API_BASE}?action=${act}`, { method: "POST", headers: csrfHeaders() });
         const data = await res.json();
         showToast(data.message || `${actionName}指令已成功执行`);
         setTimeout(() => { fetchStatus(); fetchLogs(); }, 2000);
@@ -319,11 +343,11 @@ const API_BASE = (function() {
     // ── 下载源:自定义下拉(原生 select 在移动端弹系统白框,与主题割裂) ──
     // 值落盘服务端(VAR_DIR/pip-mirror)全设备共享;控制台每次升级显式携带
     const MIRRORS = [
-      { value: "", label: "官方 PyPI（国内较慢）" },
+      { value: "https://mirrors.aliyun.com/pypi/simple/", label: "阿里云镜像源（推荐 - 兼容公网/云机）" },
       { value: "https://pypi.tuna.tsinghua.edu.cn/simple", label: "清华大学镜像源" },
-      { value: "https://mirrors.aliyun.com/pypi/simple/", label: "阿里云镜像源" },
       { value: "https://pypi.mirrors.ustc.edu.cn/simple/", label: "中科大镜像源" },
       { value: "https://mirrors.cloud.tencent.com/pypi/simple", label: "腾讯云镜像源" },
+      { value: "", label: "官方 PyPI（国内较慢）" },
     ];
     let mirrorValue = "";
 
@@ -362,7 +386,7 @@ const API_BASE = (function() {
 
     async function saveMirror() {
       try {
-        const res = await fetch(`${API_BASE}?action=set_mirror&mirror=${encodeURIComponent(mirrorValue)}`, { method: "POST" });
+        const res = await fetch(`${API_BASE}?action=set_mirror&mirror=${encodeURIComponent(mirrorValue)}`, { method: "POST", headers: csrfHeaders() });
         const d = await res.json();
         showToast(d.success ? "下载源已保存，安装/升级内核时生效" : ("保存失败: " + (d.message || "")));
       } catch (e) {
@@ -394,6 +418,10 @@ const API_BASE = (function() {
           latestStableVer = data.latest_stable || "2.2.2.post1";
           const firstBeta = rawVersionList.find(v => v.is_beta);
           if (firstBeta) latestBetaVer = firstBeta.version;
+          if (!userPickedVersion) {
+            // 初次载入或用户未自选版本时，默认选中推荐稳定版（初装最优体验，杜绝幽灵历史版本）
+            selectedVersion = latestStableVer;
+          }
           refreshVersionCards();
           return true;
         }
@@ -433,6 +461,7 @@ const API_BASE = (function() {
     }
 
     function pickVersion(ver) {
+      userPickedVersion = true;
       selectedVersion = ver;
       refreshVersionCards();
       const drop = document.getElementById("historyDropdown");
@@ -444,7 +473,7 @@ const API_BASE = (function() {
       if (drop) drop.classList.toggle("show");
     }
 
-    let currentRunningVersion = "2.3.0b1";
+    let currentRunningVersion = "";
 
     // 降级判定:优先用服务端排序结果(桥内 python 按 PEP 440 语义排序,经 lint
     // 钉死 2.10.0>2.9.9、稳定>预发布);两个版本都在列表外时退回本地启发式比较。
@@ -452,7 +481,8 @@ const API_BASE = (function() {
     function isDowngradeOf(current: string, selected: string): boolean {
       const ci = rawVersionList.findIndex(v => v.version === current);
       const si = rawVersionList.findIndex(v => v.version === selected);
-      if (ci >= 0 && si >= 0) return ci > si;
+      // rawVersionList 为降序(索引 0 最新,索引大则版本老)。若选定版本的索引大于当前运行索引,即为降级
+      if (ci >= 0 && si >= 0) return si > ci;
       return compareVersion(current, selected) > 0;
     }
 
@@ -461,9 +491,10 @@ const API_BASE = (function() {
       const warnBar = document.getElementById("downgradeWarnBar");
       if (!btn) return;
 
+      const activeSelected = selectedVersion || latestStableVer || "2.2.2.post1";
       // 内核未安装：按钮语义是「安装」而非「更新/降级」
       if (!currentRunningVersion) {
-        btn.innerText = `安装内核 v${selectedVersion}`;
+        btn.innerText = `安装内核 v${activeSelected}`;
         btn.className = "btn btn-primary btn-sm";
         if (warnBar) warnBar.style.display = "none";
         return;
@@ -483,10 +514,18 @@ const API_BASE = (function() {
 
     // 升级执行与专属流式终端
     async function checkOrUpgrade() {
-      const isDowngrade = isDowngradeOf(currentRunningVersion, selectedVersion);
       let ok = false;
 
-      if (isDowngrade) {
+      if (!currentRunningVersion) {
+        // 初装分支: 内核尚未安装,明确使用"安装"语义,绝不误提示为升级/降级
+        ok = await showModal({
+          title: "📦 安装内核确认",
+          message: `即将为您下载并部署 QwenPaw v${selectedVersion} 核心运行环境，首次安装约需 1~3 分钟。确认开始？`,
+          type: "primary",
+          confirmText: "开始安装",
+          cancelText: "取消"
+        });
+      } else if (isDowngradeOf(currentRunningVersion, selectedVersion)) {
         ok = await showModal({
           title: "⚠️ 降级风险警告",
           message: `你正准备将 QwenPaw 降级至旧版本 v${selectedVersion}（当前运行为 v${currentRunningVersion}）。\n\n【已知风险】跨版本反向降级可能导致新版配置文件、会话记忆结构不兼容或依赖库冲突，甚至引起服务启动异常！\n\n如无明确排障需求，建议保持现状或升级。是否确认强行降级？`,
@@ -528,7 +567,7 @@ const API_BASE = (function() {
       const url = `${API_BASE}?action=upgrade&version=${encodeURIComponent(selectedVersion)}&mirror=${encodeURIComponent(currentMirror())}`;
       let accepted = false;
       try {
-        const res = await fetch(url, { method: "POST", keepalive: true });
+        const res = await fetch(url, { method: "POST", keepalive: true, headers: csrfHeaders() });
         const d = await res.json().catch(() => null);
         if (d && d.success === false) {
           if (d.running) {
@@ -547,7 +586,7 @@ const API_BASE = (function() {
         accepted = true;
       } catch (e) {
         // fetch 失败(切后台/网络抖动):退回 sendBeacon,送达与否交给弹窗对 seq 的轮询
-        try { accepted = Boolean(navigator.sendBeacon && navigator.sendBeacon(url)); } catch (e2) { accepted = false; }
+        try { accepted = Boolean(navigator.sendBeacon && navigator.sendBeacon(url + "&_csrf=" + encodeURIComponent(getCsrfToken()))); } catch (e2) { accepted = false; }
       }
       if (!accepted) {
         document.getElementById("upSubTitle").innerText = "触发请求可能未送达,正在确认...";
@@ -769,10 +808,15 @@ const API_BASE = (function() {
     function logGoNext() { loadLogPage(logPageFromEnd - 1); }
     function logGoLatest() { loadLogPage(0); }
 
-    function clearTerminalLogs() {
+    async function clearTerminalLogs() {
       logLines = [];
       logPageFromEnd = 0;
       renderLogPage();
+      try {
+        await fetch(`${API_BASE}?action=clear_logs`, { method: "POST", headers: csrfHeaders() });
+      } catch (e) {
+        console.error("clear_logs error:", e);
+      }
     }
 
     function toggleAutoRefresh(enable) {
@@ -786,6 +830,7 @@ const API_BASE = (function() {
 
     // 初始执行全套自愈
     initTheme();
+    refreshVersionCards(); // 立即按默认推荐稳定版初始化界面,杜绝空白与幽灵版本
     fetchStatus();
     fetchLogs();
     fetchVersionList();

@@ -54,6 +54,7 @@ fn main() {
             log_file: cfg.kernel_log.clone(),
             share_dir: cfg.share_dir.clone(),
             etc_dir: cfg.etc_dir.clone(),
+            log_level: cfg.kernel_log_level.clone(),
         },
         cfg.kernel_port,
     ));

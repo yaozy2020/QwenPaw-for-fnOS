@@ -17,29 +17,29 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "选择 PyPI 安装源，如果您的网络环境连接官方源较慢，建议选择清华源。"
+                "helpText": "选择 PyPI 安装源，国内网络推荐选择阿里云源（兼容各类家庭网络与云服务器机房 IP）。"
             },
             {
                 "type": "select",
                 "field": "wizard_pypi_mirror",
                 "label": "PyPI 安装源",
-                "initValue": "tsinghua",
+                "initValue": "aliyun",
                 "options": [
                     {
-                        "label": "PyPI 官方源 (国内用户推荐使用其他镜像源)",
-                        "value": "official"
+                        "label": "阿里云镜像源 (推荐 - 兼容公网与云服务器)",
+                        "value": "aliyun"
                     },
                     {
                         "label": "清华大学镜像源",
                         "value": "tsinghua"
                     },
                     {
-                        "label": "阿里云镜像源",
-                        "value": "aliyun"
-                    },
-                    {
                         "label": "中科大镜像源",
                         "value": "ustc"
+                    },
+                    {
+                        "label": "PyPI 官方源 (国内较慢)",
+                        "value": "official"
                     }
                 ],
                 "rules": [

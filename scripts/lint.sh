@@ -33,6 +33,17 @@ for f in "$ROOT"/cmd/* "$ROOT"/app/ui/*.cgi "$ROOT"/build.sh "$ROOT"/scripts/*.s
     fi
 done
 
+# 全局删除门禁：生命周期回调只允许删除 TRIM_* 约束内的路径。
+# 历史事故：测试以临时 TRIM_DATA_SHARE_PATHS 运行 uninstall_callback，
+# 回调内硬编码的全局路径删除绕过了隔离，误删真实应用数据。
+echo "  [gate] uninstall_callback 全局路径删除检查 ..."
+if grep -nE '[^#]*rm[[:space:]]+-rf[[:space:]]+"/?vol' "$ROOT/cmd/uninstall_callback" >/dev/null; then
+    echo "  [FAIL] cmd/uninstall_callback 含硬编码 /vol* 删除（会绕过 TRIM_* 隔离）"
+    fail=1
+else
+    echo "  [  OK ] 无硬编码 /vol* 删除"
+fi
+
 # ── [2/3] shellcheck（error 级门禁；warning 仅报告不拦截） ──
 echo "[2/5] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"
@@ -230,18 +241,19 @@ json_field() {  # $1=payload $2=python表达式 → 输出求值结果
     printf '%s' "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)" 2>/dev/null
 }
 
-bridge_run() {  # $1=METHOD $2=QUERY_STRING $3=SUP_URL [$4=Origin(带 Host 模拟浏览器)] → 输出尾行(JSON 体)
+bridge_run() {  # $1=METHOD $2=QUERY $3=SUP_URL [$4=Origin] [$5=Cookie]
     local out
     if [ -n "${4:-}" ]; then
-        out="$(QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
-            QUERY_STRING="$2" REQUEST_METHOD="$1" \
-            HTTP_HOST="127.0.0.1:9999" HTTP_ORIGIN="$4" "$BR")"
+        if [ -n "${5:-}" ]; then
+            out="$(QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR"                 QUERY_STRING="$2" REQUEST_METHOD="$1"                 HTTP_HOST="127.0.0.1:9999" HTTP_ORIGIN="$4" HTTP_COOKIE="$5" "$BR")"
+        else
+            out="$(QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR"                 QUERY_STRING="$2" REQUEST_METHOD="$1"                 HTTP_HOST="127.0.0.1:9999" HTTP_ORIGIN="$4" "$BR")"
+        fi
     else
-        out="$(env -u HTTP_ORIGIN -u HTTP_REFERER -u HTTP_HOST \
-            QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR" \
-            QUERY_STRING="$2" REQUEST_METHOD="$1" "$BR")"
+        out="$(env -u HTTP_ORIGIN -u HTTP_REFERER -u HTTP_HOST             QWENPAW_SUP_URL="$3" TRIM_PKGVAR="$FAKE_TOKEN_DIR"             QUERY_STRING="$2" REQUEST_METHOD="$1" "$BR")"
     fi
-    printf '%s\n' "$out" | tail -n 1
+    printf '%s
+' "$out" | tail -n 1
 }
 
 bridge_status() {  # $1=METHOD $2=QUERY_STRING → 输出桥声明的 HTTP 状态行(CGI Status: 头)
@@ -309,8 +321,8 @@ fi
 
 # T6 set_mirror:合法 URL 落盘;注入载荷(%3B → ';')被字符白名单拒绝 ——
 # mirror 会进监督者的 bash -c pip 串,这里必须挡死
-t6="$(bridge_run POST "action=set_mirror&mirror=https://pypi.tuna.tsinghua.edu.cn/simple" "http://127.0.0.1:1" "http://127.0.0.1:9999")"
-t6bad="$(bridge_run POST "action=set_mirror&mirror=https%3A%2F%2Fx.test%2F%3Brm" "http://127.0.0.1:1" "http://127.0.0.1:9999")"
+t6="$(bridge_run POST "action=set_mirror&mirror=https://pypi.tuna.tsinghua.edu.cn/simple&_csrf=tok" "http://127.0.0.1:1" "http://127.0.0.1:9999" "qwenpaw_csrf=tok")"
+t6bad="$(bridge_run POST "action=set_mirror&mirror=https%3A%2F%2Fx.test%2F%3Brm&_csrf=tok" "http://127.0.0.1:1" "http://127.0.0.1:9999" "qwenpaw_csrf=tok")"
 if [ "$(json_field "$t6" "d.get('success')")" = "True" ] \
     && [ "$(cat "$FAKE_TOKEN_DIR/pip-mirror")" = "https://pypi.tuna.tsinghua.edu.cn/simple" ] \
     && [ "$(json_field "$t6bad" "d.get('success')")" = "False" ]; then
@@ -321,7 +333,7 @@ else
 fi
 
 # T7 upgrade 未带 mirror → 桥必须把已存下载源注入请求体
-t7="$(bridge_run POST "action=upgrade&version=2.3.0b2" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999")"
+t7="$(bridge_run POST "action=upgrade&version=2.3.0b2&_csrf=tok" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999" "qwenpaw_csrf=tok")"
 if [ "$(json_field "$t7" "d.get('success')")" = "True" ] \
     && grep -qF '/kernel/install {"version": "2.3.0b2", "mirror": "https://pypi.tuna.tsinghua.edu.cn/simple"}' "$WORK/reqlog"; then
     echo "  [  OK ] upgrade 请求体携带已存下载源"
@@ -331,7 +343,7 @@ else
 fi
 
 # T8 upgrade 显式 mirror=(空,控制台选官方)→ 覆盖已存文件值
-t8="$(bridge_run POST "action=upgrade&version=2.2.2.post1&mirror=" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999")"
+t8="$(bridge_run POST "action=upgrade&version=2.2.2.post1&mirror=&_csrf=tok" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999" "qwenpaw_csrf=tok")"
 if [ "$(json_field "$t8" "d.get('success')")" = "True" ] \
     && grep -qF '/kernel/install {"version": "2.2.2.post1", "mirror": ""}' "$WORK/reqlog"; then
     echo "  [  OK ] upgrade 显式 mirror= 覆盖文件值"
@@ -354,25 +366,42 @@ else
     fail=1
 fi
 
-# T10 POST 缺 Origin/Referer(跨站/直连伪造形态)→ 403,且请求不得到达监督者
-t10a="$(bridge_run POST "action=stop" "http://127.0.0.1:${FAKE_PORT}")"
-t10b="$(bridge_run POST "action=stop" "http://127.0.0.1:${FAKE_PORT}" "http://evil.test:80")"
-if [ "$(json_field "$t10a" "d.get('success')")" = "False" ] \
-    && [ "$(json_field "$t10b" "d.get('success')")" = "False" ] \
-    && ! grep -q '^/stop' "$WORK/reqlog"; then
-    echo "  [  OK ] 无 Origin/异源 POST → 403 且未透传监督者"
+# ── CSRF:double-submit cookie 机制(2.0.0-14 起)。背景:fnOS 网关代理 CGI
+# 时 Host 被重写为 "localhost"(插桩实测),基于 Host/Origin 的同源校验在该
+# 形态下把控制台全部 POST 误杀 403 —— token 机制与部署拓扑完全无关。 ──
+envrun() {  # 直接以环境变量驱动桥:$1=QUERY_STRING,其余为 VAR=VAL 环境对
+    local qs="$1"; shift
+    env QWENPAW_SUP_URL="http://127.0.0.1:${FAKE_PORT}" TRIM_PKGVAR="$FAKE_TOKEN_DIR"         QUERY_STRING="$qs" REQUEST_METHOD="POST" "$@" "$BR" | tail -n 1
+}
+
+# T10 无 token(cookie 缺失 = 页面过旧/直连伪造)→ 403 且不透传监督者
+t10a="$(envrun "action=stop")"
+# T10b token 头与 cookie 不匹配(伪造)→ 403
+t10b="$(envrun "action=stop" HTTP_COOKIE="qwenpaw_csrf=good" HTTP_X_CSRF_TOKEN="evil")"
+if [ "$(json_field "$t10a" "d.get('success')")" = "False" ]     && [ "$(json_field "$t10b" "d.get('success')")" = "False" ]     && ! grep -q '^/stop' "$WORK/reqlog"; then
+    echo "  [  OK ] 无 token/伪造 token POST → 403 且未透传监督者"
 else
-    echo "  [FAIL] CSRF 校验失效: no-origin=${t10a:0:100} evil=${t10b:0:100}"
+    echo "  [FAIL] CSRF token 校验失效: missing=${t10a:0:100} evil=${t10b:0:100}"
     fail=1
 fi
 
-# T11 同源 POST 正常透传(放行路径,防止校验误伤合法控制台)
-t11="$(bridge_run POST "action=start" "http://127.0.0.1:${FAKE_PORT}" "http://127.0.0.1:9999")"
-if [ "$(json_field "$t11" "d.get('success')")" = "True" ] \
-    && grep -q '^/start' "$WORK/reqlog"; then
-    echo "  [  OK ] 同源 POST 正常放行"
+# T11 合法 token → 放行。★实捕回放★:环境头逐字取自 2.0.0-13 插桩捕获的
+# 网关真实请求(Host=localhost / Origin=NAS:15666 / SCRIPT_NAME=安装路径),
+# 在此形态下加配对 cookie+头必须放行 —— 这正是当初被误杀的合法控制台请求。
+t11="$(envrun "action=start"     HTTP_HOST="localhost"     HTTP_ORIGIN="http://192.168.10.236:15666"     HTTP_REFERER="http://192.168.10.236:15666/cgi/ThirdParty/qwenpaw/index.cgi/"     SCRIPT_NAME="/var/apps/qwenpaw"     HTTP_COOKIE="qwenpaw_csrf=tok" HTTP_X_CSRF_TOKEN="tok")"
+if [ "$(json_field "$t11" "d.get('success')")" = "True" ]     && grep -q '^/start' "$WORK/reqlog"; then
+    echo "  [  OK ] 实捕网关形态 + 合法 token → 放行(Host=localhost 不再误杀)"
 else
-    echo "  [FAIL] 同源 POST 被误拒: ${t11:0:120}"
+    echo "  [FAIL] 实捕网关形态被误拒: ${t11:0:160}"
+    fail=1
+fi
+
+# T11b sendBeacon 退路:带不了自定义头,token 走 _csrf 查询参数 → 等效放行
+t11b="$(envrun "action=start&_csrf=tok"     HTTP_HOST="localhost" HTTP_COOKIE="qwenpaw_csrf=tok")"
+if [ "$(json_field "$t11b" "d.get('success')")" = "True" ]     && grep -q '^/start' "$WORK/reqlog"; then
+    echo "  [  OK ] sendBeacon _csrf 查询参数退路 → 放行"
+else
+    echo "  [FAIL] sendBeacon 退路被误拒: ${t11b:0:140}"
     fail=1
 fi
 
