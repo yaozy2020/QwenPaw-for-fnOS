@@ -45,6 +45,21 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
+      # [0b] dispatch 的 tag 若已存在(指向旧提交),必须按 tag 指向的提交构建:
+      # 否则会以 HEAD 代码出包挂到旧 tag 上发布,tag↔commit 一致性失守
+      # (审查 构建 P2-4)。tag 不存在时保持 HEAD,由 softprops 以 HEAD 建 tag。
+      - name: Checkout tag if it already exists
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --no-tags 2>/dev/null; then
+            git checkout -q --detach "refs/tags/${TAG}"
+            echo "dispatch: tag 已存在,按 tag 指向的提交构建"
+          else
+            echo "dispatch: tag 不存在,将以当前 HEAD 创建"
+          fi
+
       # [1] 标签与 manifest 映射校验
       # 映射规则：
       #   v2.1.0-rc.2 -> manifest 2.1.0-2 -> prerelease=true
@@ -102,13 +117,17 @@ jobs:
           (cd supervisor && cargo test --locked)
           (cd supervisor && cargo clippy --locked --all-targets -- -D warnings)
 
-      # [4b] 生命周期回归(不需要二进制,可在前置阶段跑)
-      - name: Lifecycle regression
-        run: bash scripts/lint.sh
-
+      # [4b] 构建环境(必须在 lint 之前:STRICT_CI 下 esbuild 层真正执行,
+      # 否则发布门禁比 CI 弱一档 —— 审查 构建 P2-2)
       - name: Prepare build environment
         run: |
           npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+
+      # [4c] 生命周期回归(与 ci.yml 同口径)
+      - name: Lifecycle regression
+        env:
+          STRICT_CI: "1"
+        run: bash scripts/lint.sh
 
       # [5] 双构建 SHA256 对比。
       # 覆盖范围:web 打包与 FPK 封装的确定性(每次都重算)。

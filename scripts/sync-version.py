@@ -90,6 +90,29 @@ def main():
                         ok = False
                         want = f"{base}-rc.{m_tag_rc.group(1)}"
         targets.append(("supervisor/Cargo.toml", cur, ok))
+
+        # Cargo.lock 必须与 Cargo.toml 同步,否则后续所有 --locked 构建
+        # (build.sh/ci/release)都会报 "lock file needs to be updated",
+        # 失败在远离成因处爆发(审查 构建 P2-1)。
+        lock = ROOT / "supervisor" / "Cargo.lock"
+        if lock.exists():
+            lt = lock.read_text(encoding="utf-8")
+            m_lock = re.search(r'name = "qwenpaw-supervisor"\s*\nversion = "([^"]+)"', lt)
+            if m_lock:
+                lock_cur = m_lock.group(1)
+                want_lock = cur if ok else want
+                lock_ok = lock_cur == want_lock
+                targets.append(("supervisor/Cargo.lock", lock_cur, lock_ok))
+                if not check and not lock_ok:
+                    lock.write_text(
+                        re.sub(
+                            r'(name = "qwenpaw-supervisor"\s*\nversion = )"[^"]+"',
+                            lambda mm: mm.group(1) + f'"{want_lock}"',
+                            lt, count=1,
+                        ),
+                        encoding="utf-8",
+                    )
+
         if not check and not ok and m:
             cargo.write_text(
                 re.sub(r'^version = "(.+?)"$', f'version = "{want}"', ct, count=1, flags=re.M),

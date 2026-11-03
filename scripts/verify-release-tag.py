@@ -51,7 +51,9 @@ def _git(*args: str) -> str | None:
         return None
 
 
-def previous_build_number(release_base: str, exclude_tag: str = "") -> int | None:
+def previous_build_number(
+    release_base: str, exclude_tag: str = "", seq_re: str = r"(\d+\.\d+\.\d+)-(\d+)"
+) -> int | None:
     """返回同一 release 主干(x.y.z)下已发布过的最大 FPK 构建号。
 
     基线来源是"各 tag 指向提交里的 manifest 版本",而不是 tag 名本身 ——
@@ -75,7 +77,7 @@ def previous_build_number(release_base: str, exclude_tag: str = "") -> int | Non
         m = re.search(r"^version\s*=\s*(\S+)\s*$", content, flags=re.M)
         if not m:
             continue
-        mb = re.fullmatch(r"(\d+\.\d+\.\d+)-(\d+)", m.group(1))
+        mb = re.fullmatch(seq_re, m.group(1))
         if mb and mb.group(1) == release_base:
             numbers.append(int(mb.group(2)))
     return max(numbers) if numbers else None
@@ -122,8 +124,11 @@ def main():
         )
         return 1
 
-    # FPK 构建号必须单调递增，否则 fnOS 判定为旧版并拒绝覆盖升级
+    # FPK 构建号必须单调递增，否则 fnOS 判定为旧版并拒绝覆盖升级。
+    # rc 预发布串同样受序号约束 —— 静默跳过会让"rc 序号倒退"无门禁
+    # (审查 构建 P2-5)。rc 序号与构建号是两个独立序列,分域比较。
     m_build = re.search(r"-(\d+)$", actual_manifest)
+    m_rc = re.search(r"-rc\.(\d+)$", actual_manifest)
     if m_build:
         build_no = int(m_build.group(1))
         release_base = actual_manifest.rsplit("-", 1)[0]
@@ -139,6 +144,25 @@ def main():
             print(f"构建号单调性: {release_base} 域内无历史基线, 跳过比较 (本次 {build_no})")
         else:
             print(f"构建号单调性: {release_base} 域内上一个 {prev} → 本次 {build_no}")
+    elif m_rc:
+        rc_no = int(m_rc.group(1))
+        release_base = actual_manifest.rsplit("-rc.", 1)[0]
+        prev = previous_build_number(
+            release_base, tag, seq_re=r"(\d+\.\d+\.\d+)-rc\.(\d+)"
+        )
+        if prev is not None and rc_no <= prev:
+            print(
+                f"ERROR: rc 序号倒退！manifest={actual_manifest} (rc={rc_no}) "
+                f"必须大于已有最大 rc 序号 {prev}。",
+                file=sys.stderr,
+            )
+            return 1
+        if prev is None:
+            print(f"构建号单调性: {release_base} 域内无 rc 基线, 跳过比较 (本次 rc={rc_no})")
+        else:
+            print(f"构建号单调性: {release_base} 域内上一个 rc {prev} → 本次 {rc_no}")
+    else:
+        print("构建号单调性: manifest 无 -N/rc.N 后缀, 跳过(正式版必须携带构建号)")
 
     if github_output_mode:
         import os

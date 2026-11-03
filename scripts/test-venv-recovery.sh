@@ -91,8 +91,10 @@ if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
     echo "Successfully installed qwenpaw-2.0.0"
     exit 0
 fi
-# 其他情况 (如启动内核进程)
-exec sleep 30
+# 其他情况 (如启动内核进程):保持原始 argv 不做 exec —— 恢复路径按
+# /proc/cmdline 的 argv(python3*/ -m qwenpaw/ --port)重发现内核,exec
+# 会把 cmdline 换成 "sleep 30" 使重发现必然空转,停进程断言永远测不到。
+sleep 30
 EOF
     chmod +x "$mock_py"
 
@@ -220,6 +222,17 @@ with socketserver.TCPServer(('127.0.0.1', $kernel_port), H) as httpd:
     local residual_staging=$(ls -d "$test_dir/home"/.venv.staging.* 2>/dev/null | wc -l)
     local residual_backup=$(ls -d "$test_dir/home"/.venv.rollback.* 2>/dev/null | wc -l)
 
+    # 工单2核心断言(仅断点 7):恢复必须先停掉由中断安装拉起的内核,
+    # 否则留下"进程新版 + 磁盘旧版"错配。stub 保持原始 argv,重发现可命中。
+    # 注意断点 5/6(Committed)内核存活是预期行为,不得断言。
+    if [ "$1" = "after_spawn_before_commit" ]; then
+        if pgrep -f "$test_dir/home/venv/bin/python3 -m qwenpaw" >/dev/null 2>&1; then
+            bad "$desc 失败: 恢复未停止由中断安装拉起的内核进程"
+        else
+            echo "  [  OK ] 恢复已停止由中断安装拉起的内核进程"
+        fi
+    fi
+
     # 停止恢复后的 supervisor 和 mock server。
     # 用 SIGKILL:优雅停服会走 15s 内核宽限期,6 个用例累加必然拖爆外层超时
     kill -9 "$rec_pid" 2>/dev/null || true
@@ -256,6 +269,7 @@ run_crash_test "after_commit" "断点 6/7: 提交完成后 SIGKILL" "2.0.0"
 # 7. 新内核已拉起并通过健康检查、事务尚未 commit 时 SIGKILL
 #    关键:恢复阶段必须先停进程再回滚磁盘,否则留下"进程新版 + 磁盘旧版"
 run_crash_test "after_spawn_before_commit" "断点 7/7: 内核已拉起、未提交时 SIGKILL" "1.0.0"
+
 
 echo "======================================================================"
 if [ $FAIL -eq 0 ]; then
