@@ -1586,7 +1586,7 @@ fn wait_for_version(port: u16, target_version: &str, attempts: usize) -> bool {
 /// `python -m venv` 与 importlib.metadata 查询都不在上面那个 pip 看门狗覆盖范围内:
 /// 一旦挂起(venv 创建卡在锁上、解释器启动卡在 NFS 上),安装线程会永久阻塞,
 /// running 恒 true、/kernel/install 永久 busy —— 正是看门狗注释声称要消灭的模式。
-fn run_with_timeout(
+pub(crate) fn run_with_timeout(
     mut cmd: std::process::Command,
     timeout: std::time::Duration,
     label: &str,

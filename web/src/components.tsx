@@ -10,7 +10,7 @@ export function StatusCardView({ data }: { data: StatusData }) {
   const stateText = degraded ? "状态不可达" : notInstalled ? "内核未安装" : running ? "运行中" : "已停止";
   const stateColor = degraded ? "var(--text-muted)"
     : notInstalled ? "var(--text-sub)"
-    : running ? "var(--success)" : "var(--danger)";
+    : running ? "var(--success)" : "var(--danger-text)";
   const stats: [string, string][] = [
     ["进程 PID", running ? String(data.pid || "-") : "-"],
     ["CPU 占用", running && typeof data.cpu === "number" ? data.cpu.toFixed(1) + "%" : "-"],

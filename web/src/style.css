@@ -63,6 +63,9 @@ html[data-theme="dark"] {
      危险操作 hover 时视觉重量上升,同时把对比度推到 4.83:1。
      文字色仍用浅红(见下方 --danger 派生),深底浅字更易读。 */
   --danger: #dc2626;
+  /* 文字/图标前景用浅红:#dc2626 作小字落在深底仅 3.6:1(审查 P1);
+     它本身保留作 .btn-danger:hover 的实心底(白字 4.83:1)。 */
+  --danger-text: #f87171;
   --danger-bg: rgba(220, 38, 38, 0.10);
   --danger-border: rgba(220, 38, 38, 0.30);
   /* 终端恒暗:亮色主题下也保持终端质感 */
@@ -101,6 +104,7 @@ html[data-theme="light"] {
   /* 原 #dc2626 落在 8% tint 上为 4.41:1,略低于 AA。#b91c1c 达 6.47:1,
      徽章与 notice 同步受益。 */
   --danger: #b91c1c;
+  --danger-text: #b91c1c;
   --danger-bg: rgba(185, 28, 28, 0.08);
   --danger-border: rgba(185, 28, 28, 0.28);
   --terminal-bg: #0f172a;
@@ -199,7 +203,7 @@ header {
   white-space: nowrap;
 }
 .badge-success { background: var(--success-bg); color: var(--success); }
-.badge-danger { background: var(--danger-bg); color: var(--danger); }
+.badge-danger { background: var(--danger-bg); color: var(--danger-text); }
 .badge-warning { background: var(--warning-bg); color: var(--warning); }
 .pulse-dot {
   width: 7px;
@@ -253,14 +257,14 @@ button:active, .btn:active { transform: scale(0.98); }
 }
 .btn-danger {
   background: var(--danger-bg);
-  color: var(--danger);
+  color: var(--danger-text);
   border-color: var(--danger-border);
 }
 .btn-danger:hover { background: var(--danger); color: #fff; }
 .btn-danger-ghost {
   background: transparent;
   border-color: var(--danger-border);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 .btn-danger-ghost:hover { background: var(--danger-bg); }
 
@@ -439,8 +443,8 @@ button:disabled, .btn:disabled {
 .notice-info svg { color: var(--primary); }
 .notice-warn { background: var(--warning-bg); border-color: var(--warning-border); }
 .notice-warn svg { color: var(--warning); }
-.notice-danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
-.notice-danger svg { color: var(--danger); }
+.notice-danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); }
+.notice-danger svg { color: var(--danger-text); }
 .notice-click { cursor: pointer; }
 .notice-sm { font-size: var(--fs-xs); padding: 8px var(--sp-3); }
 
@@ -773,7 +777,7 @@ button:disabled, .btn:disabled {
   flex-shrink: 0;
 }
 .modal-icon-badge.warn { background: var(--warning-bg); color: var(--warning); }
-.modal-icon-badge.danger { background: var(--danger-bg); color: var(--danger); }
+.modal-icon-badge.danger { background: var(--danger-bg); color: var(--danger-text); }
 .modal-icon-badge.primary { background: var(--primary-soft); color: var(--primary); }
 .modal-title { font-size: var(--fs-lg); font-weight: 600; color: var(--text-main); }
 .modal-subtitle {

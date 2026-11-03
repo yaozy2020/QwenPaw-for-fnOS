@@ -420,11 +420,11 @@ const API_BASE = (function() {
         } else if (statusType === "disabled") {
           if (valAuth) {
             valAuth.innerText = "未开启（公开访问）";
-            valAuth.style.color = "var(--danger)";
+            valAuth.style.color = "var(--danger-text)";
           }
           if (valAdmin) {
             valAdmin.innerText = "未启用账号验证";
-            valAdmin.style.color = "var(--danger)";
+            valAdmin.style.color = "var(--danger-text)";
           }
           if (valDesc) {
             valDesc.innerText = "任何能访问该端口的人无需密码即可使用对话端。如需保护，请在对话端设置 QwenPaw 管理员。";
@@ -1101,7 +1101,7 @@ const API_BASE = (function() {
             if (isFailed) {
               document.getElementById("upTitle").innerText = `${doneAction}遇到问题`;
               document.getElementById("upSubTitle").innerText = "请查看详细日志；若下载源不可用，请换源或检查 NAS 网络后重试。原内核环境已保留或恢复";
-              document.getElementById("upDoneIcon").style.color = "var(--danger)";
+              document.getElementById("upDoneIcon").style.color = "var(--danger-text)";
             } else {
               document.getElementById("upTitle").innerText = `${doneAction}已顺利完成！`;
               document.getElementById("upSubTitle").innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
@@ -1128,7 +1128,7 @@ const API_BASE = (function() {
             ? "安装任务仍在后台执行，可关闭本窗口；稍后在控制台查看进度或日志"
             : "无法连接监督者。任务可能仍在后台执行，可关闭本窗口稍后重试";
           document.getElementById("upDoneIcon").style.display = "inline-block";
-          document.getElementById("upDoneIcon").style.color = "var(--danger)";
+          document.getElementById("upDoneIcon").style.color = "var(--danger-text)";
           document.getElementById("btnUpClose").style.display = "block";
         }
       }

@@ -121,6 +121,8 @@ else
     log_msg "首次安装完成（外壳）。内核未预装——请打开 QwenPaw 控制台，在「版本更新」中选择版本安装。"
     log_msg "提示: 内核 wheel 约 40MB，控制台安装时从所选 PyPI 镜像下载。"
     chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
+    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
+    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
     # 750:会话记忆/聊天记录仅需属主访问;本机实测 700 亦正常运行。755 曾把
     # 这些数据对同机其他应用用户放行 —— 审查 S3。
     chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true

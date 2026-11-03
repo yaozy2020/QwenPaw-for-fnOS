@@ -96,11 +96,16 @@ impl KernelManager {
             }
         }
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
-        let version = match process::Command::new(&bin)
-            .arg("-c")
-            .arg("import importlib.metadata as m; print(m.version('qwenpaw'))")
-            .output()
-        {
+        // 解释器启动可能卡在 NFS/坏 venv 上:与 install.rs 的 metadata_version 一样
+        // 走带超时执行,否则 spawn_blocking 线程泄漏、/start 持锁期间全部操作 409。
+        let mut cmd = process::Command::new(&bin);
+        cmd.arg("-c")
+            .arg("import importlib.metadata as m; print(m.version('qwenpaw'))");
+        let version = match crate::install::run_with_timeout(
+            cmd,
+            std::time::Duration::from_secs(15),
+            "读取内核版本(缓存失效路径)",
+        ) {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => String::new(),
         };
