@@ -52,7 +52,6 @@ html[data-theme="dark"] {
      #2563eb 达 5.17:1,视觉上仍是同一支蓝,只是压暗一档。 */
   --primary: #2563eb;
   --primary-hover: #1d4ed8;
-  --primary-text: #1d4ed8;
   --primary-text: #60a5fa;
   --primary-soft: rgba(59, 130, 246, 0.10);
   --primary-border: rgba(59, 130, 246, 0.28);
@@ -96,6 +95,7 @@ html[data-theme="light"] {
   --token-bg: #f2f4f7;
   --primary: #2563eb;
   --primary-hover: #1d4ed8;
+  --primary-text: #1d4ed8;
   --primary-soft: rgba(37, 99, 235, 0.08);
   --primary-border: rgba(37, 99, 235, 0.25);
   --success: #047857;
@@ -745,10 +745,11 @@ button:disabled, .btn:disabled {
   z-index: 99999;
   opacity: 0;
   pointer-events: none;
+  visibility: hidden;
   overflow-y: auto;
-  transition: opacity var(--dur-med) var(--ease-out);
+  transition: opacity var(--dur-med) var(--ease-out), visibility var(--dur-med) var(--ease-out);
 }
-.modal-overlay.active { opacity: 1; pointer-events: auto; }
+.modal-overlay.active { opacity: 1; pointer-events: auto; visibility: visible; }
 .modal-box {
   background: var(--card-bg);
   border: 1px solid var(--card-border);
@@ -791,6 +792,8 @@ button:disabled, .btn:disabled {
 .modal-msg { font-size: var(--fs-md); color: var(--text-sub); line-height: 1.6; }
 /* 弹窗内联输入区(替代原生 prompt()) */
 .modal-field { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+/* [hidden] 必须真正生效:display:flex 会覆盖 UA 的 display:none */
+.modal-field[hidden] { display: none !important; }
 .modal-label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
 .modal-input {
   width: 100%; box-sizing: border-box;

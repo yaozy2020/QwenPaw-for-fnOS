@@ -317,7 +317,7 @@ const API_BASE = (function() {
     // 只允许最新一次发起的请求写入 UI。
     let statusReqSeq = 0;
     async function fetchStatus() {
-      if (document.hidden) return; // 后台标签页暂停轮询（对齐 DSH 实践）
+      if (document.hidden) return;
       const mySeq = ++statusReqSeq;
       try {
         const res = await fetch(`${API_BASE}?action=status&_t=${Date.now()}`);
@@ -463,6 +463,7 @@ const API_BASE = (function() {
 
       } catch (e) {
         console.error("fetchStatus err:", e);
+        if (mySeq !== statusReqSeq) return; // 过期的失败响应不覆盖新状态
         // 无法连接后端(502/网络错误/会话过期)时必须把徽章切到未知态。
         // 否则徽章保留 index.html 里的初始红色/上一次的绿色,用户会以为服务在跑。
         const badge = document.getElementById("statusBadge");
@@ -926,6 +927,10 @@ const API_BASE = (function() {
 
       pollFailureStreak = 0;
       openUpgradeModal(false, baseline);
+      // openUpgradeModal 会把基线标志复位为 false;基线缺失(获取失败或
+      // 响应无 seq)必须保持"未知"语义,否则后端的陈旧 done 终态 + 首拍即
+      // 终态会被误判成本会话完成 —— 云端已复现的假成功。
+      if (baseline === null) upgradeBaselineFailed = true;
 
       // 触发安装:fetch(keepalive) 为主 —— 能读到受理响应(成功 seq / busy 提示),
       // 失败才退回 sendBeacon(浏览器保证尽力送达,但响应不可读)。
@@ -1057,9 +1062,8 @@ const API_BASE = (function() {
           }
         }
 
-        pollFailureStreak = 0;
-
         if (statusRes.ok) {
+          pollFailureStreak = 0;
           const sdata = await statusRes.json();
           const terminalPhase = sdata.phase === "done" || sdata.phase === "failed";
           if (upgradeSeenPhase === null) {
@@ -1111,15 +1115,36 @@ const API_BASE = (function() {
             // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
             // 导致空环境首次安装也显示"重新安装已顺利完成"。
             const doneAction = pendingInstallAction || currentInstallAction();
+            // 附加模式:任务可能是别的会话/设备发起的,动作名不得重算或沿用
+            const titleAction = upgradeAttachMode ? "安装任务" : doneAction;
             if (isFailed) {
-              document.getElementById("upTitle").innerText = `${doneAction}遇到问题`;
+              document.getElementById("upTitle").innerText = `${titleAction}遇到问题`;
               document.getElementById("upSubTitle").innerText = "请查看详细日志；若下载源不可用，请换源或检查 NAS 网络后重试。原内核环境已保留或恢复";
               document.getElementById("upDoneIcon").style.color = "var(--danger-text)";
             } else {
-              document.getElementById("upTitle").innerText = `${doneAction}已顺利完成！`;
+              document.getElementById("upTitle").innerText = `${titleAction}已顺利完成！`;
               document.getElementById("upSubTitle").innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
               document.getElementById("upDoneIcon").style.color = "var(--success)";
             }
+          }
+        } else {
+          // 安装状态非 2xx:与 catch 同口径累计失败,否则监督者失联时
+          // 弹窗没有任何计数来源,永久转圈(云端界面反馈)
+          pollFailureStreak += 1;
+          const elapsed = Date.now() - upgradeStartedAt;
+          const timedOut = elapsed > UPGRADE_POLL_MAX_MS;
+          if (timedOut || pollFailureStreak >= UPGRADE_POLL_FAIL_MAX) {
+            clearInterval(upgradePollTimer);
+            upgradePollTimer = null;
+            document.getElementById("upSpinner").style.display = "none";
+            document.getElementById("upTitle").innerText =
+              timedOut ? "任务仍未结束" : "与控制台连接中断";
+            document.getElementById("upSubTitle").innerText = timedOut
+              ? "安装任务仍在后台执行，可关闭本窗口；稍后在控制台查看进度或日志"
+              : "无法连接监督者。任务可能仍在后台执行，可关闭本窗口稍后重试";
+            document.getElementById("upDoneIcon").style.display = "inline-block";
+            document.getElementById("upDoneIcon").style.color = "var(--danger-text)";
+            document.getElementById("btnUpClose").style.display = "block";
           }
         }
       } catch (e) {
@@ -1160,12 +1185,16 @@ const API_BASE = (function() {
     function renderLogPage() {
       const terminal = document.getElementById("logTerminal");
       if (!terminal) return;
+      const totalPages = Math.max(1, Math.ceil(logLines.length / LOG_PAGE_SIZE));
+      // 实时刷新与历史分页并发时 logLines 可能变短:先夹紧页偏移,
+      // 否则 end 为负、出现"第 0 页"(云端界面反馈)
+      if (logPageFromEnd > totalPages - 1) logPageFromEnd = totalPages - 1;
+      if (logPageFromEnd < 0) logPageFromEnd = 0;
       const end = logLines.length - logPageFromEnd * LOG_PAGE_SIZE;
       const start = Math.max(0, end - LOG_PAGE_SIZE);
       const pageLines = logLines.slice(start, end);
       renderLogLines(pageLines, terminal, "（当前无日志输出）");
 
-      const totalPages = Math.max(1, Math.ceil(logLines.length / LOG_PAGE_SIZE));
       const displayPage = totalPages - logPageFromEnd;
       const indicator = document.getElementById("logPageIndicator");
       if (indicator) indicator.innerText = logLines.length ? `第 ${displayPage} / ${totalPages} 页` : "暂无日志";
