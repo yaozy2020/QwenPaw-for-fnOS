@@ -157,6 +157,16 @@ def main():
                 file=sys.stderr,
             )
             return 1
+        # 该主干若已有构建号形态的正式发布,rc 序号系列视为已结束:
+        # rc.N 与构建号 M 是两个序列,放行会让"rc 序号倒退/倒挂"无门禁
+        prev_build = previous_build_number(release_base, tag)
+        if prev_build is not None:
+            print(
+                f"ERROR: {release_base} 已存在构建号形态发布(最大 {prev_build}),"
+                f"rc 序号系列已结束 —— 请使用构建号形态(如 {release_base}-{prev_build + 1})",
+                file=sys.stderr,
+            )
+            return 1
         if prev is None:
             print(f"构建号单调性: {release_base} 域内无 rc 基线, 跳过比较 (本次 rc={rc_no})")
         else:
