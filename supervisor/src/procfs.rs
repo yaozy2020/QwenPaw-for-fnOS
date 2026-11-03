@@ -12,7 +12,10 @@ pub fn process_alive(pid: i32) -> bool {
         Ok(s) => {
             let Some(i) = s.rfind(')') else { return false };
             let rest = &s[i + 2..];
-            matches!(rest.chars().next(), Some('R') | Some('S') | Some('D') | Some('T'))
+            matches!(
+                rest.chars().next(),
+                Some('R') | Some('S') | Some('D') | Some('T') | Some('t')
+            )
         }
         Err(_) => false,
     }

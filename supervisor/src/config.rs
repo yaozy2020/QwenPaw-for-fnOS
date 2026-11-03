@@ -69,10 +69,13 @@ impl Config {
         // 表现为"每次启动都健康检查超时 + 反复重启"的循环。
         let supervisor_port = listen;
         if kernel_port == supervisor_port {
+            // 回退值必须与冲突端口不同:监督者占 18088 时回退 18088 = 冲突未解,
+            // 内核 bind 必败、健康检查死循环(审查 supervisor P3)。
+            let fallback = if supervisor_port == 18088 { 18089 } else { 18088 };
             eprintln!(
-                "[Supervisor] service_port({kernel_port}) 与监督者监听端口冲突,忽略该文件值,回退到 18088"
+                "[Supervisor] service_port({kernel_port}) 与监督者监听端口冲突,忽略该文件值,回退到 {fallback}"
             );
-            kernel_port = 18088;
+            kernel_port = fallback;
         }
         let auto_start = env::var("SUPERVISOR_AUTOSTART").unwrap_or_default() != "0";
         let app_dest = env_or("TRIM_APPDEST", "/var/apps/qwenpaw/target");

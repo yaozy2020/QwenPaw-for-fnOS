@@ -86,7 +86,7 @@ impl KernelManager {
 
     pub fn kernel_version(&self) -> String {
         {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state
                 .version_cache_at
                 .map(|at| at.elapsed() < Duration::from_secs(5))
@@ -109,14 +109,14 @@ impl KernelManager {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => String::new(),
         };
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.version_cache = version.clone();
         state.version_cache_at = Some(Instant::now());
         version
     }
 
     pub fn invalidate_version(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.version_cache.clear();
         state.version_cache_at = None;
     }
@@ -131,7 +131,7 @@ impl KernelManager {
         // 与 stop_sync 互斥,防止"stop 后 spawn"与安装线程的 spawn 交错
         let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         {
-            let st = self.state.lock().unwrap();
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if st.tracked != 0 && procfs::process_alive(st.tracked) {
                 return Err(format!("kernel already running pid={}", st.tracked));
             }
@@ -195,7 +195,7 @@ impl KernelManager {
             }
         });
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             st.tracked = pid;
             st.started_wall = procfs::started_wall(pid);
             st.cache_pid = pid;
@@ -209,7 +209,7 @@ impl KernelManager {
     /// 失败路径据此回滚(超时视为失败,由调用方处理)。
     /// 阻塞式:调用方(axum 处理器)须经 spawn_blocking 包裹。
     pub fn wait_healthy(&self, timeout: Duration) -> bool {
-        let pid = self.state.lock().unwrap().tracked;
+        let pid = self.state.lock().unwrap_or_else(|e| e.into_inner()).tracked;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if pid <= 0 || !procfs::process_alive(pid) {
@@ -233,7 +233,7 @@ impl KernelManager {
     pub fn stop_sync(&self) {
         let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let mut target = {
-            let st = self.state.lock().unwrap();
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             st.tracked
         };
         if target == 0 || !procfs::process_alive(target) {
@@ -268,6 +268,9 @@ impl KernelManager {
             std::thread::sleep(Duration::from_millis(500));
         }
         // 3) 组 KILL 清扫:无视 TERM 的子进程(chromium/MCP)在此兜底;
+        //    宽限期内新生的子进程补收一次,否则漏杀成孤儿 worker;
+        //    已死成员 ESRCH 为空操作。组不可用时跳过(防误伤同组平台进程)。
+        kids.extend(procfs::descendants_of(target));
         //    已死成员 ESRCH 为空操作。组不可用时跳过(防误伤同组平台进程)。
         if group_ok {
             unsafe { libc::kill(-target, libc::SIGKILL) };
@@ -286,7 +289,7 @@ impl KernelManager {
             }
         }
         let _ = std::fs::remove_file(&self.cfg.pid_file);
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         st.tracked = 0;
         st.cache_pid = 0;
         st.started_wall = None;
@@ -294,7 +297,7 @@ impl KernelManager {
 
     /// 内核状态:受管 pid 失效时 /proc 重新发现并收养(结果缓存 2s)。
     pub fn status_now(&self) -> KernelStatus {
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let cache_valid = st
             .cache_at

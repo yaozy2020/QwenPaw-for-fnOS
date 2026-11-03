@@ -107,7 +107,7 @@ fn begin_operation(state: &AppState) -> OperationResult {
 
 fn auth_status(state: &AppState, running: bool, port: u16) -> String {
     {
-        let cache = state.auth_cache.lock().unwrap();
+        let cache = state.auth_cache.lock().unwrap_or_else(|e| e.into_inner());
         if cache.at.map(|at| at.elapsed() < std::time::Duration::from_secs(5)).unwrap_or(false) {
             return cache.status.clone();
         }
@@ -140,7 +140,7 @@ fn auth_status(state: &AppState, running: bool, port: u16) -> String {
             }
         }
     }
-    let mut cache = state.auth_cache.lock().unwrap();
+    let mut cache = state.auth_cache.lock().unwrap_or_else(|e| e.into_inner());
     cache.at = Some(std::time::Instant::now());
     cache.status = status.into();
     cache.status.clone()
@@ -200,7 +200,12 @@ async fn status(
     let snapshot = tokio::task::spawn_blocking(move || render_snapshot(&state))
         .await
         .unwrap_or_else(|_| json!({"ok": false}).to_string());
-    Json(serde_json::from_str(&snapshot).unwrap_or(json!({"ok": false}))).into_response()
+    // 快照已是合法 JSON 字符串:直返,不再反序列化转一遍(纯浪费)
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        snapshot,
+    )
+        .into_response()
 }
 
 async fn start(State(state): State<AppState>, req: Request<axum::body::Body>) -> axum::response::Response {
@@ -430,8 +435,8 @@ async fn kernel_install(
     // 忙检查必须在停内核之前:重入时只拒绝,绝不停掉正在陪跑 pip 的内核
     // (-7 回归:stop 级联修真后,忙路径曾先杀内核再被 try_start 拒绝)。
     // busy 响应携带当前 seq:前端据此识别"这次点击没接到单",不再开转圈弹窗
-    if state.install.snapshot().running {
-        let cur = state.install.snapshot();
+    let cur = state.install.snapshot();
+    if cur.running {
         return Json(json!({
             "ok": true, "success": false,
             "message": "安装正在进行中,请等待完成后再试",

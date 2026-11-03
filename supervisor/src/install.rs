@@ -184,7 +184,7 @@ pub fn truncate_utf8(raw: &str, max_bytes: usize) -> String {
 /// 单行落盘(超限排水)。stdout/stderr 两个线程各自持有 append 句柄调用。
 fn append_line(log: &mut Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &str) {
     if let Some(f) = log.as_mut() {
-        let mut t = total.lock().unwrap();
+        let mut t = total.lock().unwrap_or_else(|e| e.into_inner());
         if *t >= LOG_TOTAL_CAP {
             return;
         }
@@ -255,6 +255,10 @@ pub struct VenvTxRecord {
     /// 消除“新钉已写、环境已回滚”的不一致窗口。
     #[serde(default)]
     pub previous_pin: Option<String>,
+    /// 健康检查通过时记录的实际解析版本。Latest/Beta 渠道 target_version
+    /// 为空,Committed 恢复重建钉依赖它(P3:无法重建时只能 WARN)。
+    #[serde(default)]
+    pub resolved_version: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -431,6 +435,7 @@ impl VenvTransaction {
             target_version: target_version.to_string(),
             pin_path: pin_path.to_path_buf(),
             previous_pin: None,
+            resolved_version: None,
         };
 
         if let Err(e) = write_tx_record(&tx_file, &record) {
@@ -793,7 +798,12 @@ pub fn recover_pending_transactions(
                 // 这里按记录里的 target_version 补齐;无法重建时(空/未知)只告警。
                 let pin_now = std::fs::read_to_string(&record.pin_path).unwrap_or_default();
                 let pin_now = pin_now.trim();
-                let target = record.target_version.trim();
+                let target = record
+                    .resolved_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| record.target_version.trim());
                 if !target.is_empty() && pin_now != target {
                     match atomic_write_0600(
                         &record.pin_path.to_string_lossy(),
@@ -1033,7 +1043,7 @@ impl InstallState {
     }
 
     pub fn snapshot(&self) -> InstallSnapshot {
-        let g = self.inner.lock().unwrap();
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         InstallSnapshot {
             phase: g.phase.clone(),
             fetched: g.fetched,
@@ -1050,7 +1060,7 @@ impl InstallState {
 
     fn set(&self, f: impl FnOnce(&mut Inner)) {
         let snap = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             f(&mut g);
             InstallSnapshot {
                 phase: g.phase.clone(),
@@ -1073,7 +1083,7 @@ impl InstallState {
     /// 只能指望下次启动的孤儿清理。安装线程在 spawn 前后各核对一次该标志。
     pub fn cancel(&self) {
         let (running, pid) = {
-            let g = self.inner.lock().unwrap();
+            let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             (g.running, g.pid)
         };
         if !running {
@@ -1100,7 +1110,7 @@ impl InstallState {
     }
 
     fn cancelled(&self) -> bool {
-        self.inner.lock().unwrap().cancelled
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).cancelled
     }
 
     /// 取消终态:不写版本钉、不自动拉起内核(区别于 Failed 的自愈重启)。
@@ -1137,7 +1147,7 @@ impl InstallState {
         pin_path: String,
     ) -> bool {
         let task_seq = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if g.running {
                 return false;
             }
@@ -1369,7 +1379,7 @@ impl InstallState {
                         let _ = h.join();
                     }
                     let cancelled = {
-                        let g = this.inner.lock().unwrap();
+                        let g = this.inner.lock().unwrap_or_else(|e| e.into_inner());
                         g.cancelled
                     };
                     let _ = std::fs::remove_file(&pid_file);
@@ -1467,6 +1477,9 @@ impl InstallState {
                         return;
                     }
 
+                    // 记录实际解析版本:Latest/Beta 的 target_version 为空,
+                    // Committed 恢复重建钉需要它(工单 P3)。
+                    transaction.record.resolved_version = Some(actual.clone());
                     // 新内核此时已拉起并探活成功,但事务仍是 Activated。
                     // 这里被杀会留下"进程新版 + 磁盘旧版",由恢复阶段停进程纠正。
                     check_crash_point(CrashPoint::AfterSpawnBeforeCommit);
@@ -1851,7 +1864,7 @@ mod tests {
         });
         st.cancel();
         assert!(
-            st.inner.lock().unwrap().cancelled,
+            st.inner.lock().unwrap_or_else(|e| e.into_inner()).cancelled,
             "PID 未登记时取消意图必须被记录"
         );
     }
@@ -1897,7 +1910,7 @@ mod tests {
             let mut c = std::process::Command::new("/bin/sleep");
             c.arg("30").process_group(0);
             let child = c.spawn()?;
-            self.spawned_pids.lock().unwrap().push(child.id());
+            self.spawned_pids.lock().unwrap_or_else(|e| e.into_inner()).push(child.id());
             Ok(child)
         }
     }
@@ -2072,7 +2085,7 @@ mod tests {
         assert!(!snap.running);
 
         // pip 替身(sleep 30)必须已被整组回收,而不是留成 30s 孤儿
-        let spawned = pids.lock().unwrap().clone();
+        let spawned = pids.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert!(!spawned.is_empty(), "替身 pip 未被 spawn");
         for p in &spawned {
             assert!(
@@ -2122,6 +2135,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2162,6 +2176,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2202,6 +2217,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2241,6 +2257,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: Some("1.0.0\n".into()),
+            resolved_version: Some("2.0.0".into()),
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2282,6 +2299,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2346,6 +2364,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2389,6 +2408,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2424,6 +2444,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: Some("1.0.0\n".into()),
+            resolved_version: Some("2.0.0".into()),
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2487,6 +2508,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2529,6 +2551,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
@@ -2570,16 +2593,17 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
         let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
         let o = Arc::clone(&order);
-        let stop = move || o.lock().unwrap().push("stop");
+        let stop = move || o.lock().unwrap_or_else(|e| e.into_inner()).push("stop");
 
         recover_pending_transactions(&active, &pin, None, Some(&stop)).unwrap();
 
-        let calls = order.lock().unwrap().clone();
+        let calls = order.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(calls, vec!["stop"], "需要回滚的事务必须触发内核停止且只停一次");
         assert_eq!(std::fs::read_to_string(active.join("installed")).unwrap(), "old");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2610,6 +2634,7 @@ mod tests {
             target_version: "2.0.0".into(),
             pin_path: pin.clone(),
             previous_pin: None,
+            resolved_version: None,
         };
         write_tx_record(&tx_file, &record).unwrap();
 
