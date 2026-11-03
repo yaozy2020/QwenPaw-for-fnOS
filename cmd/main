@@ -73,9 +73,15 @@ stop_process() {
 
 case $1 in
 start)
+    # 与 config_callback 的"stop→start 重启序列锁"同文件:平台并发触发的
+    # start 在序列期间会排队等待,而不是插进 stop 与 start 的空档
+    exec 9>>"${VAR_DIR}/config-restart.lock"
+    flock 9
     start_process
     ;;
 stop)
+    exec 9>>"${VAR_DIR}/config-restart.lock"
+    flock 9
     stop_process
     ;;
 status)

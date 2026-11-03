@@ -14,6 +14,9 @@ if [ -f "${MIRROR_FILE}" ]; then
         # 缺这一支会让用户选了官方源后回显成默认的 aliyun
         *pypi.org*) current_mirror="official" ;;
         "")         current_mirror="official" ;;
+        # 自定义 URL(set_mirror 白名单 https 值):原样回显。消费链以落盘
+        # 文件为权威,这里只求显示不撒谎 —— 回显 aliyun 会误导用户。
+        *)          current_mirror="$m" ;;
     esac
 fi
 

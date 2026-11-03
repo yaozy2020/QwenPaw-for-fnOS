@@ -56,14 +56,13 @@ if ! kernel_installed; then
     if VERSION_PIN="$(read_valid_version_pin "${PIN_FILE}")"; then
         TARGET_PKG="qwenpaw==${VERSION_PIN}"
         log_msg "按版本钉恢复内核: ${TARGET_PKG}"
-    elif [ -f "${PIN_FILE}" ]; then
-        TARGET_PKG="qwenpaw"
-        log_msg "WARN: 版本钉内容非法，按向导渠道安装"
     else
-        # 升级向导没有渠道选项(只有镜像),无钉时按稳定版恢复。
-        # 曾经的分支读 ${wizard_channel},而该变量全仓无任何来源,是死代码。
-        TARGET_PKG="qwenpaw"
-        log_msg "无版本钉，按稳定版安装: ${TARGET_PKG}"
+        # 版本钉缺失/非法时无法知道"用户当时的内核版本"。按最新安装会违背
+        # "外壳升级不改变内核"的承诺(云端复现) —— 明确失败,让用户走控制台
+        # 「版本更新」显式选择版本。
+        log_msg "ERROR: 版本钉缺失或非法(${PIN_FILE}),拒绝盲目安装最新内核"
+        notify_user "无法确定原内核版本(版本钉缺失)。请在控制台「版本更新」中显式选择版本安装。"
+        exit 1
     fi
 
     PIP_LOG=$(mktemp)

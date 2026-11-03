@@ -50,8 +50,10 @@ log_msg() {
 
 # ── 内核检测：0=已安装 ──
 kernel_installed() {
+    # 元数据 + 真实 import 双重校验:dist-info 在而包体残缺的半安装环境
+    # 只有 import 才能暴露(云端复现)
     [ -x "${VENV_DIR}/bin/python3" ] && \
-    "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw')" >/dev/null 2>&1
+    "${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; m.version('qwenpaw'); import qwenpaw" >/dev/null 2>&1
 }
 
 # ── 用户可见错误通道（官方规范：生命周期脚本的失败信息写入 TRIM_TEMP_LOGFILE，
@@ -163,7 +165,9 @@ ensure_qwenpaw_init() {
     log_msg "正在初始化 QwenPaw..."
     # init 失败不能继续宣称"安装成功":内核装上了但没有任何配置,
     # 平台会显示成功而用户打开是空的。
-    if ! echo "Yes" | python3 -m qwenpaw init --defaults; then
+    # 必须用 venv 解释器:内核健在跳过分支并未激活 venv,裸 python3 找不到
+    # qwenpaw 模块,特定数据缺失场景会误报安装失败(云端复现)。
+    if ! echo "Yes" | "${VENV_DIR}/bin/python3" -m qwenpaw init --defaults; then
         log_msg "ERROR: qwenpaw init 初始化失败"
         notify_user "QwenPaw 初始化失败，请查看安装日志后重试。"
         return 1

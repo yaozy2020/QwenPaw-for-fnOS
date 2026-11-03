@@ -33,6 +33,10 @@ if [ -n "${NEW_PORT}" ]; then
     fi
     log_msg "检测到修改 Web 服务端口为: ${NEW_PORT}"
 
+    # 记录旧端口:服务重启失败时用于完整回滚(端口文件 + 桌面入口)
+    OLD_PORT=""
+    [ -f "${PORT_FILE}" ] && OLD_PORT="$(head -n 1 "${PORT_FILE}" 2>/dev/null | tr -d '[:space:]')"
+
     if ! echo "${NEW_PORT}" > "${PORT_FILE}" 2>/dev/null; then
         log_msg "ERROR: 端口写入 ${PORT_FILE} 失败(权限?),保持原端口"
         exit 1
@@ -81,11 +85,29 @@ MAIN_SCRIPT="${APPDEST}/cmd/main"
 
 if [ -x "${MAIN_SCRIPT}" ]; then
     log_msg "正在应用新配置并重启 QwenPaw 服务..."
+    # 重启序列锁:stop 与 start 两步之间不留空档,平台并发触发的 start 会
+    # 在锁上排队(cmd/main 的 start/stop 持同一把锁)而不是交错执行
+    exec 9>>"${PKGVAR}/config-restart.lock"
+    flock 9
     bash "${MAIN_SCRIPT}" stop >> "${LOG_FILE}" 2>&1 || true
     if bash "${MAIN_SCRIPT}" start >> "${LOG_FILE}" 2>&1; then
         log_msg "QwenPaw 服务已使用端口 ${NEW_PORT:-原端口} 重新拉起"
     else
-        log_msg "ERROR: 服务重启失败,请查看 supervisor.log 并手动启动"
+        # 新端口起不来:完整回滚端口文件与桌面入口,再按原端口恢复服务
+        log_msg "ERROR: 服务以新端口 ${NEW_PORT:-?} 重启失败,回滚端口配置"
+        if [ -n "${OLD_PORT}" ] && printf '%s' "${OLD_PORT}" | grep -qE '^[0-9]+$'; then
+            echo "${OLD_PORT}" > "${PORT_FILE}" 2>/dev/null || true
+            for ui_cfg in "${APPDEST}/ui/config" "${APPDEST}/target/ui/config"; do
+                [ -w "${ui_cfg}" ] && sed -i 's/"port": *"[^"]*"/"port": "'"${OLD_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
+            done
+            if bash "${MAIN_SCRIPT}" start >> "${LOG_FILE}" 2>&1; then
+                log_msg "已回滚至原端口 ${OLD_PORT} 并恢复服务"
+            else
+                log_msg "ERROR: 原端口 ${OLD_PORT:-?} 恢复启动也失败,请手动检查 supervisor.log"
+            fi
+        else
+            log_msg "无旧端口可回滚,请查看 supervisor.log 并手动启动"
+        fi
         exit 1
     fi
 else

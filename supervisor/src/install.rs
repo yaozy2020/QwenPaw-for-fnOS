@@ -754,17 +754,24 @@ pub fn recover_pending_transactions(
         let content = match std::fs::read_to_string(tx_path) {
             Ok(c) => c,
             Err(_) => {
-                // 读不出来时不敢断言它没引用某个 backup,fail-closed
+                // 读不出来时不敢断言它没引用某个 backup,fail-closed。
+                // 事务文件必须保留:删了的话下次启动不再有 unreadable_tx
+                // 信号,其引用的 backup 会被孤儿清理当垃圾删掉(云端复现)。
                 unreadable_tx = true;
-                let _ = std::fs::remove_file(tx_path);
+                if let Some(logf) = log {
+                    logf(&format!("recovery: 无法读取事务文件 {},保留以待人工处理", tx_path.display()));
+                }
                 continue;
             }
         };
         let record: VenvTxRecord = match serde_json::from_str(&content) {
             Ok(r) => r,
             Err(_) => {
+                // 同上:解析失败的 tx 文件与 backup 一并保留(fail-closed 持久化)
                 unreadable_tx = true;
-                let _ = std::fs::remove_file(tx_path);
+                if let Some(logf) = log {
+                    logf(&format!("recovery: 无法解析事务文件 {},保留以待人工处理", tx_path.display()));
+                }
                 continue;
             }
         };
