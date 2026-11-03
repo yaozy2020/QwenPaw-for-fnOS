@@ -25,6 +25,8 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      NPM_REGISTRY: ${{ vars.NPM_REGISTRY || 'https://registry.npmmirror.com' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,11 +65,17 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          if git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --no-tags 2>/dev/null; then
+          # 失败必须分类:仅"远端无此 ref"才算 tag 不存在;网络/鉴权错误
+          # 走 HEAD 构建会把错误代码挂到旧 tag 上(fail-open,审查 P2-2)
+          if git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --no-tags 2>/tmp/tag_fetch_err; then
             git checkout -q --detach "refs/tags/${TAG}"
             echo "dispatch: tag 已存在,按 tag 指向的提交构建"
-          else
+          elif grep -q "couldn't find remote ref" /tmp/tag_fetch_err; then
             echo "dispatch: tag 不存在,将以当前 HEAD 创建"
+          else
+            echo "::error::tag 探测失败(网络/鉴权?),拒绝在未知状态下构建"
+            cat /tmp/tag_fetch_err
+            exit 1
           fi
 
       # [1] 标签与 manifest 映射校验
@@ -131,7 +139,7 @@ jobs:
       # 否则发布门禁比 CI 弱一档 —— 审查 构建 P2-2)
       - name: Prepare build environment
         run: |
-          npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+          npm ci --prefix web --registry="${NPM_REGISTRY:-https://registry.npmmirror.com}" --no-audit --no-fund
 
       # [4c] 生命周期回归(与 ci.yml 同口径)
       - name: Lifecycle regression
@@ -164,7 +172,7 @@ jobs:
           # 与 fpk 封装顺序。因此第二次构建前清掉 web/dist 与 node_modules 缓存,
           # 让这两条路径真正重跑 —— 不是"同环境冒烟",而是对非确定性热点的复算。
           rm -rf web/dist web/node_modules/.cache
-          npm ci --prefix web --registry=https://registry.npmmirror.com --no-audit --no-fund
+          npm ci --prefix web --registry="${NPM_REGISTRY:-https://registry.npmmirror.com}" --no-audit --no-fund
           FPK_OUT="$DIR2" bash build.sh
           SHA2=$(sha256sum "$DIR2/$FPK_NAME" | awk '{print $1}')
 

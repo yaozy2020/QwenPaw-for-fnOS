@@ -172,7 +172,14 @@ def main():
         else:
             print(f"构建号单调性: {release_base} 域内上一个 rc {prev} → 本次 {rc_no}")
     else:
-        print("构建号单调性: manifest 无 -N/rc.N 后缀, 跳过(正式版必须携带构建号)")
+        # 正式 tag 不携带构建号:fnOS 覆盖升级按版本串比较,2.1.0 相对
+        # 2.1.0-9 可能被判倒退 —— 项目约定 manifest 恒带构建号,偏离即拒绝
+        print(
+            f"ERROR: 正式版 manifest 必须携带构建号(如 {expected_manifest}-N),"
+            f"实际为 '{actual_manifest}'。无构建号版本在 fnOS 覆盖升级时可能被判倒退。",
+            file=sys.stderr,
+        )
+        return 1
 
     if github_output_mode:
         import os

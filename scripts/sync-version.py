@@ -72,23 +72,25 @@ def main():
         base = version.split("-")[0]
         m_cur = re.match(r"^(\d+\.\d+\.\d+)(?:-(.+))?$", cur)
         if not m_cur:
-            ok = False
+            # Cargo.toml 缺 version 行或格式不可解析:继续跑会把含字面
+            # 方括号的非法版本写进 Cargo.lock 固化坏状态(沙盒实证)——
+            # 唯一安全的动作是 fail-closed 退出,不做任何改写
+            print(f"FAIL: supervisor/Cargo.toml version 行缺失或非法({cur}),拒绝自动修复", file=sys.stderr)
+            return 1
+        cur_base, cur_suffix = m_cur.group(1), m_cur.group(2)
+        # 主干必须一致
+        ok = cur_base == base
+        want = base
+        if not ok:
             want = f"{base}[-rc.N]"
-        else:
-            cur_base, cur_suffix = m_cur.group(1), m_cur.group(2)
-            # ① 主干必须一致
-            ok = cur_base == base
-            want = base
-            if not ok:
-                want = f"{base}[-rc.N]"
-            elif cur_suffix:
-                # ② 允许 rc.N 预发布串,但序号不得低于 tag 的 rc 序号
-                m_tag_rc = re.search(r"-rc\.(\d+)$", tag) if tag else None
-                m_cur_rc = re.match(r"^rc\.(\d+)$", cur_suffix)
-                if m_cur_rc and m_tag_rc:
-                    if int(m_cur_rc.group(1)) < int(m_tag_rc.group(1)):
-                        ok = False
-                        want = f"{base}-rc.{m_tag_rc.group(1)}"
+        elif cur_suffix:
+            # 允许 rc.N 预发布串,但序号不得低于 tag 的 rc 序号
+            m_tag_rc = re.search(r"-rc\.(\d+)$", tag) if tag else None
+            m_cur_rc = re.match(r"^rc\.(\d+)$", cur_suffix)
+            if m_cur_rc and m_tag_rc:
+                if int(m_cur_rc.group(1)) < int(m_tag_rc.group(1)):
+                    ok = False
+                    want = f"{base}-rc.{m_tag_rc.group(1)}"
         targets.append(("supervisor/Cargo.toml", cur, ok))
 
         # Cargo.lock 必须与 Cargo.toml 同步,否则后续所有 --locked 构建
@@ -98,6 +100,9 @@ def main():
         if lock.exists():
             lt = lock.read_text(encoding="utf-8")
             m_lock = re.search(r'name = "qwenpaw-supervisor"\s*\nversion = "([^"]+)"', lt)
+            if not m_lock:
+                # lock 缺 qwenpaw-supervisor 条目:--locked 构建会在别处爆,如实报 DRIFT
+                targets.append(("supervisor/Cargo.lock", "(missing)", False))
             if m_lock:
                 lock_cur = m_lock.group(1)
                 want_lock = cur if ok else want
