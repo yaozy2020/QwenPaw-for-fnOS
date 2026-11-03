@@ -27,7 +27,8 @@ fi
 # 且统一走 lib.sh 的 VAR_DIR(与 config 侧同一口径),不裸用 TRIM_PKGVAR。
 if printf '%s' "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
     mkdir -p "${VAR_DIR}" 2>/dev/null || true
-    echo "${INIT_PORT}" > "${VAR_DIR}/service_port"
+    printf '%s\n' "${INIT_PORT}" > "${VAR_DIR}/service_port.tmp" 2>/dev/null && \
+        mv "${VAR_DIR}/service_port.tmp" "${VAR_DIR}/service_port" 2>/dev/null
     sync_ui_config_port "${INIT_PORT}"
     log_msg "安装端口已设定并同步为: ${INIT_PORT}"
 else
@@ -77,6 +78,14 @@ if kernel_installed; then
     ensure_qwenpaw_init || exit 1
     log_msg "QwenPaw 外壳升级完成（内核未变更）！"
     exit 0
+fi
+
+# 半破损 venv(dist-info 在而包体残缺):kernel_installed 的 import 冒烟已
+# 判不健康,但 pip 会报 "already satisfied" 空转成功 → init 再失败 → 重试
+# 死循环。整删重建,与 upgrade_callback 的 rm -rf 口径对称(云端复现)。
+if [ -d "${VENV_DIR}" ]; then
+    log_msg "WARN: 检测到不完整/不可用的 venv,删除后重建"
+    rm -rf "${VENV_DIR}"
 fi
 
 log_msg "正在创建虚拟环境..."

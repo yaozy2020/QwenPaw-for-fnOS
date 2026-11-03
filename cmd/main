@@ -71,18 +71,31 @@ stop_process() {
     return 0
 }
 
-case $1 in
-start)
-    # 与 config_callback 的"stop→start 重启序列锁"同文件:平台并发触发的
-    # start 在序列期间会排队等待,而不是插进 stop 与 start 的空档
+# 重启序列锁:stop 与 start 两步必须原子。config_callback 经 `main restart`
+# 走同一把锁;注意锁的获取必须发生在"本进程重新打开文件"的同一动作里 ——
+# 外层脚本持锁后再调 main,子进程 exec 9>> 会开新的 OFD,flock 必死锁
+# (OFD 级自锁,实验 exit=124)。
+lock_restart() {
+    mkdir -p "${VAR_DIR}" 2>/dev/null || true
     exec 9>>"${VAR_DIR}/config-restart.lock"
     flock 9
+}
+
+case $1 in
+start)
+    lock_restart
     start_process
     ;;
 stop)
-    exec 9>>"${VAR_DIR}/config-restart.lock"
-    flock 9
+    lock_restart
     stop_process
+    ;;
+restart)
+    lock_restart
+    stop_process
+    if ! start_process; then
+        exit 1
+    fi
     ;;
 status)
     if supervisor_status "${PID_FILE}"; then
