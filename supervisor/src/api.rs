@@ -363,7 +363,10 @@ async fn logs(
         .flatten()
         .unwrap_or(80)
         .clamp(1, 2000);
-    let logs = tail_lines(std::path::Path::new(&state.kernel_log), tail, 256 * 1024);
+    let log_path = std::path::PathBuf::from(&state.kernel_log);
+    let logs = tokio::task::spawn_blocking(move || tail_lines(&log_path, tail, 256 * 1024))
+        .await
+        .unwrap_or_default();
     Json(json!({"success": true, "logs": logs})).into_response()
 }
 
@@ -532,7 +535,10 @@ print(json.dumps({'releases': sorted(parser.versions), 'latest_stable': ''}))";
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
-                    let cur_ver = state.kernel.kernel_version();
+                    let k_state = state.kernel.clone();
+                    let cur_ver = tokio::task::spawn_blocking(move || k_state.kernel_version())
+                        .await
+                        .unwrap_or_default();
                     let response_data = crate::version::build_version_list(&raw_versions, &cur_ver);
                     return Json(response_data).into_response();
                 }
@@ -581,8 +587,10 @@ async fn install_log(
         .flatten()
         .unwrap_or(40)
         .clamp(1, 500);
-    let path = format!("{}/qwenpaw-upgrade.log.pip", state.var_dir);
-    let lines = tail_lines(std::path::Path::new(&path), tail, 256 * 1024);
+    let path = std::path::PathBuf::from(format!("{}/qwenpaw-upgrade.log.pip", state.var_dir));
+    let lines = tokio::task::spawn_blocking(move || tail_lines(&path, tail, 256 * 1024))
+        .await
+        .unwrap_or_default();
     Json(json!({"success": true, "logs": lines})).into_response()
 }
 

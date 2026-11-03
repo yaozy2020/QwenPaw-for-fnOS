@@ -180,6 +180,10 @@ fn main() {
                 cfg.token_file,
                 std::process::id()
             );
+            // 先清同 pid 残骸:上次运行崩在"已 create_new 未 rename"窗口时,
+            // tmp 与本次 PID 相同(create_new(true))会必然失败 → panic 启动
+            // 死循环。清扫 sweep 在 token 写入之后才跑,兜不住首发。
+            let _ = std::fs::remove_file(&tmp_path);
             let mut f = std::fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)

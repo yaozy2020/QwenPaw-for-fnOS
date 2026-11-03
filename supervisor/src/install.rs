@@ -507,12 +507,9 @@ impl VenvTransaction {
         // Activated 落盘失败:staged→active 已完成,磁盘上是"新环境 + 旧钉"。
         // 必须就地完整回滚,否则调用方只置 Failed,留下运行中/未提交的新环境。
         if let Err(record_err) = write_tx_record(&self.tx_file, &self.record) {
-            let _ = std::fs::remove_dir_all(&self.record.active);
-            if self.record.backup.exists() {
-                let _ = std::fs::rename(&self.record.backup, &self.record.active);
-                let _ = sync_dir(parent);
-            }
-            restore_previous_pin(&self.record, None);
+            // 复用 rollback_record 的 fail-closed 契约:归位失败时保留
+            // backup 与事务文件待下次启动重试(手写版丢了这个纪律)
+            rollback_record(&self.record, parent, &self.record.pin_path, None)?;
             let _ = std::fs::remove_file(&self.tx_file);
             let _ = sync_dir(parent);
             self.committed_or_rolled_back = true;
@@ -528,7 +525,10 @@ impl VenvTransaction {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
         })?;
 
-        rollback_record(&self.record, parent, &self.record.pin_path, None);
+        // fail-closed 契约:归位失败时 rollback_record 返回 Err 且 backup
+        // 已保留 —— 事务文件必须留给下次启动重试,删除它等于让孤儿清理
+        // 把唯一旧环境当垃圾删掉(审查 P1-1)
+        rollback_record(&self.record, parent, &self.record.pin_path, None)?;
 
         self.record.phase = TxPhase::RolledBack;
         let _ = std::fs::remove_file(&self.tx_file);
@@ -614,7 +614,7 @@ fn rollback_record(
     parent: &Path,
     pin_path: &Path,
     log: Option<&dyn Fn(&str)>,
-) {
+) -> std::io::Result<()> {
     if record.had_active {
         // 1. 活动路径当前若存在,它要么是新环境(Activated/HealthChecked),
         //    要么是没被切走的旧环境(backup 不存在)。只有前者可以删。
@@ -627,6 +627,8 @@ fn rollback_record(
             // 让调用方保留事务文件,下次启动重试归位。先删后报会把唯一旧环境
             // 当垃圾清掉(fail-open,云端复现)。
             if let Err(e) = std::fs::rename(&record.backup, &record.active) {
+                // 返回 Err = fail-closed 契约:backup 保留、调用方必须保留
+                // 事务文件,下次启动重试归位。任何调用方都不得绕过。
                 if let Some(logf) = log {
                     logf(&format!(
                         "rollback: 旧环境归位失败 {} -> {}: {e};保留备份待下次恢复重试",
@@ -634,7 +636,7 @@ fn rollback_record(
                         record.active.display()
                     ));
                 }
-                return;
+                return Err(std::io::Error::other(format!("旧环境归位失败: {e}")));
             }
             let _ = sync_dir(parent);
         } else if !record.active.exists() {
@@ -675,6 +677,7 @@ fn rollback_record(
         let _ = std::fs::remove_dir_all(&record.backup);
         let _ = sync_dir(parent);
     }
+    Ok(())
 }
 
 /// 把版本钉恢复到事务开始前的状态。
@@ -775,6 +778,18 @@ pub fn recover_pending_transactions(
                 continue;
             }
         };
+        // tx_id 会拼进文件路径:白名单校验,防伪造记录把清理引向父目录外
+        if !record
+            .tx_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            unreadable_tx = true;
+            if let Some(logf) = log {
+                logf(&format!("recovery: 事务 id 非法 {},保留以待人工处理", record.tx_id));
+            }
+            continue;
+        }
         parsed_records.push(record);
     }
 
@@ -800,7 +815,17 @@ pub fn recover_pending_transactions(
             // 用磁盘现状而非阶段字段判定,才能覆盖 b 这个更窄的窗口。
             TxPhase::Prepared => {
                 if record.had_active && !record.active.exists() && record.backup.exists() {
-                    let _ = std::fs::rename(&record.backup, &record.active);
+                    // 归位失败 fail-closed:保留 backup 与事务文件待下次重试
+                    if let Err(e) = std::fs::rename(&record.backup, &record.active) {
+                        let _ = sync_dir(parent);
+                        if let Some(logf) = log {
+                            logf(&format!(
+                                "recover: 事务 {} 备份归位失败,保留待下次重试: {e}",
+                                record.tx_id
+                            ));
+                        }
+                        continue;
+                    }
                     let _ = sync_dir(parent);
                     if let Some(logf) = log {
                         logf(&format!(
@@ -829,10 +854,13 @@ pub fn recover_pending_transactions(
                     }
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop));
                 }
-                rollback_record(record, parent, pin_path, log);
-                // 归位失败时 rollback_record 已提前返回并保留 backup:
-                // 此时必须保留事务文件,下次启动重试归位(见 fn 签名注释)
-                if record.backup.exists() && !record.active.exists() {
+                if let Err(e) = rollback_record(record, parent, pin_path, log) {
+                    if let Some(logf) = log {
+                        logf(&format!(
+                            "recover: 事务 {} 回滚未完成,保留事务文件待下次重试: {e}",
+                            record.tx_id
+                        ));
+                    }
                     continue;
                 }
                 let _ = std::fs::remove_file(tx_path);
@@ -865,8 +893,11 @@ pub fn recover_pending_transactions(
                         }
                         Err(e) => {
                             if let Some(logf) = log {
-                                logf(&format!("recover: 补写版本钉失败: {e}"));
+                                logf(&format!(
+                                    "recover: 补写版本钉失败: {e};保留事务文件待下次重试"
+                                ));
                             }
+                            continue;
                         }
                     }
                 } else if target.is_empty() && pin_now.is_empty() && log.is_some() {
@@ -1685,7 +1716,12 @@ pub(crate) fn run_with_timeout(
 
     loop {
         match child.try_wait()? {
-            Some(_) => return child.wait_with_output(),
+            Some(_) => {
+                // 子进程已退出,但组内孙进程可能仍持有 stdout/stderr 写端:
+                // 补一次组杀保证管道读到 EOF,否则 wait_with_output 永久阻塞
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                return child.wait_with_output();
+            }
             None => {
                 if started.elapsed() >= timeout {
                     // 组杀:直接子进程之外,持有管道写端的孙进程一并终止
