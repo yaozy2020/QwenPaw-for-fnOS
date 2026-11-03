@@ -369,7 +369,9 @@ async fn logs_clear(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    let _ = std::fs::write(&state.kernel_log, "");
+    // 截断落盘移入 spawn_blocking:与全库 async 卫生纪律一致(审查 P2-7)
+    let log_path = state.kernel_log.clone();
+    let _ = tokio::task::spawn_blocking(move || std::fs::write(&log_path, "")).await;
     Json(json!({"success": true, "message": "日志已清理"})).into_response()
 }
 
@@ -646,11 +648,14 @@ async fn kernel_uninstall(
         }
     };
     state.kernel.invalidate_version();
-    let entry_result = sync_main_entry(
-        std::path::Path::new(&state.ui_config_file),
-        state.kernel.port(),
-        false,
-    );
+    // 读+可能写 ui 配置文件:与全库 async 卫生纪律一致,移入 spawn_blocking
+    let ui_cfg = state.ui_config_file.clone();
+    let kernel_port = state.kernel.port();
+    let entry_result = tokio::task::spawn_blocking(move || {
+        sync_main_entry(std::path::Path::new(&ui_cfg), kernel_port, false)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(format!("spawn_blocking join: {e}"))));
     let snap_state = state.clone();
     tokio::task::spawn_blocking(move || {
         snap_state.events.publish(render_snapshot(&snap_state));
