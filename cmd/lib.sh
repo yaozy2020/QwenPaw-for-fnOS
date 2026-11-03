@@ -123,6 +123,42 @@ sync_pip_mirror() {
     fi
 }
 
+# ── 生效镜像 URL:控制台落盘的 pip-mirror 为权威,向导值仅作种子 ──
+# 向导回显无法表达自定义 URL(set_mirror 允许任意白名单 https URL),只取
+# 向导值会静默绕过用户已持久化的选择(审查 cmd P2-2)。文件缺失/非法时
+# 才回落到向导值。输出可能为空(= 官方源,不传 -i)。
+resolve_pip_mirror_url() {
+    local seed="${1:-aliyun}"
+    local url=""
+    if [ -s "${VAR_DIR}/pip-mirror" ]; then
+        url="$(tr -d '[:space:]' < "${VAR_DIR}/pip-mirror" 2>/dev/null || true)"
+    fi
+    case "${url}" in
+        http://*|https://*) printf '%s' "${url}"; return 0 ;;
+    esac
+    map_mirror_url "${seed}"
+}
+
+# ── QwenPaw 首次初始化守卫(两条安装路径的终点都必须执行)──
+# 内核装好但零配置是"假成功":init 失败后平台重试会命中"内核健在"跳过
+# 分支直接 exit 0,init 永不补跑(审查 cmd P2-1)。重复执行安全:已有
+# config/workspaces 时跳过,init 会创建空文件的表现被数据守卫挡住。
+ensure_qwenpaw_init() {
+    if [ -f "${SHARE_DIR}/config.json" ] || [ -d "${SHARE_DIR}/workspaces" ]; then
+        log_msg "检测到已有 QwenPaw 数据（config/workspaces），跳过 init 初始化"
+        return 0
+    fi
+    log_msg "正在初始化 QwenPaw..."
+    # init 失败不能继续宣称"安装成功":内核装上了但没有任何配置,
+    # 平台会显示成功而用户打开是空的。
+    if ! echo "Yes" | python3 -m qwenpaw init --defaults; then
+        log_msg "ERROR: qwenpaw init 初始化失败"
+        notify_user "QwenPaw 初始化失败，请查看安装日志后重试。"
+        return 1
+    fi
+    return 0
+}
+
 # ── 读取合法版本钉（0=存在且合法；输出版本号）──
 read_valid_version_pin() {
     local pin_file="${1:-${VAR_DIR}/qwenpaw-version}"

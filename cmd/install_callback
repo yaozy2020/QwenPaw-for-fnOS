@@ -66,6 +66,8 @@ if kernel_installed; then
         fi
     fi
     secure_var_perms
+    # 内核健在 ≠ 初始化已完成:init 失败重试会走到这里,必须补跑守卫
+    ensure_qwenpaw_init || exit 1
     log_msg "QwenPaw 外壳升级完成（内核未变更）！"
     exit 0
 fi
@@ -88,14 +90,15 @@ if ! source "${VENV_DIR}/bin/activate"; then
 fi
 log_msg "虚拟环境激活成功"
 
-PYPI_MIRROR="${wizard_pypi_mirror:-aliyun}"
-MIRROR_URL="$(map_mirror_url "${PYPI_MIRROR}")"
+# 镜像消费顺序:落盘 pip-mirror(权威)> 向导值 > 默认;向导值仅作文件
+# 缺失时的种子(sync_pip_mirror force=0 不覆盖已有选择)
+MIRROR_URL="$(resolve_pip_mirror_url "${wizard_pypi_mirror:-aliyun}")"
 PIP_OPTS=""
 [ -n "${MIRROR_URL}" ] && PIP_OPTS="-i ${MIRROR_URL}"
-log_msg "下载源设定为: ${PYPI_MIRROR} (${MIRROR_URL:-官方源})"
+log_msg "下载源: ${MIRROR_URL:-官方源(pypi.org)}"
 
 # 向导选择的下载源落盘为控制台初始默认(不覆盖用户已有选择)
-sync_pip_mirror "${PYPI_MIRROR}" 0
+sync_pip_mirror "${wizard_pypi_mirror:-aliyun}" 0
 
 log_msg "正在升级虚拟环境 pip..."
 if ! python3 -m pip install --upgrade pip $PIP_OPTS; then
@@ -159,19 +162,8 @@ fi
 
 # 已有数据时绝不再跑 init：init 会创建空 chats.json/jobs.json，并在
 # registry 为空时阻断 session 迁移，表现为"升级后会话全部消失"。
-# 仅真正首次安装（无 config/workspaces）才初始化。
-if [ -f "${SHARE_DIR}/config.json" ] || [ -d "${SHARE_DIR}/workspaces" ]; then
-    log_msg "检测到已有 QwenPaw 数据（config/workspaces），跳过 init 初始化"
-else
-    log_msg "正在初始化 QwenPaw..."
-    # init 失败不能继续宣称"安装成功":内核装上了但没有任何配置,
-    # 平台会显示成功而用户打开是空的。
-    if ! echo "Yes" | python3 -m qwenpaw init --defaults; then
-        log_msg "ERROR: qwenpaw init 初始化失败"
-        notify_user "QwenPaw 初始化失败，请查看安装日志后重试。"
-        exit 1
-    fi
-fi
+# 守卫收敛到 lib.sh:内核健在跳过分支与重试路径共用同一份口径。
+ensure_qwenpaw_init || exit 1
 
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
 chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
