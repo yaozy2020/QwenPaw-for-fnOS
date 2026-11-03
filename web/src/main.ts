@@ -28,7 +28,7 @@ const API_BASE = (function() {
     // 轮询总超时:任务真挂起(upgrading 恒 true / 后端失联)时给用户一条逃逸路径
     const UPGRADE_POLL_MAX_MS = 10 * 60 * 1000;
     // 连续失败阈值:api.cgi 502 会走 catch,累计到此值即切"连接中断"终态
-    const UPGRADE_POLL_FAIL_MAX = 6; // 800ms 间隔 ×6 ≈ 5s
+    const UPGRADE_POLL_FAIL_MAX = 6; // 1200ms 节流后 ≈1.6s/拍,到终态 ≈9.6s
     let pollFailureStreak = 0;
     let upPollLastAt = 0;
     // 任务跟踪:不再靠"phase 是否跳变"猜结果(首拍已是终态会漏判),按 seq 归属
@@ -37,6 +37,7 @@ const API_BASE = (function() {
     let upgradeBaselineSeq = null;        // 触发前的 seq(null=未知,退回旧行为)
     let upgradeTaskSeq = null;            // 已确认归属本会话的任务 seq
     let upgradeBaselineFailed = false;    // 基线获取失败:终态判定退化为严格 seq 归属
+    let upgradePostSettled = false;       // 自己的触发请求已返回(受理或确认失败)
     let upgradeAttachMode = false;        // 附加模式:查看已在后端运行的任务
 
     let rawVersionList = [];
@@ -227,9 +228,13 @@ const API_BASE = (function() {
             return;
           }
           if (e.key === "Enter" && hasInput) {
-            // 输入框内回车等同确认,避免用户必须去点按钮
-            e.preventDefault();
-            onConfirm();
+            // 输入框/确认钮上回车等同确认;焦点在取消钮上时交给按钮原生
+            // 行为(取消),否则"焦点在取消、回车却确认"违背用户预期
+            const ae = document.activeElement;
+            if (ae && (ae.id === "modalInput" || ae.id === "modalConfirmBtn")) {
+              e.preventDefault();
+              onConfirm();
+            }
             return;
           }
           if (e.key !== "Tab") return;
@@ -959,6 +964,7 @@ const API_BASE = (function() {
         // fetch 失败(切后台/网络抖动):退回 sendBeacon,送达与否交给弹窗对 seq 的轮询
         try { accepted = Boolean(navigator.sendBeacon && navigator.sendBeacon(url + "&_csrf=" + encodeURIComponent(getCsrfToken()))); } catch (e2) { accepted = false; }
       }
+      upgradePostSettled = true; // 受理响应已读或已退回 beacon:此后出现的任务按本会话归属
       if (!accepted) {
         document.getElementById("upSubTitle").innerText = "触发请求可能未送达,正在确认...";
       }
@@ -995,6 +1001,7 @@ const API_BASE = (function() {
       upgradeBaselineSeq = (baselineSeq === undefined || baselineSeq === null) ? null : baselineSeq;
       upgradeTaskSeq = upgradeAttachMode && upgradeBaselineSeq !== null ? upgradeBaselineSeq : null;
       upgradeBaselineFailed = false;
+      upgradePostSettled = false;
       upgradeSeenPhase = null;
       upgradeFirstPollTerminal = false;
       upgradeStartedAt = Date.now();
@@ -1063,8 +1070,8 @@ const API_BASE = (function() {
         }
 
         if (statusRes.ok) {
+          const sdata = await statusRes.json(); // JSON 损坏抛错走 catch 计数
           pollFailureStreak = 0;
-          const sdata = await statusRes.json();
           const terminalPhase = sdata.phase === "done" || sdata.phase === "failed";
           if (upgradeSeenPhase === null) {
             upgradeSeenPhase = sdata.phase;
@@ -1077,11 +1084,15 @@ const API_BASE = (function() {
           if (!upgradeTaskSeq && typeof sdata.seq === "number") {
             if (upgradeAttachMode) {
               upgradeTaskSeq = sdata.seq;
-            } else if (upgradeBaselineSeq !== null && sdata.seq !== upgradeBaselineSeq) {
+            } else if (upgradePostSettled && upgradeBaselineSeq !== null && sdata.seq !== upgradeBaselineSeq) {
               upgradeTaskSeq = sdata.seq;
             }
+            // 触发请求未返回时不按 seq 认领:此时出现的 seq/终态可能是别的
+            // 设备的任务(多设备竞态,审查 P2-1)。未送达守卫兜底。
           }
-          const ours = upgradeAttachMode || upgradeTaskSeq !== null || (upgradeBaselineSeq === null && !upgradeBaselineFailed);
+          // ours 的三个来源:附加模式 / 已确认受理的 seq / 基线失败但触发
+          // 请求已返回(此时任何 phase 变化按本会话处理,P2-2)
+          const ours = upgradeAttachMode || upgradeTaskSeq !== null || (upgradeBaselineFailed && upgradePostSettled);
           const isDone = ours && terminalPhase && (phaseChanged || upgradeFirstPollTerminal);
           const isFailed = ours && sdata.phase === "failed" && (phaseChanged || upgradeFirstPollTerminal);
 
@@ -1125,6 +1136,11 @@ const API_BASE = (function() {
               document.getElementById("upTitle").innerText = `${titleAction}已顺利完成！`;
               document.getElementById("upSubTitle").innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
               document.getElementById("upDoneIcon").style.color = "var(--success)";
+            }
+            // 最小化期间错过终态:弹窗不可见时用 toast 补一条完成信号
+            const upModal = document.getElementById("upgradeModal");
+            if (upModal && !upModal.classList.contains("active")) {
+              showToast(isFailed ? `${titleAction}失败,点击控制台查看详情` : `${titleAction}已完成`);
             }
           }
         } else {
@@ -1220,6 +1236,9 @@ const API_BASE = (function() {
         const res = await fetch(`${API_BASE}?action=logs&lines=${LOG_PAGE_SIZE}&_t=${Date.now()}`);
         if (!res.ok) return;
         const data = await res.json();
+        // 回看守卫必须在到达后复查:发起时不在回看,不代表返回时不在 ——
+        // 在途的实时响应会覆盖用户刚点开的历史页并跳回末页(审查 P1-1)
+        if (logPageFromEnd > 0) return;
         if (data.success && Array.isArray(data.logs)) {
           logLines = data.logs;
           renderLogPage();
