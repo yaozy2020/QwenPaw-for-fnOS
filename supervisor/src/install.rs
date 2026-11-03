@@ -461,7 +461,15 @@ impl VenvTransaction {
             // 关键:改名之后、激活之前必须把“已切走旧环境”落盘。
             // 否则此刻崩溃,事务仍是 Prepared,恢复会当作“原环境未动”而删掉唯一可用的备份。
             self.record.phase = TxPhase::BackedUp;
-            write_tx_record(&self.tx_file, &self.record)?;
+            // 落盘失败必须把 backup 归位:rename 已把 active 切走,失败上抛会
+            // 让 active 悬空、服务不可用直到重启恢复(与下方 staged→active
+            // 失败的归位口径一致)。
+            if let Err(record_err) = write_tx_record(&self.tx_file, &self.record) {
+                let _ = std::fs::rename(&self.record.backup, &self.record.active);
+                let _ = sync_dir(parent);
+                self.record.phase = TxPhase::Prepared;
+                return Err(record_err);
+            }
             check_crash_point(CrashPoint::AfterActiveRenamedToBackup);
         }
 
@@ -528,6 +536,11 @@ impl VenvTransaction {
                 self.record.phase = TxPhase::HealthChecked;
                 let _ = write_tx_record(&self.tx_file, &self.record);
                 return Err(e);
+            }
+            // 钉写入必须 fsync 其所在 var 目录:commit 后续只 sync venv 父目录,
+            // 断电时 pin 的 rename 可能未持久而 tx 已删,复活"新环境+旧钉"。
+            if let Some(pin_dir) = self.record.pin_path.parent() {
+                let _ = sync_dir(pin_dir);
             }
         }
         check_crash_point(CrashPoint::AfterPinWritten);
@@ -1072,6 +1085,10 @@ impl InstallState {
             return;
         }
         let pgid = pid as i32;
+        // 先落取消标志再动手:安装线程在排水 join 后立即读该标志,若晚于
+        // SIGKILL 才设置,读到"未取消"会把用户停止误判为 pip 失败并触发
+        // 自愈重启(与 pid==0 分支"先落标志"的口径对齐)。
+        self.set(|g| g.cancelled = true);
         unsafe { libc::kill(-pgid, libc::SIGTERM) };
         for _ in 0..10 {
             if !crate::procfs::process_alive(pgid) {
@@ -1080,7 +1097,6 @@ impl InstallState {
             std::thread::sleep(Duration::from_millis(500));
         }
         unsafe { libc::kill(-pgid, libc::SIGKILL) };
-        self.set(|g| g.cancelled = true);
     }
 
     fn cancelled(&self) -> bool {
@@ -1344,6 +1360,10 @@ impl InstallState {
                         unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
                         let _ = child.wait();
                     }
+                    // 无论 pip 正常退出还是超时,都可能留下继承 stdout 写端的
+                    // 孙进程使排水线程读不到 EOF —— 组内补一次 KILL(组已不存在
+                    // 时为 ESRCH,忽略),否则 join 永久挂起、running 恒 true。
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
                     // 等两个排水线程随管道 EOF 退出,避免它们写终态后的日志文件句柄
                     for h in readers {
                         let _ = h.join();

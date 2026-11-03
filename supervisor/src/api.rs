@@ -820,9 +820,16 @@ async fn wait_healthy_blocking(state: &AppState) -> bool {
 }
 
 fn write_ui_config(path: &std::path::Path, config: &serde_json::Value) -> std::io::Result<()> {
-    // tmp 名必须唯一:固定 "config.tmp" 在两路并发(如变更端口 + UI 并发保存)时
-    // 会互相截断对方写入中的文件,rename 出一个半截 JSON。
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    // tmp 名必须唯一:固定 "config.tmp" 会在两路并发(如变更端口 + UI 并发
+    // 保存)时互相截断对方写入中的文件,rename 出一个半截 JSON。仅含 pid
+    // 仍不够 —— 并发写入方都在同一进程内(render_snapshot 的 spawn_blocking
+    // 与各操作处理器),追加进程内自增序号才算唯一。
+    static UI_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        UI_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let mut bytes = serde_json::to_vec_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     bytes.push(b'\n');
