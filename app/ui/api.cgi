@@ -197,7 +197,8 @@ case "$action" in
         ;;
     get_mirror)
         m=""
-        [ -f "${VAR_DIR}/pip-mirror" ] && m=$(head -n 1 "${VAR_DIR}/pip-mirror" | tr -d '[:space:]')
+        # 手工/旧版文件可能含引号或反斜杠:非 python 路径无转义,先剥离
+        [ -f "${VAR_DIR}/pip-mirror" ] && m=$(head -n 1 "${VAR_DIR}/pip-mirror" | tr -d '[:space:]"\\')
         echo "Content-Type: application/json"
         echo ""
         printf '{"success":true,"mirror":"%s"}\n' "$m"

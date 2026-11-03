@@ -9,8 +9,9 @@ const API_BASE = (function() {
       return "/cgi/ThirdParty/qwenpaw/api.cgi";
     })();
 
-    // CSRF double-submit:index.cgi 签发 HttpOnly cookie(qwenpaw_csrf)并在页面
-    // 注入同值 window.CSRF_TOKEN;POST 回传 X-CSRF-Token 头,api.cgi 比对两者。
+    // CSRF double-submit:index.cgi 签发 qwenpaw_csrf cookie(非 HttpOnly ——
+    // JS 需读取同值回传,双提交设计所需),页面从 document.cookie 读取,
+    // POST 回传 X-CSRF-Token 头,api.cgi 比对两者。
     // 与代理/NAT/Host 重写完全无关(fnOS 网关会把 Host 重写为 localhost,
     // 基于 Host/Origin 的同源校验在该形态下必然误杀 —— 2.0.0-13 实测)。
     function getCsrfToken(): string {
@@ -27,7 +28,7 @@ const API_BASE = (function() {
     // 轮询总超时:任务真挂起(upgrading 恒 true / 后端失联)时给用户一条逃逸路径
     const UPGRADE_POLL_MAX_MS = 10 * 60 * 1000;
     // 连续失败阈值:api.cgi 502 会走 catch,累计到此值即切"连接中断"终态
-    const UPGRADE_POLL_FAIL_MAX = 6; // ~30s(5s 间隔)
+    const UPGRADE_POLL_FAIL_MAX = 6; // 800ms 间隔 ×6 ≈ 5s
     let pollFailureStreak = 0;
     let upPollLastAt = 0;
     // 任务跟踪:不再靠"phase 是否跳变"猜结果(首拍已是终态会漏判),按 seq 归属
@@ -35,6 +36,7 @@ const API_BASE = (function() {
     let upgradeFirstPollTerminal = false; // 首拍即终态(附加模式秒完成判据)
     let upgradeBaselineSeq = null;        // 触发前的 seq(null=未知,退回旧行为)
     let upgradeTaskSeq = null;            // 已确认归属本会话的任务 seq
+    let upgradeBaselineFailed = false;    // 基线获取失败:终态判定退化为严格 seq 归属
     let upgradeAttachMode = false;        // 附加模式:查看已在后端运行的任务
 
     let rawVersionList = [];
@@ -504,6 +506,8 @@ const API_BASE = (function() {
           const el = document.getElementById(id);
           if (el) el.style.color = "var(--text-muted)";
         }
+        const downWarn = document.getElementById("downgradeWarnBar");
+        if (downWarn) downWarn.style.display = "none";
         const valVersion = document.getElementById("valVersion");
         if (valVersion) valVersion.innerText = "无法获取";
         const valAuth = document.getElementById("valAuthStatus");
@@ -915,8 +919,10 @@ const API_BASE = (function() {
             return;
           }
           if (typeof s.seq === "number") baseline = s.seq;
+        } else {
+          upgradeBaselineFailed = true; // sres 不 ok:基线未知
         }
-      } catch (e) { /* 基线未知时轮询退回 phase 跳变判定 */ }
+      } catch (e) { upgradeBaselineFailed = true; }
 
       pollFailureStreak = 0;
       openUpgradeModal(false, baseline);
@@ -964,6 +970,7 @@ const API_BASE = (function() {
           fetchStatus();
           return;
         }
+        pollFailureStreak = 0; // 上次会话遗留的失败连击不得连坐到附加会话
         openUpgradeModal(true, typeof s.seq === "number" ? s.seq : null);
       } catch (e) {
         showToast("无法连接后端: " + e.message);
@@ -982,6 +989,7 @@ const API_BASE = (function() {
       upgradeAttachMode = Boolean(attach);
       upgradeBaselineSeq = (baselineSeq === undefined || baselineSeq === null) ? null : baselineSeq;
       upgradeTaskSeq = upgradeAttachMode && upgradeBaselineSeq !== null ? upgradeBaselineSeq : null;
+      upgradeBaselineFailed = false;
       upgradeSeenPhase = null;
       upgradeFirstPollTerminal = false;
       upgradeStartedAt = Date.now();
@@ -1011,6 +1019,7 @@ const API_BASE = (function() {
       }
       upgradeAttachMode = false;
       upgradeTaskSeq = null;
+      upgradeBaselineFailed = false;
       upgradeBaselineSeq = null;
       fetchStatus();
       fetchLogs();
@@ -1068,7 +1077,7 @@ const API_BASE = (function() {
               upgradeTaskSeq = sdata.seq;
             }
           }
-          const ours = upgradeAttachMode || upgradeTaskSeq !== null || upgradeBaselineSeq === null;
+          const ours = upgradeAttachMode || upgradeTaskSeq !== null || (upgradeBaselineSeq === null && !upgradeBaselineFailed);
           const isDone = ours && terminalPhase && (phaseChanged || upgradeFirstPollTerminal);
           const isFailed = ours && sdata.phase === "failed" && (phaseChanged || upgradeFirstPollTerminal);
 
@@ -1145,6 +1154,7 @@ const API_BASE = (function() {
     const LOG_PAGE_SIZE = 100;
     const LOG_WINDOW_MAX = 2000;
     let logLines = [];
+    let logFetchSeq = 0; // 日志拉取序号:乱序响应丢弃
     let logPageFromEnd = 0; // 距末页的页数(0 = 实时)
 
     function renderLogPage() {
@@ -1191,6 +1201,7 @@ const API_BASE = (function() {
     }
 
     async function loadLogPage(fromEnd) {
+      const mySeq = ++logFetchSeq; // 乱序守卫:小响应后到不得覆盖新结果
       const target = Math.max(0, fromEnd);
       const needed = (target + 1) * LOG_PAGE_SIZE;
       if (needed > logLines.length) {
@@ -1198,7 +1209,7 @@ const API_BASE = (function() {
           const res = await fetch(`${API_BASE}?action=logs&lines=${Math.min(needed, LOG_WINDOW_MAX)}&_t=${Date.now()}`);
           if (!res.ok) return;
           const data = await res.json();
-          if (data.success && Array.isArray(data.logs)) logLines = data.logs;
+          if (data.success && Array.isArray(data.logs) && mySeq === logFetchSeq) logLines = data.logs;
         } catch (e) {
           console.error("loadLogPage err:", e);
           return;

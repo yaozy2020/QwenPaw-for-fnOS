@@ -32,7 +32,11 @@ const css = readFileSync("dist/main.css", "utf8");
 
 // minified 代码可能含 "</script>"(字符串拼接),内联前必须转义;
 // 用函数形式替换,避免 $&/$` 等替换模式语义
-const safeJs = js.replace(/<\/script>/g, () => "<\\/script>");
+const safeJs = js
+  .replace(/<\/script>/g, () => "<\\/script>")
+  // 内联脚本双转义态:<!-- 会吞掉其后内容直到 -->,顺带处理变体
+  .replace(/<!--/gi, () => "\\x3C!--")
+  .replace(/-->/g, () => "--\\x3E");
 const safeCss = css.replace(/<\/style>/g, () => "<\\/style>");
 const html = tpl
   .replace("/*__INLINE_CSS__*/", () => safeCss)
