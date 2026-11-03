@@ -9,10 +9,13 @@
 # shellcheck source=cmd/supervisor_ctl.sh
 . "$(dirname "$0")/supervisor_ctl.sh"
 
+# 回退根与 supervisor/src/config.rs 的 fallback 一致:target 与 app/bin 两个根;
+# 候选 2 兜住 TRIM_APPDEST 缺失时变量拼出 "/bin/..." 的无意义路径
 SUP_BIN_CANDIDATES=(
-    "${TRIM_APPDEST}/bin/qwenpaw-supervisor"
-    "${TRIM_APPDEST}/app/bin/qwenpaw-supervisor"
-    "/var/apps/qwenpaw/bin/qwenpaw-supervisor"
+    "${TRIM_APPDEST:-/var/apps/qwenpaw/target}/app/bin/qwenpaw-supervisor"
+    "${TRIM_APPDEST:-/var/apps/qwenpaw/target}/bin/qwenpaw-supervisor"
+    "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor"
+    "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"
 )
 VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
 PID_FILE="${VAR_DIR}/supervisor.pid"

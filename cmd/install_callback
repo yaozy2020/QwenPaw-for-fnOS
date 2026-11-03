@@ -8,8 +8,15 @@ LIB_LOG_FILE="${VAR_DIR}/qwenpaw-install.log"
 export HOME="${WORKING_DIR}"
 
 # 1. 提取并持久化安装向导中设置的端口，同步至飞牛系统元数据
-INIT_PORT="${wizard_port:-${service_port:-${wizard_service_port:-18088}}}"
-if [ "${INIT_PORT}" = "19091" ]; then INIT_PORT="18088"; fi
+# 幽灵回退(service_port/wizard_service_port)全仓无来源,收敛为向导单值。
+# 19091 是监督者保留端口:config_callback 拒绝、监督者自愈忽略,安装侧此前
+# 却静默改写 —— 三处口径统一为拒绝。
+INIT_PORT="${wizard_port:-18088}"
+if [ "${INIT_PORT}" = "19091" ]; then
+    log_msg "ERROR: 端口 19091 为监督者回退保留端口"
+    notify_user "QwenPaw 服务端口不可使用监督者保留端口 19091。"
+    exit 1
+fi
 if [ "${INIT_PORT}" = "19090" ]; then
     log_msg "ERROR: 端口 19090 为监督者保留端口"
     notify_user "QwenPaw 服务端口不可使用监督者保留端口 19090。"
@@ -34,10 +41,10 @@ fi
 # 此前该值只被 export 进脚本环境(lib.sh),监督者 spawn 的内核从不读取 —— 审查 F1。
 case "${wizard_log_level:-}" in
     critical|error|warning|info|debug|trace)
-        mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
-        if printf '%s\n' "${wizard_log_level}" > "${TRIM_PKGVAR}/qwenpaw-log-level.tmp" 2>/dev/null && \
-           mv "${TRIM_PKGVAR}/qwenpaw-log-level.tmp" "${TRIM_PKGVAR}/qwenpaw-log-level" 2>/dev/null; then
-            chmod 640 "${TRIM_PKGVAR}/qwenpaw-log-level" 2>/dev/null || true
+        mkdir -p "${VAR_DIR}" 2>/dev/null || true
+        if printf '%s\n' "${wizard_log_level}" > "${VAR_DIR}/qwenpaw-log-level.tmp" 2>/dev/null && \
+           mv "${VAR_DIR}/qwenpaw-log-level.tmp" "${VAR_DIR}/qwenpaw-log-level" 2>/dev/null; then
+            chmod 640 "${VAR_DIR}/qwenpaw-log-level" 2>/dev/null || true
             log_msg "内核日志级别已落盘: ${wizard_log_level}"
         else
             log_msg "WARN: 日志级别写入失败(权限?),内核将以 info 运行"
@@ -136,6 +143,8 @@ fi
 
 log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎..."
 PIP_LOG=$(mktemp)
+# 脚本被超时/信号杀死时兜底清理(正常路径自带 rm -f)
+trap '[ -n "${PIP_LOG:-}" ] && rm -f "$PIP_LOG"' EXIT
 
 log_msg "安装目标包: ${TARGET_PKG}，使用选项: ${PIP_OPTS}"
 if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then

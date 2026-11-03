@@ -67,6 +67,8 @@ if ! kernel_installed; then
     fi
 
     PIP_LOG=$(mktemp)
+    # 同 install_callback:信号/超时退出时兜底清理临时文件
+    trap '[ -n "${PIP_LOG:-}" ] && rm -f "$PIP_LOG"' EXIT
     if ! python3 -m pip install ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
         cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
         ERROR_MSG=$(tail -n 1 "${PIP_LOG}")

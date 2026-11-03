@@ -14,8 +14,20 @@ VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
 ETC_DIR="${TRIM_PKGETC:-/var/apps/qwenpaw/etc}"
 WORKING_DIR="${TRIM_PKGHOME:-/var/apps/qwenpaw/home}"
 VENV_DIR="${WORKING_DIR}/venv"
-SHARE_DIR="${TRIM_DATA_SHARE_PATHS%%:*}/.qwenpaw"
-[ -z "${TRIM_DATA_SHARE_PATHS}" ] && SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
+# 取第一个"非空且含非斜杠内容"的段:空段或 '/' 段会拼出根级路径
+# (Rust 侧 config.rs:46-50 同口径,两侧一致)
+SHARE_DIR=""
+if [ -n "${TRIM_DATA_SHARE_PATHS}" ]; then
+    _old_ifs=$IFS; IFS=':'
+    for _seg in ${TRIM_DATA_SHARE_PATHS}; do
+        if [ -n "${_seg}" ] && [ -n "$(printf '%s' "${_seg}" | tr -d '/')" ]; then
+            SHARE_DIR="${_seg%/}/.qwenpaw"
+            break
+        fi
+    done
+    IFS=$_old_ifs
+fi
+[ -n "${SHARE_DIR}" ] || SHARE_DIR="/var/apps/qwenpaw/shares/qwenpaw/.qwenpaw"
 
 # ── 内核运行环境（所有启动路径共用；新增变量只加这里）──
 # 注:运行态内核由监督者 spawn,日志级别的权威链路是向导落盘
