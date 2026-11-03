@@ -52,6 +52,8 @@ html[data-theme="dark"] {
      #2563eb 达 5.17:1,视觉上仍是同一支蓝,只是压暗一档。 */
   --primary: #2563eb;
   --primary-hover: #1d4ed8;
+  --primary-text: #1d4ed8;
+  --primary-text: #60a5fa;
   --primary-soft: rgba(59, 130, 246, 0.10);
   --primary-border: rgba(59, 130, 246, 0.28);
   --success: #34d399;
@@ -98,7 +100,8 @@ html[data-theme="light"] {
   --primary-border: rgba(37, 99, 235, 0.25);
   --success: #047857;
   --success-bg: rgba(5, 150, 105, 0.10);
-  --warning: #b45309;
+  /* #b45309 落在 token-bg 合成底仅 4.12:1(beta pill);加深一档全场景达标 */
+  --warning: #92400e;
   --warning-bg: rgba(217, 119, 6, 0.10);
   --warning-border: rgba(180, 83, 9, 0.30);
   /* 原 #dc2626 落在 8% tint 上为 4.41:1,略低于 AA。#b91c1c 达 6.47:1,
@@ -493,7 +496,7 @@ button:disabled, .btn:disabled {
 }
 /* Beta = 风险提示,用琥珀,不与运行态健康绿抢语义(评审 B 项) */
 .ver-tag-pill.beta { background: var(--warning-bg); color: var(--warning); }
-.ver-tag-pill.stable { background: var(--primary-soft); color: var(--primary); }
+.ver-tag-pill.stable { background: var(--primary-soft); color: var(--primary-text); }
 .ver-tag-pill.history { background: var(--token-bg); color: var(--text-sub); }
 .ver-number {
   font-family: var(--mono);
@@ -528,7 +531,7 @@ button:disabled, .btn:disabled {
 
 .history-versions-toggle {
   font-size: var(--fs-sm);
-  color: var(--primary);
+  color: var(--primary-text);
   cursor: pointer;
   display: inline-flex;
   align-items: center;

@@ -59,10 +59,10 @@ export function MirrorOptions({ options, value, onPick }: {
     <>
       {options.map(m => (
         <div class="history-item" key={m.value || "official"}
-          style={m.value === value ? "color:var(--primary);" : ""}
+          style={m.value === value ? "color:var(--primary-text);" : ""}
           onClick={() => onPick(m.value)}>
           <span>{m.label}</span>
-          {m.value === value ? <span style="color:var(--primary);">✓</span> : ""}
+          {m.value === value ? <span style="color:var(--primary-text);">✓</span> : ""}
         </div>
       ))}
     </>

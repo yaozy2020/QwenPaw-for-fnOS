@@ -108,7 +108,10 @@ const API_BASE = (function() {
 
     function initTheme() {
       try { localStorage.removeItem("qwenpaw_theme"); } catch (e) {}
-      const saved = localStorage.getItem("qwenpaw_theme_v2");
+      // localStorage 访问被拒(禁 cookie/隐私模式/受限 iframe)会抛 SecurityError:
+      // 顶层脚本中止 → window 导出全不执行,整页只剩静态壳。两处读取都必须兜。
+      let saved = null;
+      try { saved = localStorage.getItem("qwenpaw_theme_v2"); } catch (e) {}
       if (saved === "light" || saved === "dark") {
         applyTheme(saved);
       } else {
@@ -127,7 +130,8 @@ const API_BASE = (function() {
     }
 
     window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
-      const saved = localStorage.getItem("qwenpaw_theme_v2");
+      let saved = null;
+      try { saved = localStorage.getItem("qwenpaw_theme_v2"); } catch (e) {}
       if (saved !== "light" && saved !== "dark") {
         applyTheme(e.matches ? "dark" : "light");
       }
