@@ -53,10 +53,14 @@ fi
 
 # [1b/4] 构建监督者(release 单二进制; Release 必须干净编译)
 SUP_BIN_SRC="$PROJ_DIR/supervisor/target/release/qwenpaw-supervisor"
-if command -v cargo >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo" ]; then
+# 探测与调用必须用同一路径:探测接受 ~/.cargo/bin 而调用裸 cargo,
+# PATH 不含它的场景下会"有 cargo"却 command not found,错误归因失真
+CARGO_BIN="$(command -v cargo 2>/dev/null || true)"
+[ -z "$CARGO_BIN" ] && [ -x "$HOME/.cargo/bin/cargo" ] && CARGO_BIN="$HOME/.cargo/bin/cargo"
+if [ -n "$CARGO_BIN" ]; then
   echo "[1b/4] 构建监督者 (cargo release --locked) ..."
   rm -f "$SUP_BIN_SRC"
-  (cd "$PROJ_DIR/supervisor" && cargo build --locked --release) || {
+  (cd "$PROJ_DIR/supervisor" && "$CARGO_BIN" build --locked --release) || {
     echo -e "${RED}ERROR: 监督者 cargo 构建失败,终止出包${NC}"
     exit 1
   }
@@ -87,7 +91,7 @@ fi
 if [ ! -x "$PROJ_DIR/web/node_modules/.bin/esbuild" ]; then
   echo "  esbuild 未安装,执行 npm ci (npmmirror) ..."
   (cd "$PROJ_DIR/web" && env PATH="$(dirname "$NODE_BIN"):$PATH" \
-    npm ci --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -1) || {
+    npm ci --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -20) || {
     echo -e "${RED}ERROR: npm ci 失败${NC}"
     exit 1
   }
@@ -198,7 +202,8 @@ fi
 echo "[3b/4] FPK 内容审计 ..."
 bash "$PROJ_DIR/scripts/audit-fpk.sh" "$OUTPUT" || {
   echo -e "${RED}ERROR: FPK 审计未通过,产物已拒绝(见上方审计输出)${NC}"
-  rm -f "$OUTPUT"
+  # 陈旧的 .sha256 一并清掉:留下会指向已被拒绝删除的产物,误导下游校验
+  rm -f "$OUTPUT" "$OUTPUT.sha256"
   exit 1
 }
 

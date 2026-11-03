@@ -88,10 +88,16 @@ def recent_tags(n: int = 5) -> list[tuple[str, str]]:
         tags = [t.strip() for t in out.splitlines() if t.strip() and t.strip() != exclude_tag]
         # 按版本号降序排序
         def key(t):
-            try:
-                return [int(x) for x in t.lstrip("v").split(".")]
-            except Exception:
-                return [0]
+            # (maj,min,patch,kind,seq):构建号形态排在 rc 形态之上,序号域内比较;
+            # 旧实现 lstrip("v").split(".") 对 "2.0.0-rc.1" 抛异常退化成 [0]
+            m = re.match(
+                r"v?(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+)|-(\d+))?$", t.strip()
+            )
+            if m:
+                rc = int(m.group(4) or 0)
+                build = int(m.group(5) or 0)
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 1 if build else 0, build or rc)
+            return (0, 0, 0, 0, 0)
         tags.sort(key=key, reverse=True)
         result = []
         for tag in tags[:n]:
@@ -161,6 +167,8 @@ def render() -> str:
         "uninstall_init": "卸载前清理",
         "upgrade_callback": "升级完成回调",
         "upgrade_init": "升级前环境检查",
+        "lib.sh": "公共函数库(路径/环境/日志/镜像与版本钉)",
+        "supervisor_ctl.sh": "监督者进程控制(pid+starttime 身份核对)",
     }
     for s in cmd_scripts:
         a(f"| `cmd/{s}` | {desc_map.get(s, '-')} |")

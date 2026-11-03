@@ -80,6 +80,8 @@ jobs:
         working-directory: supervisor
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       - name: Show toolchain (ubuntu runner 预装 rust;缺失时此步即失败)
         run: |
@@ -104,6 +106,6 @@ jobs:
 
       # 真实 SIGKILL 故障注入:逐个中断点杀进程,重启后验证自愈。
       # 单元测试只验证纯函数语义,这条才真正覆盖"断电/被 KILL"的磁盘状态。
-      - name: Venv transaction crash-injection (6 real SIGKILL points)
+      - name: Venv transaction crash-injection (7 real SIGKILL points)
         working-directory: .
         run: bash scripts/test-venv-recovery.sh

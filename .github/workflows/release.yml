@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write
 
+# 同分支连推排队,避免双构建/发布互相踩踏
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
@@ -22,6 +27,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Determine tag
         id: tag
@@ -62,7 +70,7 @@ jobs:
 
       # [1] 标签与 manifest 映射校验
       # 映射规则：
-      #   v2.1.0-rc.2 -> manifest 2.1.0-2 -> prerelease=true
+      #   例:v2.1.0-rc.2 -> manifest 以 2.1.0- 开头 -> prerelease=true
       #   v2.1.0      -> manifest 2.1.0   -> prerelease=false
       - name: Verify tag matches manifest mapping
         id: verify
