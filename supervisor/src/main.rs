@@ -263,6 +263,24 @@ fn main() {
         .build()
         .expect("tokio runtime");
 
+    // 崩溃恢复:管理员重置流程在 rename(auth→bak-reset) 之后、respawn 健康
+    // 之前被杀时,重启后 auth.json 缺失会被判"未初始化",任何人都能重新
+    // 设置管理员接管实例 —— 必须先从备份还原再对外服务。
+    {
+        let auth = std::path::Path::new(&cfg.share_dir)
+            .parent()
+            .map(|p| p.join(".qwenpaw.secret/auth.json"));
+        if let Some(auth) = auth {
+            let bak = auth.with_extension("json.bak-reset");
+            if !auth.exists() && bak.exists() {
+                match std::fs::rename(&bak, &auth) {
+                    Ok(()) => logf("recovery: 从 bak-reset 还原管理员认证文件"),
+                    Err(e) => logf(&format!("recovery: 还原认证文件失败: {e}")),
+                }
+            }
+        }
+    }
+
     // 启动时收养存活内核(D1);未安装且 autostart 开启时拉起(缺失则走 not_installed)
     let (adopt_pid, running) = rt.block_on(async {
         let st = kernel.status_now();

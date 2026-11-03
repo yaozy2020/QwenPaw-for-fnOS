@@ -133,7 +133,15 @@ pub(crate) fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()
             return Err(e);
         }
     }
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    let rename_result = std::fs::rename(&tmp, path);
+    if rename_result.is_ok() {
+        // rename 后 fsync 父目录:否则断电时 rename 可能未持久,
+        // 版本钉/端口/pid 回退为旧值(文件内容本身已 fsync 不够)
+        if let Some(dir) = std::path::Path::new(path).parent() {
+            let _ = sync_dir(dir);
+        }
+    }
+    rename_result.inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
@@ -478,6 +486,14 @@ impl VenvTransaction {
             check_crash_point(CrashPoint::AfterActiveRenamedToBackup);
         }
 
+        // had_active=false 但 active 目录仍存在:它是 prepare 判定为残缺的
+        // 旧环境(缺 bin/python3 等)。不删掉会让 staged→active 的 rename 因
+        // 目录非空失败,且每次重试都卡在同一个残缺目录上,无法自愈(云端复现)。
+        if !self.record.had_active && self.record.active.exists() {
+            let _ = std::fs::remove_dir_all(&self.record.active);
+            let _ = sync_dir(parent);
+        }
+
         if let Err(error) = std::fs::rename(&self.record.staged, &self.record.active) {
             if self.record.had_active && self.record.backup.exists() {
                 let _ = std::fs::rename(&self.record.backup, &self.record.active);
@@ -488,7 +504,20 @@ impl VenvTransaction {
         let _ = sync_dir(parent);
 
         self.record.phase = TxPhase::Activated;
-        write_tx_record(&self.tx_file, &self.record)?;
+        // Activated 落盘失败:staged→active 已完成,磁盘上是"新环境 + 旧钉"。
+        // 必须就地完整回滚,否则调用方只置 Failed,留下运行中/未提交的新环境。
+        if let Err(record_err) = write_tx_record(&self.tx_file, &self.record) {
+            let _ = std::fs::remove_dir_all(&self.record.active);
+            if self.record.backup.exists() {
+                let _ = std::fs::rename(&self.record.backup, &self.record.active);
+                let _ = sync_dir(parent);
+            }
+            restore_previous_pin(&self.record, None);
+            let _ = std::fs::remove_file(&self.tx_file);
+            let _ = sync_dir(parent);
+            self.committed_or_rolled_back = true;
+            return Err(record_err);
+        }
         check_crash_point(CrashPoint::AfterStagedActivated);
         Ok(())
     }
@@ -594,15 +623,18 @@ fn rollback_record(
                 let _ = std::fs::remove_dir_all(&record.active);
                 let _ = sync_dir(parent);
             }
-            // 2. 旧环境归位
+            // 2. 旧环境归位:失败必须 fail-closed —— 保留 backup 并向上传播,
+            // 让调用方保留事务文件,下次启动重试归位。先删后报会把唯一旧环境
+            // 当垃圾清掉(fail-open,云端复现)。
             if let Err(e) = std::fs::rename(&record.backup, &record.active) {
                 if let Some(logf) = log {
                     logf(&format!(
-                        "rollback: 旧环境归位失败 {} -> {}: {e}",
+                        "rollback: 旧环境归位失败 {} -> {}: {e};保留备份待下次恢复重试",
                         record.backup.display(),
                         record.active.display()
                     ));
                 }
+                return;
             }
             let _ = sync_dir(parent);
         } else if !record.active.exists() {
@@ -632,12 +664,14 @@ fn rollback_record(
         }
     }
 
-    // 3. 无论哪条分支,暂存与备份残留都必须清掉
+    // 3. 暂存残留必须清掉(staging 不是唯一副本);
+    //    backup 只在归位成功(或本就不存在)时才允许清理 —— 到这里说明
+    //    归位路径已走完且成功,否则上面已经 return。
     if record.staged.exists() {
         let _ = std::fs::remove_dir_all(&record.staged);
         let _ = sync_dir(parent);
     }
-    if record.backup.exists() {
+    if record.backup.exists() && record.active.exists() {
         let _ = std::fs::remove_dir_all(&record.backup);
         let _ = sync_dir(parent);
     }
@@ -789,6 +823,11 @@ pub fn recover_pending_transactions(
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop));
                 }
                 rollback_record(record, parent, pin_path, log);
+                // 归位失败时 rollback_record 已提前返回并保留 backup:
+                // 此时必须保留事务文件,下次启动重试归位(见 fn 签名注释)
+                if record.backup.exists() && !record.active.exists() {
+                    continue;
+                }
                 let _ = std::fs::remove_file(tx_path);
                 let _ = sync_dir(parent);
             }
@@ -1341,8 +1380,11 @@ impl InstallState {
                             }
                         }
                         let elapsed = started.elapsed();
-                        let idle_ms =
-                            elapsed.as_millis() as u64 - last_activity.load(Ordering::Relaxed);
+                        // saturating_sub:elapsed 与 last_activity 的读取间存在
+                        // 竞态,普通减法在 last_activity 更大时无符号下溢成
+                        // 巨值,误杀正常安装
+                        let idle_ms = (elapsed.as_millis() as u64)
+                            .saturating_sub(last_activity.load(Ordering::Relaxed));
                         if idle_ms > NO_OUTPUT_TIMEOUT.as_millis() as u64 {
                             timeout_reason = format!(
                                 "安装超时: 无输出超过 {} 分钟,已终止(下载源可能失联,请换源重试)",
@@ -1624,9 +1666,13 @@ pub(crate) fn run_with_timeout(
     timeout: std::time::Duration,
     label: &str,
 ) -> std::io::Result<std::process::Output> {
+    use std::os::unix::process::CommandExt;
+    // 独立进程组:超时清理必须连孙进程一起杀,否则继承 stdout 写端的
+    // 孙进程会让 wait_with_output 的管道读不到 EOF,永久阻塞
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
     let mut child = cmd.spawn()?;
     let started = std::time::Instant::now();
 
@@ -1635,6 +1681,8 @@ pub(crate) fn run_with_timeout(
             Some(_) => return child.wait_with_output(),
             None => {
                 if started.elapsed() >= timeout {
+                    // 组杀:直接子进程之外,持有管道写端的孙进程一并终止
+                    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(std::io::Error::new(
