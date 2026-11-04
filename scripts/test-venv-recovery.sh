@@ -659,8 +659,14 @@ run_crash_test() (
     if [ "$exited" -ne 1 ]; then
         printf '  [FAIL] %s: 30 秒内未到达 SIGKILL 注入点\n' "$desc" >&2
         printf '  [DIAG] install response: %s\n' "$(cat "$install_response" 2>/dev/null || printf unavailable)" >&2
-        printf '  [DIAG] supervisor log tail:\n' >&2
-        tail -n 60 "$test_dir/supervisor.log" >&2 2>/dev/null || true
+        printf '  [DIAG] install status:\n' >&2
+        curl --silent --show-error --connect-timeout 1 --max-time 2 \
+            -H "X-Supervisor-Token: $token" \
+            "http://127.0.0.1:$PORT_SUP/kernel/install-status" >&2 2>/dev/null || true
+        printf '\n  [DIAG] supervisor log tail:\n' >&2
+        tail -n 60 "$test_dir/var/supervisor.log" >&2 2>/dev/null || true
+        printf '  [DIAG] pip log tail:\n' >&2
+        tail -n 60 "$test_dir/var/qwenpaw-upgrade.log.pip" >&2 2>/dev/null || true
         if ! stop_owned_supervisor; then
             printf '  [FAIL] %s: 未能安全清理超时 supervisor\n' "$desc" >&2
         fi

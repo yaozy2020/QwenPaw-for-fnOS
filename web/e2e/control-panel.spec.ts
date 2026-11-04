@@ -137,8 +137,17 @@ test("real Chromium management flow persists settings, installs, polls, logs, an
   await expect(page.locator("#modalTitle")).toHaveText("在线升级确认");
   await page.locator("#modalConfirmBtn").click();
   await expect(page.locator("#upTitle")).toHaveText("无法确认安装任务结果", { timeout: 25_000 });
-  await expect.poll(async () => readFile(fixture.files.installLog, "utf8"))
-    .toContain("Successfully installed qwenpaw-2.1.0b1");
+  try {
+    await expect.poll(async () => readFile(fixture.files.installLog, "utf8"))
+      .toContain("Successfully installed qwenpaw-2.1.0b1");
+  } catch (error) {
+    const observationResponse = await request.get("/__e2e/observations");
+    const observations: unknown = await observationResponse.json();
+    const statusResponse = await request.get("/cgi/ThirdParty/qwenpaw/api.cgi?action=upgrade_status");
+    console.error("upgrade observations after missing install log:", JSON.stringify(observations));
+    console.error("last backend install status:", await statusResponse.text());
+    throw error;
+  }
   expect((await readFile(fixture.files.installLog, "utf8")).match(/Successfully installed qwenpaw-2\.1\.0b1/g)).toHaveLength(1);
   await expect.poll(async () => (await readFile(`${fixture.files.venv}/installed`, "utf8")).trim()).toBe("2.1.0b1");
   await expect.poll(async () => (await readFile(fixture.files.pin, "utf8")).trim()).toBe("2.1.0b1");
