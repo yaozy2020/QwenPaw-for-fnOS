@@ -1,110 +1,16 @@
 #!/bin/bash
-# fnOS 生命周期入口:本脚本只管理监督者进程;内核生命周期由监督者负责。
-# start → 拉起监督者(监督者自动收养/拉起内核)
-# stop  → 身份核对后 TERM 监督者(监督者收到信号级联停内核)→ 宽限 → KILL
-# status→ 监督者存活即应用运行(退出码 0/3,官方约定)
-# start/stop/status 统一走 supervisor_ctl.sh(P1-01:PID 复用时凭 kill -0
-# 发信号会误杀无关进程,已动态复现;三处停止入口共用同一实现防漂移)。
 
-# shellcheck source=cmd/supervisor_ctl.sh
-. "$(dirname "$0")/supervisor_ctl.sh"
-
-# 回退根与 supervisor/src/config.rs 的 fallback 一致:target 与 app/bin 两个根;
-# 候选 2 兜住 TRIM_APPDEST 缺失时变量拼出 "/bin/..." 的无意义路径
-SUP_BIN_CANDIDATES=(
-    "${TRIM_APPDEST:-/var/apps/qwenpaw/target}/app/bin/qwenpaw-supervisor"
-    "${TRIM_APPDEST:-/var/apps/qwenpaw/target}/bin/qwenpaw-supervisor"
-    "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor"
+APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"
+for candidate in \
+    "${APPDEST}/app/bin/qwenpaw-supervisor" \
+    "${APPDEST}/bin/qwenpaw-supervisor" \
+    "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" \
     "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"
-)
-VAR_DIR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
-PID_FILE="${VAR_DIR}/supervisor.pid"
-LOG_FILE="${VAR_DIR}/supervisor.log"
-
-SUP_BIN=""
-for c in "${SUP_BIN_CANDIDATES[@]}"; do
-    if [ -x "$c" ]; then
-        SUP_BIN="$c"
-        break
+do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" service "$@"
     fi
 done
 
-start_process() {
-    if supervisor_status "${PID_FILE}"; then
-        return 0
-    fi
-    if [ -z "$SUP_BIN" ]; then
-        echo "supervisor binary not found" >&2
-        return 1
-    fi
-    # VAR_DIR 先建:日志重定向与 PID 落盘都依赖它(全新安装时平台可能尚未创建)
-    mkdir -p "${VAR_DIR}" 2>/dev/null || true
-    # status 已改为无副作用(避免把 fork→exec 窗口内刚写的 pid 删掉),
-    # 陈旧 PID 文件在这里显式清一次,否则 supervisor_register_start 会撞上旧内容。
-    rm -f "${PID_FILE}" "${PID_FILE}.starttime" 2>/dev/null || true
-    # TRIM_* 环境变量由平台注入本脚本,子进程继承;监督者据此定位数据目录
-    nohup "$SUP_BIN" >> "${LOG_FILE}" 2>&1 &
-    # 记录 PID + starttime 戳:stop/status 据此核对进程身份(P1-01)。
-    # 监督者启动后自会覆写 PID 文件(同进程,戳仍有效)。
-    supervisor_register_start "$!" "${PID_FILE}" || {
-        echo "warn: cannot write ${PID_FILE}" >&2
-    }
-    # 身份核对依赖 /proc/<pid>/exe;fork→exec 之间的极短窗口内 exe 还不是
-    # 监督者二进制,status 会误报未运行,平台可能因此重复 start(双实例)。
-    # 最多等 2s;超时不阻断 —— 进程可能确实启动慢,以 status 最终结果为准,
-    # 且监督者启动后自会覆写 PID 文件自愈。
-    local waited=0
-    while ! supervisor_status "${PID_FILE}" && [ "$waited" -lt 20 ]; do
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-    if ! supervisor_status "${PID_FILE}"; then
-        echo "supervisor failed to start" >&2
-        [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "QwenPaw 监督者启动失败，请检查 ${LOG_FILE}" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
-        return 1
-    fi
-    return 0
-}
-
-stop_process() {
-    supervisor_safe_stop "${PID_FILE}"
-    return 0
-}
-
-# 重启序列锁:stop 与 start 两步必须原子。config_callback 经 `main restart`
-# 走同一把锁;注意锁的获取必须发生在"本进程重新打开文件"的同一动作里 ——
-# 外层脚本持锁后再调 main,子进程 exec 9>> 会开新的 OFD,flock 必死锁
-# (OFD 级自锁,实验 exit=124)。
-lock_restart() {
-    mkdir -p "${VAR_DIR}" 2>/dev/null || true
-    exec 9>>"${VAR_DIR}/config-restart.lock"
-    flock 9
-}
-
-case $1 in
-start)
-    lock_restart
-    start_process
-    ;;
-stop)
-    lock_restart
-    stop_process
-    ;;
-restart)
-    lock_restart
-    stop_process
-    if ! start_process; then
-        exit 1
-    fi
-    ;;
-status)
-    if supervisor_status "${PID_FILE}"; then
-        exit 0
-    else
-        exit 3
-    fi
-    ;;
-*)
-    exit 1
-    ;;
-esac
+printf '%s\n' "supervisor binary not found" >&2
+exit 1

@@ -141,7 +141,27 @@ jobs:
         run: |
           npm ci --prefix web --registry="${NPM_REGISTRY:-https://registry.npmmirror.com}" --no-audit --no-fund
 
-      # [4c] 生命周期回归(与 ci.yml 同口径)
+      - name: Frontend dependency audit
+        run: npm audit --prefix web --registry=https://registry.npmjs.org
+
+      - name: Frontend Node tests
+        run: npm test --prefix web
+
+      - name: Frontend strict typecheck
+        run: npm run typecheck --prefix web
+
+      - name: Install Chromium and system dependencies
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Chromium E2E delivery gate
+        run: npm run test:e2e --prefix web
+
+      # lint 内的 native CGI 回归使用 release supervisor 与 test-runtime。
+      - name: Build release binaries for native CGI regressions
+        run: (cd supervisor && cargo build --locked --release)
+
+      # [4c] 生命周期与 native CGI 回归(与 ci.yml 同口径)
       - name: Lifecycle regression
         env:
           STRICT_CI: "1"
@@ -194,6 +214,23 @@ jobs:
       # (脚本读 supervisor/target/release/qwenpaw-supervisor)。
       - name: Crash injection (7 real SIGKILL points)
         run: bash scripts/test-venv-recovery.sh
+
+      # 依赖已构建的 release supervisor/test-runtime 与真实 venv，
+      # 因此在 lint 之外、二进制就绪后作为发布阻塞门禁执行，不静默 skip。
+      - name: Platform callback regression
+        run: python3 scripts/test-platform-callbacks.py
+
+      - name: Real venv runtime contract
+        run: python3 scripts/test-runtime-venv-contract.py
+
+      - name: Supervisor API and configuration transactions
+        run: python3 scripts/test-supervisor-api.py
+
+      - name: Native API CGI regression
+        run: python3 scripts/test-native-api-cgi.py
+
+      - name: Native index CGI regression
+        run: python3 scripts/test-native-index-cgi.py
 
       # [6] FPK 内容全量审计
       - name: Audit generated FPK

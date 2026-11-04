@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 2.1.0-9
+version                    = 1.1.1-1
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS —— 将个人 AI 助理 QwenPaw 一键部署到飞牛 NAS 的轻量外壳包。</p><h3>外壳特性</h3><p>极简运维控制台（服务启停、日志、内核版本管理、端口修改），内核经 PyPI 镜像在线安装，外壳与内核版本双轨制（外壳升级不影响内核），控制台资源预压缩传输。</p><h3>QwenPaw 内核</h3><p>多通道对话（微信、QQ、钉钉、飞书、Discord、Telegram 等），多智能体协作，定时任务，能力由 Skills 决定且可无限扩展；支持 Ollama 本地大模型完全离线运行，数据全在本地不依赖第三方托管，具备多层安全防护机制。</p>`
 platform                   = x86
@@ -14,4 +14,4 @@ desktop_applaunchname      = qwenpaw.console
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "v2.1.0-rc.3: 两轮全量审查驱动的系统性收敛 —— venv 事务自愈闭合进程侧(恢复先停内核/rename 窗口归位/坏 tx fail-closed/宽限期兼容 ptrace); 控制台全面现代化(设计令牌/WCAG AA 对比度/升级弹窗四出口/degraded 三态收敛/读屏与键盘兼容); supervisor 时间边界加固(全子进程超时/cancel 先落标志/原子写补目录 fsync/同进程 tmp 唯一化); 生命周期假成功与镜像消费链修复(重试补跑 init/落盘镜像为权威); 发布门禁自洽(构建号分域单调/Cargo.lock 同步/洁净双构建/纯文件名 sha256); 并发竞态与卫生批处理"
+changelog                  = "v1.1.1-rc.1: 统一版本体系(架构变更前 0.x/架构后 1.x); 完成 Rust 管理核心、native CGI、安装与配置事务、私有控制 UDS 和类型化前端; 修复崩溃后 service 恢复、提交写失败、Web 停止/卸载门禁及任务实例归属"

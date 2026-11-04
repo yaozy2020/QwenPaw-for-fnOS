@@ -59,7 +59,26 @@ jobs:
         env:
           NPM_REGISTRY: ${{ vars.NPM_REGISTRY || 'https://registry.npmjs.org' }}
 
-      - name: Lint (bash -n + shellcheck + 桥接 JSON 门禁 + 桥安全门禁 + esbuild 编译)
+      - name: Frontend dependency audit
+        run: npm audit --prefix web --registry=https://registry.npmjs.org
+
+      - name: Frontend Node tests
+        run: npm test --prefix web
+
+      - name: Frontend strict typecheck
+        run: npm run typecheck --prefix web
+
+      - name: Install Chromium and system dependencies
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Chromium E2E delivery gate
+        run: npm run test:e2e --prefix web
+
+      - name: Build release binaries for native CGI regressions
+        run: cargo build --locked --release --manifest-path supervisor/Cargo.toml
+
+      - name: Lint (bash -n + shellcheck + native CGI regressions + esbuild 编译)
         run: STRICT_CI=1 bash scripts/lint.sh
 
       - name: Console build + artifact sanity (web/src 经 esbuild 出单文件)
@@ -98,6 +117,24 @@ jobs:
       - name: cargo build --locked --release
         run: cargo build --locked --release
 
+      - name: Native API CGI regression
+        working-directory: .
+        run: python3 scripts/test-native-api-cgi.py
+
+      - name: Native index CGI regression
+        working-directory: .
+        run: python3 scripts/test-native-index-cgi.py
+
+      # 这两项需要刚构建的 release supervisor/test-runtime 与真实 venv；
+      # 故与 lint 分开在产物就绪后显式执行，不提供静默 skip。
+      - name: Platform callback regression
+        working-directory: .
+        run: python3 scripts/test-platform-callbacks.py
+
+      - name: Real venv runtime contract
+        working-directory: .
+        run: python3 scripts/test-runtime-venv-contract.py
+
       - name: Binary sanity
         run: |
           test -x target/release/qwenpaw-supervisor
@@ -109,3 +146,7 @@ jobs:
       - name: Venv transaction crash-injection (7 real SIGKILL points)
         working-directory: .
         run: bash scripts/test-venv-recovery.sh
+
+      - name: Supervisor API and configuration transactions
+        working-directory: .
+        run: python3 scripts/test-supervisor-api.py

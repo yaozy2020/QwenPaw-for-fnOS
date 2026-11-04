@@ -1,13 +1,13 @@
-# QwenPaw for fnOS 监督者后端设计(v2.0 提案)
+# QwenPaw for fnOS 监督者后端设计(v1.0 提案)
 
-> 状态:**历史文档**。本文是 v2.0 监督者的早期设计提案(含部分早期 Python/FastAPI
+> 状态:**历史文档**。本文是 v1.0 监督者的早期设计提案(含部分早期 Python/FastAPI
 > 备选内容),实际实现为 Rust(axum),细节以 `supervisor/src/` 为准;文中"开放
-> 问题"多数已随 v2.0.0-12 安全整改关闭。保留本文仅为记录设计动机与三起实机
+> 问题"多数已随 v1.0.0-12 安全整改关闭。保留本文仅为记录设计动机与三起实机
 > 事故的来龙去脉,请勿作为现状参考。
 
 ## 1. 动机(三起已发生的事故)
 
-1. **内核安装被 App 切后台中断**:安装(pip)运行在瞬态 CGI worker 的进程组里,App 切后台时网关回收 worker 进程组,nohup 只挡 SIGHUP,挡不住整组清理(v1.0.11 已用 setsid 止血,但安装仍活在 CGI 会话里)
+1. **内核安装被 App 切后台中断**:安装(pip)运行在瞬态 CGI worker 的进程组里,App 切后台时网关回收 worker 进程组,nohup 只挡 SIGHUP,挡不住整组清理(v0.0.11 已用 setsid 止血,但安装仍活在 CGI 会话里)
 2. **b2 内核引入长驻子进程**(依赖托管工作进程),单进程停止必然遗留孤儿;孤儿持有的依赖环境锁正是 b2 启动崩溃的祸根
 3. **进度体验**:安装进度靠刮日志文件,跨请求状态不可靠
 
@@ -40,13 +40,13 @@
 | # | 决策 | 说明/修正 |
 |:--|:--|:--|
 | D1 | **不用 Pdeathsig** | 初稿误列。内核必须**在监督者重启(外壳升级)后存活**,否则每次外壳升级内核都要重启;改为监督者启动时 `/proc` 收养(发现 `python3 -m qwenpaw app --port <port>` 进程则重新接管,对齐 dsh `findDshPid`) |
-| D2 | **监督者持有内核为直接子进程** | `Popen(start_new_session=True)`:内核自成进程组,组信号可连带 b2 依赖托管子进程;不依赖 bash 包装,v1.0.9 的 pid 错位问题在架构上消失 |
-| D3 | **停止 = 三段式在监督者内实现** | 组 TERM(宽限)→ 单 KILL → 组 KILL 清扫;继承 v1.0.10 沙箱已验证的语义 |
+| D2 | **监督者持有内核为直接子进程** | `Popen(start_new_session=True)`:内核自成进程组,组信号可连带 b2 依赖托管子进程;不依赖 bash 包装,v0.0.9 的 pid 错位问题在架构上消失 |
+| D3 | **停止 = 三段式在监督者内实现** | 组 TERM(宽限)→ 单 KILL → 组 KILL 清扫;继承 v0.0.10 沙箱已验证的语义 |
 | D4 | **App 停止语义** | 飞牛「停止应用」→ main stop → 停监督者 → 监督者停内核:整栈一致下线(用户意图就是全停) |
 | D5 | **外壳升级语义** | fnOS 停应用 → 全栈下线 → 装新外壳 → 监督者启动 → **自动拉起已安装内核**(D1 收养或冷启动) |
 | D6 | **回环鉴权用共享 token,不用 SO_PEERCRED** | TCP 回环无对端凭证;token 落 `<VAR_DIR>/supervisor-token`(0600,qwenpaw 属主),cgi 与监督者同读;同机其他用户不可读 |
 | D7 | **SSE 与轮询双轨** | 控制台优先 SSE;网关若缓冲 SSE 则自动回退轮询(现有轮询逻辑保留为兜底) |
-| D8 | **首次安装不预装内核(继承 v1.0.7)** | 监督者启动时内核缺失 → 状态 not_installed,控制台引导安装(已实现的行为平移)。注意:不预装的是**内核**,监督者自身依赖必须首装即就位(否则控制台都起不来) |
+| D8 | **首次安装不预装内核(继承 v0.0.7)** | 监督者启动时内核缺失 → 状态 not_installed,控制台引导安装(已实现的行为平移)。注意:不预装的是**内核**,监督者自身依赖必须首装即就位(否则控制台都起不来) |
 | D9 | **监督者依赖:wheel 随 fpk 分发,venv 放 TRIM_PKGVAR** | venv 三大风险与对策:①位置——@apphome/@appcenter 会随升级被清(内核 venv 三次实证),监督者 venv 放 `<VAR_DIR>/supervisor-venv`(@appdata,已实证穿越升级);②网络依赖——D 路径教训,安装期不得拉网:构建时 `pip download` 固定版本到 fpk 内 `supervisor-wheels/`,安装时 `--no-index --find-links` 离线秒装,依赖版本随外壳钉死(双轨制延伸);③python312 漂移——install_callback 检测 venv 完整性,缺损时从随包 wheels 离线重建(秒级)。fpk 体积 150K → ~5MB |
 
 ## 4. 监督者 API(草案)
@@ -85,8 +85,8 @@
 
 ## 7. 实施切分
 
-- **v2.0.0-alpha**:监督者骨架(status/start/stop/install+SSE/收养)+ cgi 瘦桥 + 控制台接新 API;manifest main 指向监督者
-- **v2.1**:等待/引导页打磨、psutil 概览、日志轮转
+- **v1.0.0-alpha**:监督者骨架(status/start/stop/install+SSE/收养)+ cgi 瘦桥 + 控制台接新 API;manifest main 指向监督者
+- **v1.1**:等待/引导页打磨、psutil 概览、日志轮转
 - 技术栈:FastAPI + uvicorn + sse-starlette + psutil,**依赖 wheels 随 fpk 分发、离线安装**(见 D9);监督者 venv 与内核 venv 分离,互不影响
 
 

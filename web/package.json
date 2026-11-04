@@ -4,10 +4,15 @@
   "type": "module",
   "description": "QwenPaw for fnOS 控制台前端源码;esbuild 编译为单文件 dist/index.html(app/www 运行时契约不变)",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "npm run build && cargo build --locked --release --manifest-path ../supervisor/Cargo.toml && playwright test"
   },
   "devDependencies": {
-    "esbuild": "^0.24.2"
+    "esbuild": "0.25.0",
+    "@playwright/test": "1.56.1",
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "preact": "^11.1.1"

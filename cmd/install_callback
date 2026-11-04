@@ -1,195 +1,22 @@
-#!/bin/bash
-
-PYTHON_BIN="${QWENPAW_PYTHON_BIN:-/var/apps/python312/target/bin/python3}"
-
-# 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为安装态语义
-. "$(dirname "$0")/lib.sh"
-LIB_LOG_FILE="${VAR_DIR}/qwenpaw-install.log"
-export HOME="${WORKING_DIR}"
-
-# 1. 提取并持久化安装向导中设置的端口，同步至飞牛系统元数据
-# 幽灵回退(service_port/wizard_service_port)全仓无来源,收敛为向导单值。
-# 19091 是监督者保留端口:config_callback 拒绝、监督者自愈忽略,安装侧此前
-# 却静默改写 —— 三处口径统一为拒绝。
-INIT_PORT="${wizard_port:-18088}"
-if [ "${INIT_PORT}" = "19091" ]; then
-    log_msg "ERROR: 端口 19091 为监督者回退保留端口"
-    notify_user "QwenPaw 服务端口不可使用监督者保留端口 19091。"
-    exit 1
-fi
-if [ "${INIT_PORT}" = "19090" ]; then
-    log_msg "ERROR: 端口 19090 为监督者保留端口"
-    notify_user "QwenPaw 服务端口不可使用监督者保留端口 19090。"
-    exit 1
-fi
-# 非法端口必须报错退出,不能静默忽略:
-# config_callback 会 exit 1,安装侧却默默继续,用户以为设置成功。
-# 且统一走 lib.sh 的 VAR_DIR(与 config 侧同一口径),不裸用 TRIM_PKGVAR。
-if printf '%s' "${INIT_PORT}" | grep -qE '^[0-9]+$' && [ "${INIT_PORT}" -ge 1024 ] && [ "${INIT_PORT}" -le 65535 ]; then
-    mkdir -p "${VAR_DIR}" 2>/dev/null || true
-    printf '%s\n' "${INIT_PORT}" > "${VAR_DIR}/service_port.tmp" 2>/dev/null && \
-        mv "${VAR_DIR}/service_port.tmp" "${VAR_DIR}/service_port" 2>/dev/null
-    sync_ui_config_port "${INIT_PORT}"
-    log_msg "安装端口已设定并同步为: ${INIT_PORT}"
-else
-    log_msg "ERROR: 端口非法: ${INIT_PORT}"
-    notify_user "QwenPaw 服务端口非法(${INIT_PORT}),须为 1024-65535 之间的整数。"
-    exit 1
-fi
-
-# 安装向导的日志级别落盘(wizard/install 收集 wizard_log_level):
-# {PKGVAR}/qwenpaw-log-level → 监督者启动内核时读取并经 --log-level argv 下发。
-# 此前该值只被 export 进脚本环境(lib.sh),监督者 spawn 的内核从不读取 —— 审查 F1。
-case "${wizard_log_level:-}" in
-    critical|error|warning|info|debug|trace)
-        mkdir -p "${VAR_DIR}" 2>/dev/null || true
-        if printf '%s\n' "${wizard_log_level}" > "${VAR_DIR}/qwenpaw-log-level.tmp" 2>/dev/null && \
-           mv "${VAR_DIR}/qwenpaw-log-level.tmp" "${VAR_DIR}/qwenpaw-log-level" 2>/dev/null; then
-            chmod 640 "${VAR_DIR}/qwenpaw-log-level" 2>/dev/null || true
-            log_msg "内核日志级别已落盘: ${wizard_log_level}"
-        else
-            log_msg "WARN: 日志级别写入失败(权限?),内核将以 info 运行"
+#!/bin/sh
+candidate=""
+if [ -n "${TRIM_APPDEST:-}" ]; then
+    for candidate_path in "$TRIM_APPDEST/app/bin/qwenpaw-supervisor" "$TRIM_APPDEST/bin/qwenpaw-supervisor"; do
+        if [ -x "$candidate_path" ]; then
+            candidate=$candidate_path
+            break
         fi
-        ;;
-    "")
-        log_msg "向导未提供 wizard_log_level,内核将以 info 运行"
-        ;;
-    *)
-        log_msg "WARN: 向导日志级别 '${wizard_log_level}' 不在白名单,忽略"
-        ;;
-esac
-
-log_msg "开始安装 QwenPaw (纯净 Launcher 模式)..."
-
-# 运行环境与内核均健在 → 外壳升级/重装不重装内核（版本双轨制），仅刷新版本钉
-# 以 venv 实际状态为准(不依赖任何标记文件:TRIM_PKGHOME 会随 fpk 升级被清掉)
-if kernel_installed; then
-    CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
-    log_msg "检测到运行环境与内核（${CUR_VER:-?}）均健在，跳过内核重装（双轨制：内核升级请走控制台版本管理）"
-    if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
-        if write_version_pin "${CUR_VER}"; then
-            log_msg "已刷新内核版本钉: ${CUR_VER}"
-        else
-            log_msg "WARN: 版本钉写入失败(目录权限?)"
+    done
+fi
+if [ -z "$candidate" ]; then
+    for candidate_path in "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"; do
+        if [ -x "$candidate_path" ]; then
+            candidate=$candidate_path
+            break
         fi
-    fi
-    secure_var_perms
-    # 内核健在 ≠ 初始化已完成:init 失败重试会走到这里,必须补跑守卫
-    ensure_qwenpaw_init || exit 1
-    log_msg "QwenPaw 外壳升级完成（内核未变更）！"
-    exit 0
+    done
 fi
-
-# 半破损 venv(dist-info 在而包体残缺):kernel_installed 的 import 冒烟已
-# 判不健康,但 pip 会报 "already satisfied" 空转成功 → init 再失败 → 重试
-# 死循环。整删重建,与 upgrade_callback 的 rm -rf 口径对称(云端复现)。
-if [ -d "${VENV_DIR}" ]; then
-    log_msg "WARN: 检测到不完整/不可用的 venv,删除后重建"
-    rm -rf "${VENV_DIR}"
+if [ -z "$candidate" ]; then
+    exit 127
 fi
-
-log_msg "正在创建虚拟环境..."
-if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
-    log_msg "ERROR: 虚拟环境创建失败: ${VENV_DIR}"
-    notify_user "QwenPaw 虚拟环境创建失败，请检查 Python 运行环境与磁盘权限。"
-    exit 1
-fi
-log_msg "虚拟环境 ${VENV_DIR} 创建成功"
-# 750:venv 仅属主(app 用户)需要访问,不对同机其他用户放行(审查 S3)
-chmod -R 750 "${VENV_DIR}" 2>/dev/null || true
-
-log_msg "正在激活虚拟环境..."
-if ! source "${VENV_DIR}/bin/activate"; then
-    log_msg "ERROR: 虚拟环境激活失败: ${VENV_DIR}"
-    notify_user "QwenPaw 虚拟环境激活失败，请检查运行环境完整性。"
-    exit 1
-fi
-log_msg "虚拟环境激活成功"
-
-# 镜像消费顺序:落盘 pip-mirror(权威)> 向导值 > 默认;向导值仅作文件
-# 缺失时的种子(sync_pip_mirror force=0 不覆盖已有选择)
-MIRROR_URL="$(resolve_pip_mirror_url "${wizard_pypi_mirror:-aliyun}")"
-PIP_OPTS=""
-[ -n "${MIRROR_URL}" ] && PIP_OPTS="-i ${MIRROR_URL}"
-log_msg "下载源: ${MIRROR_URL:-官方源(pypi.org)}"
-
-# 向导选择的下载源落盘为控制台初始默认(不覆盖用户已有选择)
-sync_pip_mirror "${wizard_pypi_mirror:-aliyun}" 0
-
-log_msg "正在升级虚拟环境 pip..."
-if ! python3 -m pip install --upgrade pip $PIP_OPTS; then
-    log_msg "ERROR: 虚拟环境 pip 升级失败"
-    notify_user "QwenPaw pip 升级失败，请检查下载源与网络后重试。"
-    exit 1
-fi
-log_msg "虚拟环境 pip 升级成功"
-
-# 内核版本来源（修复路径）：版本钉优先，精确恢复用户选择的版本。
-# 钉值必须过白名单 —— 它会拼成 `qwenpaw=={pin}` 进 pip 参数,被篡改的钉文件
-# 不得注入附加 pip 选项
-VERSION_PIN="$(tr -d '[:space:]' < "${VAR_DIR}/qwenpaw-version" 2>/dev/null | sed -E 's/^[Vv]ersion:?//' || true)"
-if [ -n "${VERSION_PIN}" ] && valid_version_pin "${VERSION_PIN}"; then
-    TARGET_PKG="qwenpaw==${VERSION_PIN}"
-    log_msg "检测到内核版本钉，按其精确恢复: ${TARGET_PKG}"
-else
-    if [ -n "${VERSION_PIN}" ]; then
-        log_msg "WARN: 版本钉内容非法(${VERSION_PIN})，忽略并按首次安装处理"
-        rm -f "${VAR_DIR}/qwenpaw-version" 2>/dev/null || true
-    fi
-    # 首次安装不预装内核（对齐 DSH 模式）：由用户打开控制台「版本更新」自选版本安装
-    log_msg "首次安装完成（外壳）。内核未预装——请打开 QwenPaw 控制台，在「版本更新」中选择版本安装。"
-    log_msg "提示: 内核 wheel 约 40MB，控制台安装时从所选 PyPI 镜像下载。"
-    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
-    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
-    chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
-    # 750:会话记忆/聊天记录仅需属主访问;本机实测 700 亦正常运行。755 曾把
-    # 这些数据对同机其他应用用户放行 —— 审查 S3。
-    chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true
-    secure_var_perms
-    log_msg "QwenPaw 安装成功！（内核待控制台安装）"
-    exit 0
-fi
-
-log_msg "正在通过 PyPI 镜像源在线安装 QwenPaw 核心引擎..."
-PIP_LOG=$(mktemp)
-# 脚本被超时/信号杀死时兜底清理(正常路径自带 rm -f)
-trap '[ -n "${PIP_LOG:-}" ] && rm -f "$PIP_LOG"' EXIT
-
-log_msg "安装目标包: ${TARGET_PKG}，使用选项: ${PIP_OPTS}"
-if ! python3 -m pip install --upgrade ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
-    cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
-    ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
-    rm -f "${PIP_LOG}"
-    log_msg "ERROR: pip 安装失败: ${ERROR_MSG}"
-    notify_user "QwenPaw 内核安装失败: ${ERROR_MSG}。请在控制台「版本更新」中重试。"
-    exit 1
-fi
-cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
-rm -f "${PIP_LOG}"
-
-# 记录内核版本钉：fpk 升级若重建 venv，按此版本恢复，不追踪最新
-# （先经元数据读出实际版本,再原子写入 —— 与监督者安装路径同一纪律）
-CUR_VER="$(python3 -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
-if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
-    if write_version_pin "${CUR_VER}"; then
-        log_msg "已记录内核版本钉: ${CUR_VER}"
-    else
-        log_msg "WARN: 版本钉写入失败(目录权限?),venv 重建时可能回退旧版本"
-    fi
-fi
-
-# 已有数据时绝不再跑 init：init 会创建空 chats.json/jobs.json，并在
-# registry 为空时阻断 session 迁移，表现为"升级后会话全部消失"。
-# 守卫收敛到 lib.sh:内核健在跳过分支与重试路径共用同一份口径。
-ensure_qwenpaw_init || exit 1
-
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGVAR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${TRIM_PKGETC}" 2>/dev/null || true
-chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true
-# VAR_DIR 收敛为最小权限(目录 750/文件 640/Token 600),不再递归 755
-secure_var_perms
-chmod 755 "${TRIM_PKGETC}" 2>/dev/null || true
-
-log_msg "QwenPaw 安装成功！"
-exit 0
+exec "$candidate" platform install

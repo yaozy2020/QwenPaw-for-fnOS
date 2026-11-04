@@ -1,5 +1,5 @@
 //! 路径解析:TRIM_* 注入优先(官方规范),否则回退 /var/apps 约定(官方 cgi 示例即硬编码)。
-//! 所有自产文件统一挂 var_dir 之下。
+//! 运行时自产文件统一挂 var_dir 之下;生命周期锁另置于其父级,避免卸载删除 var 时失去互斥。
 
 use std::env;
 
@@ -71,7 +71,11 @@ impl Config {
         if kernel_port == supervisor_port {
             // 回退值必须与冲突端口不同:监督者占 18088 时回退 18088 = 冲突未解,
             // 内核 bind 必败、健康检查死循环(审查 supervisor P3)。
-            let fallback = if supervisor_port == 18088 { 18089 } else { 18088 };
+            let fallback = if supervisor_port == 18088 {
+                18089
+            } else {
+                18088
+            };
             eprintln!(
                 "[Supervisor] service_port({kernel_port}) 与监督者监听端口冲突,忽略该文件值,回退到 {fallback}"
             );

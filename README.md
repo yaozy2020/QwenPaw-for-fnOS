@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-2.1.0-9-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.1.1-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
 
@@ -67,22 +67,50 @@
 QwenPaw-for-fnOS/
 ├── app/
 │   ├── bin/                  # 监督者二进制（构建时放入）
-│   ├── ui/                   # cgi 网关（index.cgi 静态服务 + api.cgi 瘦桥）与桌面图标
+│   ├── ui/                   # 迁移期原生 CGI 入口（index.cgi 静态服务、api.cgi 兼容桥）与桌面图标
 │   └── www/                  # 控制台编译产物（由 web/ 构建，不入库）
-├── cmd/                      # 生命周期回调（install/upgrade/uninstall/config/main）
+├── cmd/                      # 薄生命周期入口，转发给 Rust 固定子命令
 ├── config/                   # 权限与资源配置
-├── supervisor/               # Rust 监督者（内核生命周期/安装状态机/HTTP API）
-├── web/                      # 控制台前端源码（Preact + esbuild，build.mjs 出单文件产物）
+├── supervisor/               # Rust 监督者、管理核心、HTTP/私有控制通道
+├── web/                      # 控制台前端源码（Preact + TypeScript，esbuild 出单文件产物）
 ├── wizard/                   # 安装/升级/卸载/配置向导
-├── scripts/                  # lint（五层门禁）、preflight、版本同步等工程脚本
+├── scripts/                  # lint、事务/边界回归、preflight、版本同步等工程脚本
 ├── manifest                  # 应用清单（版本 SSOT）
 ├── build.sh                  # 构建打包（cargo 监督者 + esbuild 控制台 + fnpack）
 └── ICON.PNG / ICON_256.PNG   # 应用图标
 ```
 
+### 运行时职责与事务边界
+
+主线为 **fnOS 生命周期入口 → Rust 监督者/共享管理核心 → 受管 Python venv 中的 QwenPaw**。监督者管理 HTTP 只监听 `127.0.0.1:${SUPERVISOR_PORT}`；平台回调通过权限受限的私有 `supervisor-control.sock` 提交控制操作。该私有 UDS 不是 fnOS 统一网关 Socket，也不证明网关鉴权或管理员授权已验证。
+
+- `supervisor/src/management.rs` 提供 HTTP 与平台控制入口共用的管理核心；`supervisor/src/control.rs` 实现私有控制 UDS。`supervisor/src/api/` 按状态、生命周期、安装、配置和日志分组，状态查询不写桌面配置；`desktop.rs` 负责桌面入口的定点原子更新。
+- `supervisor/src/install/` 分离安装编排、持久化环境事务与子进程执行。失败路径先停新实例，再回滚环境，最后恢复旧服务；安全收尾完成前不释放安装槽。
+- `runtime_settings.rs` 与 `settings_transaction.rs` 统一端口、日志级别和桌面配置变更：持久化恢复日志后执行，内核健康检查通过才提交，中断则在启动时恢复。平台配置回调由 Rust 子命令处理，不再自行构造管理 JSON 或写配置。
+- `supervisor/src/runtime.rs` 的 `RuntimeAdapter` 集中以固定 argv 调用受管 venv、pip 与 QwenPaw；这不代表 Python 内核依赖被移除，也不把管理策略交还给 Python。
+- `app/ui/api.cgi` 是薄入口，转发到 Rust 原生 `web api-cgi` 兼容处理；`app/ui/index.cgi` 转发到 Rust 原生静态资源服务。两者仍随包使用，属于迁移期兼容桥，不是 fnOS 网关登录或管理员授权实现，也未宣称已退役。
+- 无法完成恢复时禁止自动启动和运维变更，保留状态、日志查询及故障文件供排查。停止监督者时禁止新内核启动，并等待进行中事务安全收尾。
+- `web/src/installTask.mjs` 独立判定安装任务归属；受理序号与监督者进程身份都匹配才确认终态，响应丢失时明确显示无法确认，不猜测成功。
+
+现有本地回归入口包括 `python3 scripts/test-platform-callbacks.py`、`python3 scripts/test-native-api-cgi.py`、`python3 scripts/test-native-index-cgi.py`、`python3 scripts/test-runtime-venv-contract.py`、`python3 scripts/test-management-boundary.py`、`python3 scripts/test-supervisor-api.py`、`bash scripts/test-lifecycle.sh`、`bash scripts/test-config-callback.sh`、`bash scripts/test-venv-recovery.sh`、`STRICT_CI=1 bash scripts/lint.sh` 与 `python3 scripts/gen-audit.py --check`。`test-supervisor-api.py`、`test-venv-recovery.sh` 及 lifecycle 脚本中的真实监督者场景需要先构建 release 二进制；按各脚本要求使用隔离临时目录，不操作已部署服务。前端可用 `npm run typecheck --prefix web`、`npm test --prefix web` 和 `npm run test:e2e --prefix web`。
+
+### 当前本地候选验证（非生产可用声明）
+
+2026-11-04 初审整改后的 1.1.1 RC1 本地包为 `build/output/qwenpaw-1.1.1-1-x86.fpk`（2,071,727 字节，SHA256 `ec6850e3196f69545e66d649c4ce15a59b70529c6dc1ab45845fcc8d12ed2e0a`）。Rust 222+13、Node 30、严格 Clippy/typecheck、lint、audit、自测、API/lifecycle 120 并发、七点恢复、native API 15、index 22、platform 11、真实 venv 与 Chromium 1 项均通过；原始 SIGKILL→service stop/restart 已在隔离环境实测通过。完整结果与边界见 [`docs/session-handoff-2026-11-04.md`](docs/session-handoff-2026-11-04.md)。
+
+候选未经 fnOS 真机网关/UDS/鉴权、回调执行窗口、最低版本、实际平台停止预算、真实 PyPI 上游包、WebKit 或 fnOS App 验证；候选通过本地验证不表示生产可用或已发布。
+
 ## 版本历史
 
-### v2.1.0-rc.1（当前发布候选，FPK 版本 2.1.0-7）
+版本呈现自当前候选起统一为：架构变更前的原 `1.0.x` 归入 `0.0.x`，引入常驻 Rust 监督者后的原 `2.x` 归入 `1.x`。这是文档与后续版本的归一化规则；既有 Git tag 和已发布 Release 名称保持原样，不重写历史发布对象。
+
+### v1.1.1-rc.1（当前候选，FPK 版本 1.1.1-1）
+
+- 管理层统一迁入 Rust/native CGI 薄桥，生命周期、配置、安装和恢复共用管理核心与私有控制 UDS；
+- 修复崩溃后 service 恢复、提交写失败、Web 停止/卸载门禁和跨实例任务归属；
+- 前端类型纪律、真实 venv、并发与故障恢复回归纳入发布门禁。
+
+### v1.1.0-rc.1（历史候选，FPK 版本 1.1.0-7）
 
 - **控制面板运维闭环**: 支持仅卸载内核并保留用户数据，卸载后可从空 venv 重新安装；同版本显示重新安装；镜像故障持续提示换源与网络检查；明确飞牛控制台和 QwenPaw 独立管理员两套鉴权；桌面入口维护 `noDisplay` 状态，但当前 fnOS 实测不会在运行时动态隐藏已注册图标；
 - **事务式内核安装**: pip 只修改独立暂存 venv；启动、精确版本健康检查或版本钉写入失败时恢复原环境和版本钉，成功后才清理旧环境备份。安装期间需预留一份当前 venv 的临时磁盘空间；
@@ -91,7 +119,7 @@ QwenPaw-for-fnOS/
 - **可复现构建**: 以 `SOURCE_DATE_EPOCH` 归一化 FPK 外层与 `app.tgz` 的文件顺序、owner 和 mtime，连续构建可逐字节比较；
 - **仓库治理**: 删除已退出构建链的 Vue 历史 UI、上游源码同步脚本与旧静态资源，Preact + fpkstudio 为唯一活跃链路；Rust 21 项回归测试通过。
 
-### v2.0.1（当前稳定版）
+### v1.0.1（当前稳定版）
 
 - **生命周期真实性**: venv 创建、激活和 pip 升级失败立即非零退出，并通过 `TRIM_TEMP_LOGFILE` 向用户报告，不再出现失败假成功；
 - **端口配置闭环**: 控制台修改端口后同步更新飞牛桌面入口，失败同时回滚运行配置与入口；安装及设置路径统一拒绝保留端口，同端口请求可自愈历史错配；
@@ -99,7 +127,7 @@ QwenPaw-for-fnOS/
 - **升级恢复与协议一致性**: 外壳升级完成后显式恢复监督者与内核服务；CGI 透传监督者 HTTP 状态码，安装冲突真实返回 409；
 - **质量验证**: Rust 14 项测试覆盖动态端口、精确版本、UTF-8、端口入口同步和并发互斥，完整生命周期与 FPK 审计通过。
 
-### v2.0.0-rc.1（FPK 版本 2.0.0-1）
+### v1.0.0-rc.1（FPK 版本 1.0.0-1）
 
 - **发布候选安装状态机**: 新增 `Starting` 非终态，健康检查与版本钉写入成功后才进入 `Done`；健康检查使用实际配置端口并精确匹配目标版本，启动失败、健康超时和版本钉失败均如实上报；
 - **日志与质量门禁**: 运行日志和 pip 日志共用 UTF-8 安全截断，覆盖中文与 emoji 边界；Rust 12 项回归测试与 Clippy 严格检查通过；
@@ -110,13 +138,13 @@ QwenPaw-for-fnOS/
 - **数据销毁零残留**: 彻底删除模式补齐对应用密钥与认证目录（`.qwenpaw.secret/auth.json`）的严格清理，生命周期门禁增加强断言保护；
 - **端到端安装就绪健康门禁**: pip 安装成功后由监督者轮询确认 WebUI 与目标版本真实响应，彻底消除假就绪。
 
-### v2.0.0-15
+### v1.0.0-15
 
 - **Double-Submit Cookie CSRF 防护**: 彻底解耦网关反代与网络拓扑，彻底杜绝 Host 头重写误杀 403；
 - **SemVer 分级比对与降级保护**: 修复版本列表降级倒转逻辑，消除初装预发布幽灵版本干扰；
 - **默认阿里云源**: 提升云端与机房 IP 场景下的 pip 下载稳定性。
 
-### v2.0.0-12
+### v1.0.0-12
 
 - **安全(P0)**:内核安装的版本参数不再拼进 `bash -c` —— 改为渠道枚举(latest/beta/精确版本)+ PEP 440 字符白名单 + argv 直传 pip,消除 Shell 命令注入;版本钉入口同一白名单
 - **安全(P0)**:桥接 api.cgi 增加方法白名单(读=GET/变更=POST,违规 405)与 Origin/Referer 同源校验(403),未知 action 404;lint 新增 405/403/404 回归用例
@@ -131,47 +159,47 @@ QwenPaw-for-fnOS/
 - **P1 生命周期审计整改**:监督者停止三处入口(main/lib.sh/卸载回调)统一为 `supervisor_ctl.sh` 身份核对安全停止 —— PID 文件只是提示,发信号前核对 `/proc/<pid>/exe` + starttime 戳,PID 复用/陈旧 PID 绝不误杀无关进程(可动态复现的缺陷);外部停止宽限 15s→30s(原值小于监督者内部最坏清理 ~16.5s,会在后代清扫完成前强杀,留下孤儿);取消安装新增 Cancelled 终态(注入式测试复现"运行态已建立、PID 未登记"窗口,取消绝不拉起 pip、不写版本钉、不触发自愈重启);改端口/重置认证的回滚闭环 —— 先停止失败的新实例再恢复配置,恢复本身也要过健康检查,写回失败如实上报
 - **移动端安装闭环**:安装触发改为可读响应的 POST(受理 seq 确认接单,sendBeacon 仅作切后台兜底);busy 响应如实展示并自动转入进度查看;弹窗按任务 seq 跟踪,修复"首拍已终态被误判为未送达"的漏判;重开控制台/换设备时检测到进行中任务直接附加查看,不再重复创建;pip 看门狗(无输出 15 分钟/总时长 60 分钟)整组回收,安装不再可能永久锁死 busy 槽
 
-### v2.0.0-11
+### v1.0.0-11
 
 - 第二轮独立审计整改：安装失败自愈在裸线程直调 tokio spawn 必 panic 并毒化日志锁 → kernel spawn 改 `std::process::Command`（任意线程安全，收尾线程回收僵尸并落退出日志）
 - 升级日志渲染误加 `.catch` 于 void 调用（历史版本链路死亡）→ 删除；install 终态双 emit 修复
 - supervisor-token 每次启动收紧 0600（存量宽松权限文件一并治理）
 - 故障注入验证：沙箱真实触发 pip 失败 → 零 panic、内核自动拉起、二次安装正常受理
 
-### v2.0.0-10
+### v1.0.0-10
 
 - 首轮独立审计整改：版本管理同名遮蔽自递归（blocker，历史版本/选版本全链路失效）；pip 失败不再留停机态（自动拉起现有内核）；pip 日志 UTF-8 双侧加固；升级日志"失败"关键词；过渡态升级弹窗守卫
 
-### v2.0.0-9
+### v1.0.0-9
 
 - 控制台全量迁移 Preact（插值自动转义，escapeHtml 结构性退场）
 - 升级卡顿修复：忙检查前移（安装中重复点击不再误停内核）、监督者新增 install-status/install-log 轻端点（轮询热路径去掉 python3 冷启动）、轮询节流守卫
 
-### v2.0.0-8
+### v1.0.0-8
 
 - Svelte 打样（StatusCard 组件 + store 契约）；同组件实测 Svelte 5/4/Solid/Preact 尺寸与工具链后，选定 Preact 并于 -9 全量迁移
 
-### v2.0.0-7
+### v1.0.0-7
 
 - 生命周期实测整改：停止级联漏 await（假成功）修复、进程后代递归清扫（停止/重启零孤儿）、iOS 切后台升级触发改 sendBeacon、下载源完整 URL 直通监督者
 
-### v2.0.0-6
+### v1.0.0-6
 
 - 前端编译管线（esbuild 单文件产物，编译不过即出不了门）；运行日志分页回看（每页 100 行、2000 行窗口）；下载源自定义下拉
 
-### v2.0.0-5
+### v1.0.0-5
 
 - 控制台"下载源"选择器（落盘服务端全设备共享，升级时生效）；主题默认跟随系统；服务状态卡补 CPU 占用与内存占用、运行时长精确到秒
 
-### v2.0.0-4
+### v1.0.0-4
 
 - 独立审计整改：升级反馈链路闭环（pip 日志 JSON 转义/文件名统一/phase 完成判定）、版本语义化排序（2.10.0 > 2.9.9）、版本列表失败如实降级
 
-### v2.0.0-3
+### v1.0.0-3
 
 - 修复桥接脚本输出非法 JSON（bash 参数展开花括号陷阱）导致的控制台动态渲染全静默失效
 
-### v2.0.0-2
+### v1.0.0-2
 
 - 监督者二进制安装路径修正
 
@@ -180,59 +208,59 @@ QwenPaw-for-fnOS/
 - SSE 实时状态推送(预留,控制台轮询兜底)
 - 监督者依赖 wheels 随包分发,离线安装
 
-### v1.0.10
+### v0.0.10
 
 - **进程管理保底机制**：内核以 setsid 独立进程组启动，停止时组信号连带浏览器/MCP 等子进程（TERM 宽限 10s 后组 KILL 清扫，实测 TERM 免疫子进程可被清除）
 - 安全阀：组信号仅在确认 setsid 启动时启用，旧版启动的进程自动降级为单进程信号，不误伤平台进程
 
-### v1.0.9
+### v0.0.9
 
 - 修复进程管理顽疾：pid 文件记录的是 bash 包装进程而非内核本体，停止/重启从未真正结束内核（孤儿进程占端口）；启动改 exec 形式，pid 即内核进程
 
-### v1.0.8
+### v0.0.8
 
 - 脚本路径全面接入 TRIM_* 变量（带回退，对齐官方规范）
 - 安装与升级失败信息接入 TRIM_TEMP_LOGFILE 官方用户可见通道
 
-### v1.0.7
+### v0.0.7
 
 - **首次安装不再预装内核**：外壳安装即完成，用户打开控制台「版本更新」自选版本安装（对齐 DSH 的 not-installed 模式）
 - 已有环境逻辑不变：venv 健在仅修复不动内核，环境被清按版本钉恢复
 - 控制台新增「内核未安装」状态引导；启动/改端口在内核缺失时给出明确提示
 - 安装向导移除「首发安装通道」（通道选择由控制台安装时自行决定）
 
-### v1.0.6
+### v0.0.6
 
 - 修复修改端口后内核启动崩溃的隐患（change_port 重启路径补齐依赖托管环境变量）
 - 新增 lint 规范化门禁（bash -n / shellcheck / 内嵌启动脚本展开验证）并接入 CI
 
-### v1.0.5
+### v0.0.5
 
 - 修复控制台降级后版本钉写入格式错误、导致下次外壳升级失败的问题（写入器与读取器双侧加固）
 
-### v1.0.4
+### v0.0.4
 
 - 取消旧版数据自动迁移逻辑及相关文案
 - 修复内核 2.3.0b2+ 在 fnOS 的启动崩溃（注入 `QWENPAW_DEPENDENCY_STATE_DIR`）
 - 版本钉全路径闭环：外壳升级、环境重建均不改变内核版本
 
-### v1.0.3
+### v0.0.3
 
 - 应用说明、README 安装引导、升级向导文案对齐实际功能
 - 明确升级向导中 PyPI 镜像仅在运行环境重建时使用
 
-### v1.0.2
+### v0.0.2
 
-- 修复外壳升级隐式变更内核版本的问题（v1.0.1 装包后内核被自动升级至 2.3.0b2、因上游启动锁 bug 失败的根因修复）
+- 修复外壳升级隐式变更内核版本的问题（v0.0.1 装包后内核被自动升级至 2.3.0b2、因上游启动锁 bug 失败的根因修复）
 - 新增内核版本钉，`upgrade_callback` 遵守版本双轨制
 
-### v1.0.1
+### v0.0.1
 
 - 控制台性能优化：预压缩协商传输（brotli/gzip）、轮询后台暂停
 - 图标扁平化（去内层蓝盘，对齐 DSH 风格）并量化，包体 246K → 143K
 - CI/Release 工作流对齐零构建架构
 
-### v1.0.0
+### v0.0.0
 
 - 独立发版：确立外壳/内核版本双轨制
 - DSH 风格极简控制台（双模态、版本自选、降级保护）
@@ -259,7 +287,7 @@ QwenPaw-for-fnOS/
 ### 点击「安装内核」或修改设置提示来源/CSRF 校验失败？
 
 这是由于网关反代重写 Host 头或页面 Token 未同步导致的：
-1. 请确保外壳已更新至 **≥ v2.0.0-14**（该版本采用 Double-Submit Cookie 机制，完全解耦网络拓扑与反向代理环境）。
+1. 请确保外壳已更新至 **≥ v1.0.0-14**（该版本采用 Double-Submit Cookie 机制，完全解耦网络拓扑与反向代理环境）。
 2. 在浏览器中按 **`Ctrl + Shift + R`** 强制刷新控制台页面，重新同步会话凭证后再行操作。
 
 ### 内核安装失败或提示「Could not find a version ... / from versions: none」？

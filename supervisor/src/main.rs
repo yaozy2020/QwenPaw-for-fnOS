@@ -3,12 +3,26 @@
 //! 监督者被 SIGKILL 时内核存活,下次启动由 /proc 收养(D1)。
 
 mod api;
+mod api_cgi;
+mod cli;
 mod config;
+mod control;
+mod desktop;
 mod events;
+mod index_cgi;
 mod install;
 mod kernel;
+mod management;
+mod mirror;
+mod platform;
 mod procfs;
+mod runtime;
+mod runtime_settings;
+mod service;
+mod settings_transaction;
+mod uninstall;
 mod version;
+mod version_index;
 
 use std::{
     io::Write,
@@ -20,6 +34,7 @@ use config::Config;
 use events::Events;
 use install::InstallState;
 use kernel::KernelManager;
+use management::ManagementCore;
 
 /// 对 VAR_DIR/supervisor.lock 取独占 flock(LOCK_EX|LOCK_NB)。
 /// 返回的 File 必须在整个进程生命周期内保持打开 —— drop 即释放锁。
@@ -45,7 +60,12 @@ fn acquire_instance_lock(var_dir: &str) -> std::io::Result<std::fs::File> {
         .write(true)
         .truncate(false)
         .open(&path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let fd = file.as_raw_fd();
+    let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if fd_flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -53,6 +73,34 @@ fn acquire_instance_lock(var_dir: &str) -> std::io::Result<std::fs::File> {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match cli::parse(&args) {
+        Ok(cli::Command::Serve) => serve(),
+        Ok(cli::Command::Service(action)) => {
+            let cfg = Config::load();
+            std::process::exit(service::run(action, &cfg));
+        }
+        Ok(cli::Command::Platform(action)) => {
+            let cfg = Config::load();
+            std::process::exit(platform::run(action, &cfg));
+        }
+        Ok(cli::Command::DoctorJson) => {
+            let cfg = Config::load();
+            println!("{}", service::doctor_json(&cfg));
+        }
+        Ok(cli::Command::WebApiCgi) => {
+            let cfg = Config::load();
+            std::process::exit(api_cgi::run(&cfg));
+        }
+        Ok(cli::Command::WebIndexCgi) => std::process::exit(index_cgi::run()),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn serve() {
     let cfg = Config::load();
     std::fs::create_dir_all(&cfg.var_dir).ok();
     std::fs::create_dir_all(&cfg.share_dir).ok();
@@ -103,46 +151,37 @@ fn main() {
         },
         cfg.kernel_port,
     ));
-    if let Err(e) = api::sync_main_entry(
-        std::path::Path::new(&cfg.ui_config_file),
-        cfg.kernel_port,
-        kernel.installed(),
-    ) {
-        logf(&format!("sync desktop kernel entry failed: {e}"));
-    }
     let events = Events::new();
     let kernel_for_install = Arc::clone(&kernel);
     let ui_config_for_install = cfg.ui_config_file.clone();
-    let install = InstallState::with_stop(
+    let install = InstallState::with_lifecycle(
         {
             let log = Arc::clone(&log);
             Arc::new(move |snap: install::InstallSnapshot| {
-                if matches!(snap.phase, install::Phase::Done | install::Phase::Failed | install::Phase::Cancelled) {
+                if matches!(
+                    snap.phase,
+                    install::Phase::Done | install::Phase::Failed | install::Phase::Cancelled
+                ) {
                     kernel_for_install.invalidate_version();
                     if let Err(e) = api::sync_main_entry(
                         std::path::Path::new(&ui_config_for_install),
                         kernel_for_install.port(),
                         kernel_for_install.installed(),
                     ) {
-                        let _ = writeln!(lock_log(&log), "[Supervisor] sync desktop kernel entry failed: {e}");
+                        let _ = writeln!(
+                            lock_log(&log),
+                            "[Supervisor] sync desktop kernel entry failed: {e}"
+                        );
                     }
                 }
-                let mut g = lock_log(&log);
                 let _ = writeln!(
-                    g,
+                    lock_log(&log),
                     "[Supervisor] install seq={} phase={:?} fetched={} msg={}",
-                    snap.seq, snap.phase, snap.fetched, snap.message
+                    snap.seq,
+                    snap.phase,
+                    snap.fetched,
+                    snap.message
                 );
-                // 失败终态统一先停掉可能未通过健康检查的新进程,再启动
-                // 未受影响的旧环境(或回滚后的环境),避免进程与 venv 错配。
-                if snap.phase == install::Phase::Failed {
-                    let _ = writeln!(g, "[Supervisor] install failed, restoring previous kernel service");
-                    kernel_for_install.stop_sync();
-                    match kernel_for_install.spawn() {
-                        Ok(pid) => { let _ = writeln!(g, "[Supervisor] kernel restarted after failed install, pid={pid}"); }
-                        Err(e) => { let _ = writeln!(g, "[Supervisor] kernel restart after failed install FAILED: {e}"); }
-                    }
-                }
             })
         },
         {
@@ -150,11 +189,34 @@ fn main() {
             Arc::new(move || kernel.spawn())
         },
         {
-            // 安装取消/回滚前必须先停掉已拉起的新内核
             let kernel = Arc::clone(&kernel);
             Arc::new(move || kernel.stop_sync())
         },
-    );
+        {
+            let kernel = Arc::clone(&kernel);
+            Arc::new(move || {
+                kernel.invalidate_version();
+                if !kernel.installed() {
+                    return Ok(0);
+                }
+                let pid = kernel.spawn()?;
+                if kernel.wait_healthy(Duration::from_secs(10)) {
+                    Ok(pid)
+                } else {
+                    Err("原内核恢复后健康检查未通过".into())
+                }
+            })
+        },
+    )
+    .with_initializer({
+        let kernel = Arc::clone(&kernel);
+        let venv_dir = cfg.kernel_venv.clone();
+        let share_dir = cfg.share_dir.clone();
+        Arc::new(move |state, pid_file| {
+            runtime::RuntimeAdapter::new(&venv_dir, &share_dir, kernel.log_level())
+                .ensure_initialized_with_state(state, pid_file)
+        })
+    });
 
     // token:0600 全生命周期(新建即 0600;存量宽松权限收敛;写入后复核)。
     // 随机源不可用必须终止启动 —— 静默降级曾会生成全零弱 Token(审计 P0)。
@@ -175,11 +237,7 @@ fn main() {
             // 磁盘会留下空文件或半截 Token —— 下次启动读到长度 <32 会重新生成,
             // 已拿到旧 Token 的前端(或正在重连的 SSE)就会全部 401。
             // 改为写同目录唯一 tmp -> fsync -> rename,读者只会看到旧值或新值。
-            let tmp_path = format!(
-                "{}.tmp.{}",
-                cfg.token_file,
-                std::process::id()
-            );
+            let tmp_path = format!("{}.tmp.{}", cfg.token_file, std::process::id());
             // 先清同 pid 残骸:上次运行崩在"已 create_new 未 rename"窗口时,
             // tmp 与本次 PID 相同(create_new(true))会必然失败 → panic 启动
             // 死循环。清扫 sweep 在 token 写入之后才跑,兜不住首发。
@@ -222,7 +280,11 @@ fn main() {
 
     // 孤儿安装清理:监督者异常退出时 pip(独立进程组)可能仍存活并继续改 venv。
     // 凭 install.pid 找到候选,核对 /proc cmdline 身份(防 PID 复用误杀)后整组回收。
-    cleanup_orphan_install(&cfg.var_dir);
+    if let Err(error) = cleanup_orphan_install(&cfg.var_dir) {
+        logf(&format!("孤儿安装进程清理失败: {error}"));
+        install.block_recovery(format!("孤儿安装进程清理失败: {error}"));
+        kernel.stop_sync();
+    }
 
     // 临时文件残骸清扫:必须在事务恢复之前,否则 service_port.tmp.* 之类的
     // 半截文件会被后续 create_new 撞上而让写入永久失败。
@@ -239,84 +301,144 @@ fn main() {
         let k = Arc::clone(&kernel);
         move || k.stop_sync()
     };
-    match install::recover_pending_transactions(
+    let recovery_error = match install::recover_pending_transactions(
         std::path::Path::new(&cfg.kernel_venv),
         std::path::Path::new(&pin_file),
         Some(&*logf),
         Some(&stop_for_recovery),
     ) {
-        Ok(n) if n > 0 => logf(&format!("recovered {n} pending venv transaction(s)")),
-        Ok(_) => {}
-        Err(e) => logf(&format!("recover pending transactions error: {e}")),
+        Ok(report) => {
+            if report.recovered > 0 {
+                logf(&format!(
+                    "recovered {} pending venv transaction(s)",
+                    report.recovered
+                ));
+            }
+            if report.is_ready() {
+                None
+            } else {
+                Some(report.pending.join("; "))
+            }
+        }
+        Err(e) => Some(format!("recover pending transactions error: {e}")),
+    };
+    if let Some(reason) = recovery_error {
+        logf(&reason);
+        install.block_recovery(reason);
+        kernel.stop_sync();
     }
 
-    // supervisor 自身 pid(平台 stop 的目标)。
-    // 必须原子写:裸 fs::write 先截断再写,若此刻被 SIGKILL/断电,磁盘上会留下
-    // 空文件或半截数字。平台 stop 读到空/非法 pid 会判定"未运行"而跳过停止,
-    // 于是真实例变成无法通过平台停下的孤儿(只剩手工 kill)。
-    match crate::install::atomic_write_0600(
-        &cfg.supervisor_pid_file,
-        &format!("{}\n", std::process::id()),
-    ) {
-        Ok(()) => {}
-        Err(e) => logf(&format!("write supervisor pid error: {e}")),
+    let settings_journal = std::path::Path::new(&cfg.var_dir).join("settings-transaction.json");
+    let settings_recovery = match settings_journal.try_exists() {
+        Ok(false) => Ok(false),
+        Ok(true) => {
+            kernel.stop_sync();
+            settings_transaction::recover(
+                std::path::Path::new(&cfg.var_dir),
+                std::path::Path::new(&cfg.ui_config_file),
+            )
+        }
+        Err(e) => Err(e),
+    };
+    match settings_recovery {
+        Ok(true) => {
+            let restored = Config::load();
+            kernel.set_port(restored.kernel_port);
+            let _ = kernel.set_log_level(&restored.kernel_log_level);
+            logf("recovery: 已恢复中断前的端口、日志级别与桌面配置");
+        }
+        Ok(false) => {}
+        Err(e) => {
+            let reason = format!("配置事务恢复失败: {e}");
+            logf(&reason);
+            install.block_recovery(reason);
+            kernel.stop_sync();
+        }
     }
 
+    let self_pid = std::process::id();
+    let self_starttime = std::fs::read_to_string(format!("/proc/{self_pid}/stat"))
+        .ok()
+        .and_then(|stat| service::parse_starttime(&stat))
+        .expect("read supervisor process starttime");
+    service::mark_shutdown_generation(&cfg, self_pid as i32, self_starttime, false)
+        .unwrap_or_else(|error| panic!("write running shutdown generation: {error}"));
+    let starttime_file = format!("{}.starttime", cfg.supervisor_pid_file);
+    crate::install::atomic_write_0600(&starttime_file, &format!("{self_starttime}\n"))
+        .unwrap_or_else(|error| panic!("write supervisor starttime: {error}"));
+    if let Err(error) =
+        crate::install::atomic_write_0600(&cfg.supervisor_pid_file, &format!("{self_pid}\n"))
+    {
+        let _ = std::fs::remove_file(&starttime_file);
+        panic!("write supervisor PID: {error}");
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
-    // 崩溃恢复:管理员重置流程在 rename(auth→bak-reset) 之后、respawn 健康
-    // 之前被杀时,重启后 auth.json 缺失会被判"未初始化",任何人都能重新
-    // 设置管理员接管实例 —— 必须先从备份还原再对外服务。
-    {
-        let auth = std::path::Path::new(&cfg.share_dir)
-            .parent()
-            .map(|p| p.join(".qwenpaw.secret/auth.json"));
-        if let Some(auth) = auth {
-            let bak = auth.with_extension("json.bak-reset");
-            if !auth.exists() && bak.exists() {
-                match std::fs::rename(&bak, &auth) {
-                    Ok(()) => logf("recovery: 从 bak-reset 还原管理员认证文件"),
-                    Err(e) => logf(&format!("recovery: 还原认证文件失败: {e}")),
+    let auth = std::path::Path::new(&cfg.share_dir)
+        .parent()
+        .map(|p| p.join(".qwenpaw.secret/auth.json"));
+    if let Some(auth) = auth {
+        let bak = auth.with_extension("json.bak-reset");
+        if !auth.exists() && bak.exists() {
+            kernel.stop_sync();
+            match std::fs::rename(&bak, &auth) {
+                Ok(()) => logf("recovery: 从 bak-reset 还原管理员认证文件"),
+                Err(e) => {
+                    let reason = format!("认证恢复失败: {e}");
+                    logf(&reason);
+                    install.block_recovery(reason);
                 }
             }
         }
     }
 
-    // 启动时收养存活内核(D1);未安装且 autostart 开启时拉起(缺失则走 not_installed)
-    let (adopt_pid, running) = rt.block_on(async {
+    if install.recovery_error().is_none() {
+        if let Err(e) = api::sync_main_entry(
+            std::path::Path::new(&cfg.ui_config_file),
+            kernel.port(),
+            kernel.installed(),
+        ) {
+            logf(&format!("sync desktop kernel entry failed: {e}"));
+        }
         let st = kernel.status_now();
-        (st.pid, st.running)
-    });
-    if running {
-        logf(&format!("adopted running kernel pid={adopt_pid}"));
-    } else if cfg.auto_start && kernel.installed() {
-        logf("kernel not running, autostart");
-        let k = Arc::clone(&kernel);
-        let logf = Arc::clone(&logf);
-        rt.spawn(async move {
-            if let Err(e) = k.spawn() {
+        if st.running {
+            logf(&format!("adopted running kernel pid={}", st.pid));
+        } else if cfg.auto_start && kernel.installed() {
+            logf("kernel not running, autostart");
+            if let Err(e) = kernel.spawn() {
                 logf(&format!("autostart failed: {e}"));
             }
-        });
+        }
     }
 
-    let state = api::AppState {
+    let core = ManagementCore {
         kernel: Arc::clone(&kernel),
         install: install.clone(),
         events: events.clone(),
-        token: token.clone(),
         var_dir: cfg.var_dir.clone(),
         home_dir: cfg.home_dir.clone(),
         share_dir: cfg.share_dir.clone(),
         ui_config_file: cfg.ui_config_file.clone(),
         kernel_log: cfg.kernel_log.clone(),
         operations: Arc::new(tokio::sync::Mutex::new(())),
-        auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
         supervisor_port: cfg.listen_port,
     };
+    let state = api::AppState {
+        core: core.clone(),
+        token,
+        auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
+    };
+    let control_path = control::socket_path(&cfg.var_dir);
+    let control_listener = control::bind_private_socket(&control_path)
+        .unwrap_or_else(|error| panic!("bind private control socket: {error}"));
+    let control_state = state.clone();
+    let control_runtime = rt.handle().clone();
+    std::thread::spawn(move || control::serve(control_listener, control_state, control_runtime));
+
+    let operations_for_signal = Arc::clone(&core.operations);
     let addr = format!("127.0.0.1:{}", cfg.listen_port);
     let listener = rt
         .block_on(async { tokio::net::TcpListener::bind(&addr).await })
@@ -329,15 +451,15 @@ fn main() {
     });
     logf(&format!("listening {addr}"));
 
-    // 信号:TERM/INT → 先取消进行中的安装(整组回收 pip)→ 级联停内核 → 退出。
-    // 顺序不可换:内核停了安装线程还可能继续改 venv;先停任务源再停运行态。
-    let kernel_for_signal = Arc::clone(&kernel);
-    let install_for_signal = install.clone();
+    let kernel_for_signal = Arc::clone(&core.kernel);
+    let install_for_signal = core.install.clone();
     let logf_for_signal = Arc::clone(&logf);
+    let cfg_for_signal = cfg.clone();
+    let shutdown_pid = self_pid as i32;
+    let shutdown_starttime = self_starttime;
     let rt_handle = rt.handle().clone();
     std::thread::spawn(move || {
-        rt_handle.block_on(async move {
-            // 信号流注册必须在 runtime 上下文内(否则 panic: no reactor running)
+        let clean = rt_handle.block_on(async move {
             let mut term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                     .expect("SIGTERM handler");
@@ -347,17 +469,85 @@ fn main() {
                 _ = term.recv() => logf_for_signal("SIGTERM"),
                 _ = int.recv() => logf_for_signal("SIGINT"),
             }
-            install_for_signal.cancel();
-            logf_for_signal("install cancelled, stopping kernel before exit");
+            kernel_for_signal.prevent_start();
+            install_for_signal.block_recovery("监督者正在关闭".into());
+            let install_shutdown = tokio::task::spawn_blocking(move || {
+                install_for_signal.shutdown(Duration::from_secs(15))
+            });
+            let (install_result, operation) = tokio::join!(
+                install_shutdown,
+                tokio::time::timeout(Duration::from_secs(15), operations_for_signal.lock_owned())
+            );
+            let operation_guard = operation.ok();
+            let settled = matches!(install_result, Ok(true)) && operation_guard.is_some();
+            if !settled {
+                logf_for_signal("shutdown timeout: 未完成事务将在下次启动时恢复");
+                return false;
+            }
+
             kernel_for_signal.stop().await;
+            let kernel_stop_clean = kernel_for_signal.last_stop_clean();
+            let kernel_stopped = !kernel_for_signal.status_now().running;
+            match mark_clean_generation_if_ready(settled, kernel_stop_clean, kernel_stopped, || {
+                service::mark_shutdown_generation(
+                    &cfg_for_signal,
+                    shutdown_pid,
+                    shutdown_starttime,
+                    true,
+                )
+                .map_err(|error| error.to_string())
+            }) {
+                Ok(true) => true,
+                Ok(false) => {
+                    if !kernel_stop_clean {
+                        logf_for_signal(
+                            "shutdown failed: kernel stop did not verify every target process exit",
+                        );
+                    } else if !kernel_stopped {
+                        logf_for_signal("shutdown failed: kernel is still running");
+                    } else {
+                        logf_for_signal(
+                            "shutdown failed: transactions or operations did not settle",
+                        );
+                    }
+                    false
+                }
+                Err(error) => {
+                    logf_for_signal(&format!("write clean shutdown generation failed: {error}"));
+                    if let Err(restore_error) = service::mark_shutdown_generation(
+                        &cfg_for_signal,
+                        shutdown_pid,
+                        shutdown_starttime,
+                        false,
+                    ) {
+                        logf_for_signal(&format!(
+                            "restore running shutdown generation failed: {restore_error}"
+                        ));
+                    }
+                    false
+                }
+            }
         });
-        std::process::exit(0);
+        std::process::exit(if clean { 0 } else { 1 });
     });
 
     // 主线程驻留(平台只关心进程活着)
     loop {
         std::thread::sleep(Duration::from_secs(3600));
     }
+}
+
+fn mark_clean_generation_if_ready(
+    transactions_settled: bool,
+    kernel_stop_clean: bool,
+    kernel_stopped: bool,
+    mark_clean: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if !transactions_settled || !kernel_stop_clean || !kernel_stopped {
+        return Ok(false);
+    }
+    mark_clean()?;
+    Ok(true)
 }
 
 /// 单代日志轮转:path 超过 max 字节时改名为 path.1(覆盖旧 .1)
@@ -376,41 +566,344 @@ fn rotate_if_large(path: &str, max: u64) {
 fn random_token() -> Result<String, String> {
     use std::io::Read;
     let mut buf = vec![0u8; 32];
-    let mut f = std::fs::File::open("/dev/urandom").map_err(|e| format!("open /dev/urandom: {e}"))?;
+    let mut f =
+        std::fs::File::open("/dev/urandom").map_err(|e| format!("open /dev/urandom: {e}"))?;
     f.read_exact(&mut buf)
         .map_err(|e| format!("read /dev/urandom: {e}"))?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// 上一次监督者运行遗留的孤儿 pip 清理:install.pid → /proc cmdline 身份核对
-/// (须含 venv pip 特征,防 PID 复用误杀)→ 进程组 TERM → 宽限 → KILL。
-fn cleanup_orphan_install(var_dir: &str) {
-    let pid_file = std::path::Path::new(var_dir).join("install.pid");
-    let pid: i32 = match std::fs::read_to_string(&pid_file) {
-        Ok(s) => match s.trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                let _ = std::fs::remove_file(&pid_file);
-                return;
-            }
-        },
-        Err(_) => return,
-    };
-    let _ = std::fs::remove_file(&pid_file);
-    if pid <= 1 || !crate::procfs::process_alive(pid) {
-        return;
+const ORPHAN_INSTALL_TERM_GRACE: Duration = Duration::from_secs(2);
+const ORPHAN_INSTALL_KILL_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InstallProcessRecord {
+    pid: i32,
+    starttime: u64,
+    pgid: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OrphanProcessStat {
+    state: char,
+    starttime: u64,
+    pgid: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrphanLeader {
+    Match,
+    Inactive,
+}
+
+fn parse_install_record(contents: &str) -> Result<InstallProcessRecord, String> {
+    let mut fields: Vec<_> = contents.split('\n').collect();
+    if fields.last() == Some(&"") {
+        fields.pop();
     }
-    // 身份核对:cmdline 必须包含 pip 特征,避免陈旧 PID 文件指向无关进程
-    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    if !cmdline.contains("pip") {
-        return;
+    if fields.len() != 3 {
+        return Err("install.pid must contain exactly PID, starttime, and PGID".into());
     }
-    unsafe { libc::kill(-pid, libc::SIGTERM) };
-    for _ in 0..5 {
-        if !crate::procfs::process_alive(pid) {
-            return;
+    let valid_decimal =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    for (value, label) in fields.iter().zip(["PID", "starttime", "PGID"]) {
+        if !valid_decimal(value) {
+            return Err(format!("install.pid contains an invalid {label}"));
         }
-        std::thread::sleep(Duration::from_millis(300));
     }
-    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    let record = InstallProcessRecord {
+        pid: fields[0]
+            .parse()
+            .map_err(|_| "install.pid contains an invalid PID".to_string())?,
+        starttime: fields[1]
+            .parse()
+            .map_err(|_| "install.pid contains an invalid starttime".to_string())?,
+        pgid: fields[2]
+            .parse()
+            .map_err(|_| "install.pid contains an invalid PGID".to_string())?,
+    };
+    if record.pid <= 1 || record.starttime == 0 || record.pgid <= 1 || record.pgid != record.pid {
+        return Err("install.pid contains an invalid process identity".into());
+    }
+    Ok(record)
+}
+
+fn parse_orphan_stat(stat: &str) -> Option<OrphanProcessStat> {
+    let end = stat.rfind(')')?;
+    let fields: Vec<_> = stat.get(end + 2..)?.split_whitespace().collect();
+    Some(OrphanProcessStat {
+        state: fields.first()?.chars().next()?,
+        pgid: fields.get(2)?.parse().ok()?,
+        starttime: fields.get(19)?.parse().ok()?,
+    })
+}
+
+fn install_argv_matches(cmdline: &[u8]) -> bool {
+    cmdline
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|args| args[0] == b"-m" && matches!(args[1], b"pip" | b"venv"))
+}
+
+fn inspect_orphan_leader(record: InstallProcessRecord) -> Result<Option<OrphanLeader>, String> {
+    let stat_path = format!("/proc/{}/stat", record.pid);
+    let stat = match std::fs::read_to_string(&stat_path) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", stat_path)),
+    };
+    let actual = parse_orphan_stat(&stat)
+        .ok_or_else(|| format!("{} has malformed process stat", stat_path))?;
+    if actual.starttime != record.starttime || actual.pgid != record.pgid {
+        return Err(format!(
+            "install.pid identity mismatch for PID {} (starttime/PGID changed); refusing to signal",
+            record.pid
+        ));
+    }
+    if !matches!(actual.state, 'R' | 'S' | 'D' | 'T' | 't') {
+        return Ok(Some(OrphanLeader::Inactive));
+    }
+    let cmdline_path = format!("/proc/{}/cmdline", record.pid);
+    let cmdline =
+        std::fs::read(&cmdline_path).map_err(|error| format!("read {}: {error}", cmdline_path))?;
+    if !install_argv_matches(&cmdline) {
+        return Err(format!(
+            "install.pid PID {} is not running an exact '-m pip' or '-m venv' argv; refusing to signal",
+            record.pid
+        ));
+    }
+    Ok(Some(OrphanLeader::Match))
+}
+
+fn process_group_has_members(pgid: i32) -> Result<bool, String> {
+    let entries = std::fs::read_dir("/proc").map_err(|error| format!("scan /proc: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("scan /proc entry: {error}"))?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if pid <= 0 {
+            continue;
+        }
+        let path = format!("/proc/{pid}/stat");
+        let stat = match std::fs::read_to_string(&path) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("read {path}: {error}")),
+        };
+        let actual =
+            parse_orphan_stat(&stat).ok_or_else(|| format!("{path} has malformed process stat"))?;
+        if actual.pgid == pgid {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn wait_for_install_group_empty(pgid: i32, timeout: Duration) -> Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_group_has_members(pgid)? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn signal_install_group(pgid: i32, signal: i32) -> Result<(), String> {
+    if unsafe { libc::kill(-pgid, signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(format!(
+            "signal {signal} to verified install PGID {pgid}: {error}"
+        ))
+    }
+}
+
+fn remove_install_record_if_unchanged(
+    path: &std::path::Path,
+    original: &str,
+) -> Result<(), String> {
+    match std::fs::read_to_string(path) {
+        Ok(current) if current == original => {}
+        Ok(_) => {
+            return Err("install.pid changed during orphan cleanup; preserving registration".into())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("re-read {}: {error}", path.display())),
+    }
+    std::fs::remove_file(path).map_err(|error| format!("remove {}: {error}", path.display()))
+}
+
+/// Reclaim an orphaned installer only after validating its three-field identity,
+/// process group, and exact Python module argv. Ambiguous registrations fail closed.
+fn cleanup_orphan_install(var_dir: &str) -> Result<(), String> {
+    let pid_file = std::path::Path::new(var_dir).join("install.pid");
+    let original = match std::fs::read_to_string(&pid_file) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read {}: {error}", pid_file.display())),
+    };
+    let record = parse_install_record(&original)
+        .map_err(|error| format!("{}: {error}; preserving registration", pid_file.display()))?;
+
+    match inspect_orphan_leader(record)? {
+        Some(OrphanLeader::Match) => {
+            if !matches!(inspect_orphan_leader(record)?, Some(OrphanLeader::Match)) {
+                return Err(format!(
+                    "install leader {} changed before TERM; preserving registration",
+                    record.pid
+                ));
+            }
+            signal_install_group(record.pgid, libc::SIGTERM)?;
+            if wait_for_install_group_empty(record.pgid, ORPHAN_INSTALL_TERM_GRACE)? {
+                return remove_install_record_if_unchanged(&pid_file, &original);
+            }
+            match inspect_orphan_leader(record)? {
+                Some(OrphanLeader::Match | OrphanLeader::Inactive) => {}
+                None => {
+                    return if process_group_has_members(record.pgid)? {
+                        Err(format!(
+                            "install leader {} disappeared while PGID {} still has members; refusing to signal and preserving registration",
+                            record.pid, record.pgid
+                        ))
+                    } else {
+                        remove_install_record_if_unchanged(&pid_file, &original)
+                    }
+                }
+            }
+            if !process_group_has_members(record.pgid)? {
+                return remove_install_record_if_unchanged(&pid_file, &original);
+            }
+            signal_install_group(record.pgid, libc::SIGKILL)?;
+            if wait_for_install_group_empty(record.pgid, ORPHAN_INSTALL_KILL_GRACE)? {
+                remove_install_record_if_unchanged(&pid_file, &original)
+            } else {
+                Err(format!(
+                    "install process group {} survived TERM and KILL; preserving registration",
+                    record.pgid
+                ))
+            }
+        }
+        Some(OrphanLeader::Inactive) | None => {
+            if wait_for_install_group_empty(record.pgid, ORPHAN_INSTALL_TERM_GRACE)? {
+                remove_install_record_if_unchanged(&pid_file, &original)
+            } else {
+                Err(format!(
+                    "install leader {} is gone or inactive while PGID {} still has members; refusing to signal and preserving registration",
+                    record.pid, record.pgid
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod orphan_install_tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_the_three_field_install_registration() {
+        assert_eq!(
+            parse_install_record("42\n1234\n42\n").unwrap(),
+            InstallProcessRecord {
+                pid: 42,
+                starttime: 1234,
+                pgid: 42,
+            }
+        );
+        for invalid in [
+            "42\n1234\n",
+            "42\n1234\n43\n",
+            "42\n1234\n42\nextra\n",
+            "0\n1234\n0\n",
+            "42\n0\n42\n",
+            "+42\n1234\n42\n",
+            "42 \n1234\n42\n",
+        ] {
+            assert!(
+                parse_install_record(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_argv_requires_exact_adjacent_python_module_arguments() {
+        assert!(install_argv_matches(
+            b"python3\0-m\0pip\0install\0qwenpaw\0"
+        ));
+        assert!(install_argv_matches(b"python3\0-m\0venv\0/tmp/venv\0"));
+        assert!(!install_argv_matches(b"python3\0not-m\0pip\0"));
+        assert!(!install_argv_matches(b"python3\0-m\0pipx\0"));
+        assert!(!install_argv_matches(b"python3\0pip\0-m\0"));
+        assert!(!install_argv_matches(b"pip install qwenpaw\0"));
+    }
+
+    #[test]
+    fn mismatched_live_process_keeps_registration_and_is_not_signalled() {
+        let root =
+            std::env::temp_dir().join(format!("qwenpaw-orphan-install-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid = std::process::id() as i32;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let parsed = parse_orphan_stat(&stat).unwrap();
+        let record = format!("{pid}\n{}\n{}\n", parsed.starttime, parsed.pgid);
+        let path = root.join("install.pid");
+        std::fs::write(&path, &record).unwrap();
+
+        assert!(cleanup_orphan_install(root.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), record);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod shutdown_generation_tests {
+    use super::*;
+
+    #[test]
+    fn unverified_shutdown_never_invokes_clean_generation_writer() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "qwenpaw-clean-generation-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let generation = root.join("shutdown-generation.json");
+
+        for gates in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let path = generation.clone();
+            let recorded = mark_clean_generation_if_ready(gates.0, gates.1, gates.2, || {
+                std::fs::write(&path, "clean").map_err(|error| error.to_string())
+            })
+            .unwrap();
+            assert!(!recorded);
+            assert!(!generation.exists());
+        }
+
+        let path = generation.clone();
+        assert!(mark_clean_generation_if_ready(true, true, true, || {
+            std::fs::write(&path, "clean").map_err(|error| error.to_string())
+        })
+        .unwrap());
+        assert_eq!(std::fs::read_to_string(&generation).unwrap(), "clean");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

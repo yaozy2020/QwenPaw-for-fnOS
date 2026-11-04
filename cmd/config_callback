@@ -1,120 +1,16 @@
 #!/bin/bash
-# 飞牛运行设置修改回调脚本：端口落盘 → ui/config 同步 → 经统一入口重启
-# 不用 set -e（工程铁律：失败路径显式处理）；PID 统一 supervisor.pid
-# （旧 qwenpaw.pid 从未被当前 cmd/main 写入,按它停止等于没停,改端口从不生效）
 
-PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
-# 回退根必须与 cmd/lib.sh 一致,否则两个脚本对同一份 ui/config 指向不同路径
-APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw}"
-
-LOG_FILE="${PKGVAR}/qwenpaw-config.log"
-PORT_FILE="${PKGVAR}/service_port"
-
-log_msg() {
-    local msg="$(date '+%Y-%m-%d %H:%M:%S') - $1"
-    mkdir -p "${PKGVAR}" 2>/dev/null || true
-    echo "$msg" >> "${LOG_FILE}" 2>/dev/null || true
-    echo "$msg"
-    # 官方规范:严重错误同步写入 TRIM_TEMP_LOGFILE 供系统弹窗向用户呈现
-    if [[ "$1" == ERROR* ]]; then
-        [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "$1" >> "${TRIM_TEMP_LOGFILE}" 2>/dev/null || true
+APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"
+for candidate in \
+    "${APPDEST}/app/bin/qwenpaw-supervisor" \
+    "${APPDEST}/bin/qwenpaw-supervisor" \
+    "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" \
+    "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"
+do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" platform configure
     fi
-}
+done
 
-# 1. 严格使用飞牛标准注入的 wizard_port 变量
-NEW_PORT="${wizard_port:-}"
-
-if [ -n "${NEW_PORT}" ]; then
-    if ! echo "${NEW_PORT}" | grep -qE '^[0-9]+$' \
-        || [ "${NEW_PORT}" -lt 1024 ] || [ "${NEW_PORT}" -gt 65535 ] \
-        || [ "${NEW_PORT}" = "19090" ] || [ "${NEW_PORT}" = "19091" ]; then
-        log_msg "ERROR: 端口无效: ${NEW_PORT}(不可使用监督者保留端口 19090/19091)"
-        exit 1
-    fi
-    log_msg "检测到修改 Web 服务端口为: ${NEW_PORT}"
-
-    # 记录旧端口:服务重启失败时用于完整回滚(端口文件 + 桌面入口)
-    OLD_PORT=""
-    [ -f "${PORT_FILE}" ] && OLD_PORT="$(head -n 1 "${PORT_FILE}" 2>/dev/null | tr -d '[:space:]')"
-
-    # service_port 原子写(与日志级别/版本钉同纪律;监督者启动时一次性读)
-    if printf '%s\n' "${NEW_PORT}" > "${PORT_FILE}.tmp" 2>/dev/null && \
-       mv "${PORT_FILE}.tmp" "${PORT_FILE}" 2>/dev/null; then
-        :
-    else
-        log_msg "ERROR: 端口写入 ${PORT_FILE} 失败(权限?),保持原端口"
-        exit 1
-    fi
-
-    # 核心：动态同步改写飞牛系统的 ui/config，彻底解决常规卡片端口不一致问题！
-    for ui_cfg in "${APPDEST}/ui/config" "${APPDEST}/target/ui/config"; do
-        if [ -w "${ui_cfg}" ]; then
-            if ! sed -i 's/"port": *"[^"]*"/"port": "'"${NEW_PORT}"'"/g' "${ui_cfg}" 2>/dev/null; then
-                log_msg "ERROR: 桌面入口端口同步失败: ${ui_cfg}"
-                exit 1
-            fi
-            log_msg "已同步更新 ${ui_cfg} 端口为 ${NEW_PORT}"
-        fi
-    done
-fi
-
-# 2. 日志级别落盘:向导 wizard_log_level → {PKGVAR}/qwenpaw-log-level →
-#    监督者启动内核时读取并经 --log-level argv 下发（此前该值只 export 进
-#    脚本环境,监督者 spawn 的内核从不读取,任何选择都被静默忽略 —— 审查 F1）
-NEW_LOG_LEVEL="${wizard_log_level:-}"
-case "${NEW_LOG_LEVEL}" in
-    critical|error|warning|info|debug|trace)
-        LOG_LEVEL_FILE="${PKGVAR}/qwenpaw-log-level"
-        log_msg "检测到修改日志级别为: ${NEW_LOG_LEVEL}"
-        if printf '%s\n' "${NEW_LOG_LEVEL}" > "${LOG_LEVEL_FILE}.tmp" 2>/dev/null && \
-           mv "${LOG_LEVEL_FILE}.tmp" "${LOG_LEVEL_FILE}" 2>/dev/null; then
-            chmod 640 "${LOG_LEVEL_FILE}" 2>/dev/null || true
-        else
-            log_msg "ERROR: 日志级别写入 ${LOG_LEVEL_FILE} 失败(权限?),保持原值"
-            exit 1
-        fi
-        ;;
-    "")
-        log_msg "未提供 wizard_log_level,保持现有日志级别"
-        ;;
-    *)
-        log_msg "WARN: 日志级别 '${NEW_LOG_LEVEL}' 不在白名单,忽略"
-        ;;
-esac
-
-# 3. 经统一入口重启（cmd/main stop 级联停内核;start 拉起监督者,监督者按
-#    service_port 文件自拉内核 —— 停止失败也继续尝试 start,以 status 为准）
-MAIN_SCRIPT="${APPDEST}/cmd/main"
-[ ! -f "${MAIN_SCRIPT}" ] && MAIN_SCRIPT="/var/apps/qwenpaw/cmd/main"
-
-if [ -x "${MAIN_SCRIPT}" ]; then
-    log_msg "正在应用新配置并重启 QwenPaw 服务..."
-    # 经 main restart 走单一锁持有方的原子 stop→start 序列。
-    # 此前在本脚本持 flock 再调 main,子进程重开同锁文件形成 OFD 级
-    # 自锁,每次配置保存必挂死(审查 P0-1,实验 exit=124)。
-    if bash "${MAIN_SCRIPT}" restart >> "${LOG_FILE}" 2>&1; then
-        log_msg "QwenPaw 服务已使用端口 ${NEW_PORT:-原端口} 重新拉起"
-    else
-        # 新端口起不来:完整回滚端口文件与桌面入口,再按原端口恢复服务
-        log_msg "ERROR: 服务以新端口 ${NEW_PORT:-?} 重启失败,回滚端口配置"
-        if [ -n "${OLD_PORT}" ] && printf '%s' "${OLD_PORT}" | grep -qE '^[0-9]+$'; then
-            printf '%s\n' "${OLD_PORT}" > "${PORT_FILE}.tmp" 2>/dev/null && \
-                mv "${PORT_FILE}.tmp" "${PORT_FILE}" 2>/dev/null || true
-            for ui_cfg in "${APPDEST}/ui/config" "${APPDEST}/target/ui/config"; do
-                [ -w "${ui_cfg}" ] && sed -i 's/"port": *"[^"]*"/"port": "'"${OLD_PORT}"'"/g' "${ui_cfg}" 2>/dev/null || true
-            done
-            if bash "${MAIN_SCRIPT}" start >> "${LOG_FILE}" 2>&1; then
-                log_msg "已回滚至原端口 ${OLD_PORT} 并恢复服务"
-            else
-                log_msg "ERROR: 原端口 ${OLD_PORT:-?} 恢复启动也失败,请手动检查 supervisor.log"
-            fi
-        else
-            log_msg "无旧端口可回滚,请查看 supervisor.log 并手动启动"
-        fi
-        exit 1
-    fi
-else
-    log_msg "WARN: 未找到统一入口 ${MAIN_SCRIPT},仅落盘配置,重启将由平台完成"
-fi
-
-exit 0
+printf '%s\n' "supervisor binary not found" >&2
+exit 1

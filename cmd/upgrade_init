@@ -1,24 +1,16 @@
 #!/bin/bash
-# 飞牛升级设置初始化：回显当前生效的 PyPI 安装源配置
-PKGVAR="${TRIM_PKGVAR:-/var/apps/qwenpaw/var}"
-MIRROR_FILE="${PKGVAR}/pip-mirror"
 
-current_mirror="aliyun"
-if [ -f "${MIRROR_FILE}" ]; then
-    m=$(head -n 1 "${MIRROR_FILE}" | tr -d '[:space:]')
-    case "$m" in
-        *tsinghua*) current_mirror="tsinghua" ;;
-        *aliyun*)   current_mirror="aliyun" ;;
-        *ustc*)     current_mirror="ustc" ;;
-        # lib.sh 的 map_mirror_url 会把 official 落盘成 pypi.org 地址,
-        # 缺这一支会让用户选了官方源后回显成默认的 aliyun
-        *pypi.org*) current_mirror="official" ;;
-        "")         current_mirror="official" ;;
-        # 自定义 URL(set_mirror 白名单 https 值):原样回显。消费链以落盘
-        # 文件为权威,这里只求显示不撒谎 —— 回显 aliyun 会误导用户。
-        *)          current_mirror="$m" ;;
-    esac
-fi
+APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"
+for candidate in \
+    "${APPDEST}/app/bin/qwenpaw-supervisor" \
+    "${APPDEST}/bin/qwenpaw-supervisor" \
+    "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" \
+    "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"
+do
+    if [ -x "$candidate" ]; then
+        exec "$candidate" platform upgrade-init
+    fi
+done
 
-echo "wizard_pypi_mirror=${current_mirror}"
-exit 0
+printf '%s\n' "supervisor binary not found" >&2
+exit 1

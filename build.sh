@@ -121,10 +121,6 @@ for f in main install_init install_callback upgrade_init upgrade_callback uninst
   cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f"
   chmod 0755 "$STAGE/cmd/$f"
 done
-for f in lib.sh supervisor_ctl.sh; do
-  cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f"
-  chmod 0644 "$STAGE/cmd/$f"
-done
 
 # config 目录白名单精准物化 (mode 0644)
 mkdir -p "$STAGE/config"

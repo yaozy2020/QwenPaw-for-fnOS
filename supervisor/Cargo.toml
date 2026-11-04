@@ -1,6 +1,6 @@
 [package]
 name = "qwenpaw-supervisor"
-version = "2.1.0-rc.3"
+version = "1.1.1-rc.1"
 edition = "2021"
 
 [dependencies]
@@ -10,6 +10,9 @@ axum = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+scraper = { version = "0.22.0", default-features = false }
+percent-encoding = "2.3.2"
 
 [profile.release]
 strip = true

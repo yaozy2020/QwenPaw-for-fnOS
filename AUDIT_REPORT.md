@@ -3,9 +3,9 @@
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
 > 数据源：manifest / cmd / wizard / app / .github / git tags。
 
-## 当前版本：v2.1.0-9
+## 当前版本：v1.1.1-1
 
-- **生成时间**：2026-11-03 10:15:42 +0800
+- **生成时间**：2026-11-04 12:22:08 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -16,7 +16,7 @@
 
 | 项目 | 数据 |
 |:-----|:-----|
-| 生命周期脚本 | 11 个 |
+| 生命周期脚本 | 9 个 |
 | 向导清单 | 4 个 |
 | 上游 Python 文件 | 0 个，0 行 |
 | 上游 Plugins | 0 个 .py |
@@ -30,9 +30,7 @@
 | `cmd/config_init` | 配置初始化 |
 | `cmd/install_callback` | 安装完成回调 |
 | `cmd/install_init` | 安装前环境检查 |
-| `cmd/lib.sh` | 公共函数库(路径/环境/日志/镜像与版本钉) |
 | `cmd/main` | 应用启动 / stop / status 入口 |
-| `cmd/supervisor_ctl.sh` | 监督者进程控制(pid+starttime 身份核对) |
 | `cmd/uninstall_callback` | 卸载完成回调 |
 | `cmd/uninstall_init` | 卸载前清理 |
 | `cmd/upgrade_callback` | 升级完成回调 |
@@ -58,11 +56,11 @@
 
 | 版本 | 发布日期 |
 |:-----|:----:|
+| `v2.1.0-rc.3` | 2026-11-03 |
 | `v2.1.0-rc.2` | 2026-11-03 |
 | `v2.1.0-rc.1` | 2026-11-02 |
 | `v2.0.1` | 2026-11-02 |
 | `v2.0.0-rc.1` | 2026-11-02 |
-| `v1.0.7` | 2026-10-31 |
 
 ---
 

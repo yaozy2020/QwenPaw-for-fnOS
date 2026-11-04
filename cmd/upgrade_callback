@@ -1,117 +1,22 @@
-#!/bin/bash
-# 飞牛应用覆盖升级回调：仅修复外壳与权限，不改变内核版本（版本双轨制）
-# - venv 已存在：内核保持原版本不动，本体升级只走控制台"版本管理"显式操作
-# - venv 缺失重建：按 ${VAR_DIR}/qwenpaw-version 版本钉恢复；无钉时按向导渠道安装
-# 注意：不用 set -e（工程铁律），失败路径显式 exit 1
-
-PYTHON_BIN="${QWENPAW_PYTHON_BIN:-/var/apps/python312/target/bin/python3}"
-
-# 公共环境与工具函数（路径/运行环境变量/log_msg/内核检测），HOME 为安装态语义
-. "$(dirname "$0")/lib.sh"
-LIB_LOG_FILE="${VAR_DIR}/qwenpaw-upgrade.log"
-PIN_FILE="${VAR_DIR}/qwenpaw-version"
-export HOME="${WORKING_DIR}"
-
-log_msg "开始升级 QwenPaw 外壳（Launcher 模式，不改变内核版本）..."
-
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
-chmod 755 "${ETC_DIR}" 2>/dev/null || true
-# VAR_DIR 收敛为最小权限(目录 750/文件 640/Token 600),不再递归 755
-secure_var_perms
-
-# 停止旧监督者(统一 supervisor.pid 口径;监督者 TERM 会级联停内核并回收 pip)
-stop_supervisor
-
-# 目录存在不等于内核可用:python 可能被删、元数据可能残缺。
-# 只看 [ -d ] 会让"pip 失败 → 平台重试 → 目录已存在 → 跳过修复 → 报成功"，
-# 而回调本身要求可重入自愈，这条路径恰恰最需要自愈。
-if ! kernel_installed; then
-    if [ -d "${VENV_DIR}" ]; then
-        log_msg "venv 存在但内核不可用(缺 python 或元数据)，重建 ${VENV_DIR}..."
-        rm -rf "${VENV_DIR}"
-    else
-        log_msg "venv 缺失，重建虚拟环境 ${VENV_DIR}..."
-    fi
-    if ! "${PYTHON_BIN}" -m venv "${VENV_DIR}"; then
-        log_msg "ERROR: 虚拟环境创建失败: ${VENV_DIR}"
-        notify_user "QwenPaw 虚拟环境创建失败，请检查 Python 运行环境与磁盘权限。"
-        exit 1
-    fi
-    chmod -R 750 "${VENV_DIR}" 2>/dev/null || true  # 仅属主访问(审查 S3)
-    if ! source "${VENV_DIR}/bin/activate"; then
-        log_msg "ERROR: 虚拟环境激活失败: ${VENV_DIR}"
-        notify_user "QwenPaw 虚拟环境激活失败，请检查运行环境完整性。"
-        exit 1
-    fi
-
-    # 镜像消费顺序:落盘 pip-mirror(权威)> 向导值 > 默认。venv 重建是被动
-    # 修复路径,不该因为一次重试就静默改写用户的镜像配置(force=0)。
-    MIRROR_URL="$(resolve_pip_mirror_url "${wizard_pypi_mirror:-aliyun}")"
-    PIP_OPTS=""
-    [ -n "${MIRROR_URL}" ] && PIP_OPTS="-i ${MIRROR_URL}"
-    sync_pip_mirror "${wizard_pypi_mirror:-aliyun}" 0
-
-    # 按版本钉恢复内核；无钉时按向导渠道（stable/beta）。
-    if VERSION_PIN="$(read_valid_version_pin "${PIN_FILE}")"; then
-        TARGET_PKG="qwenpaw==${VERSION_PIN}"
-        log_msg "按版本钉恢复内核: ${TARGET_PKG}"
-    else
-        # 版本钉缺失/非法时无法知道"用户当时的内核版本"。按最新安装会违背
-        # "外壳升级不改变内核"的承诺(云端复现) —— 明确失败,让用户走控制台
-        # 「版本更新」显式选择版本。
-        log_msg "ERROR: 版本钉缺失或非法(${PIN_FILE}),拒绝盲目安装最新内核"
-        notify_user "无法确定原内核版本(版本钉缺失)。请在控制台「版本更新」中显式选择版本安装。"
-        exit 1
-    fi
-
-    PIP_LOG=$(mktemp)
-    # 同 install_callback:信号/超时退出时兜底清理临时文件
-    trap '[ -n "${PIP_LOG:-}" ] && rm -f "$PIP_LOG"' EXIT
-    if ! python3 -m pip install ${TARGET_PKG} $PIP_OPTS > "${PIP_LOG}" 2>&1; then
-        cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
-        ERROR_MSG=$(tail -n 1 "${PIP_LOG}")
-        rm -f "${PIP_LOG}"
-        log_msg "ERROR: pip 安装失败: ${ERROR_MSG}"
-        notify_user "QwenPaw 运行环境恢复失败: ${ERROR_MSG}"
-        exit 1
-    fi
-    cat "${PIP_LOG}" >> "${LIB_LOG_FILE}"
-    rm -f "${PIP_LOG}"
-else
-    log_msg "venv 已存在，内核版本保持不变（升级内核请在控制台「版本管理」中显式操作）"
+#!/bin/sh
+candidate=""
+if [ -n "${TRIM_APPDEST:-}" ]; then
+    for candidate_path in "$TRIM_APPDEST/app/bin/qwenpaw-supervisor" "$TRIM_APPDEST/bin/qwenpaw-supervisor"; do
+        if [ -x "$candidate_path" ]; then
+            candidate=$candidate_path
+            break
+        fi
+    done
 fi
-
-# 刷新版本钉：记录 venv 中当前实际内核版本(白名单校验 + 原子写入)
-CUR_VER="$("${VENV_DIR}/bin/python3" -c "import importlib.metadata as m; print(m.version('qwenpaw'))" 2>/dev/null || true)"
-if [ -n "${CUR_VER}" ] && valid_version_pin "${CUR_VER}"; then
-    if write_version_pin "${CUR_VER}"; then
-        log_msg "当前内核版本: ${CUR_VER}（版本钉已更新）"
-    else
-        log_msg "WARN: 版本钉写入失败: ${CUR_VER}"
-    fi
+if [ -z "$candidate" ]; then
+    for candidate_path in "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"; do
+        if [ -x "$candidate_path" ]; then
+            candidate=$candidate_path
+            break
+        fi
+    done
 fi
-
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${WORKING_DIR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${VAR_DIR}" 2>/dev/null || true
-chown -R "${TRIM_USERNAME}:${TRIM_GROUPNAME}" "${ETC_DIR}" 2>/dev/null || true
-chmod -R 750 "${WORKING_DIR}" 2>/dev/null || true  # 会话记忆仅属主可读,不对同机其他用户放行(审查 S3)
-secure_var_perms
-
-MAIN_SCRIPT="${TRIM_APPDEST}/cmd/main"
-[ ! -x "${MAIN_SCRIPT}" ] && MAIN_SCRIPT="/var/apps/qwenpaw/cmd/main"
-if [ -x "${MAIN_SCRIPT}" ]; then
-    log_msg "正在恢复 QwenPaw 监督者与内核服务..."
-    if ! bash "${MAIN_SCRIPT}" start; then
-        log_msg "ERROR: 升级后服务恢复失败"
-        notify_user "QwenPaw 外壳已升级，但服务恢复失败，请检查 supervisor.log。"
-        exit 1
-    fi
-else
-    log_msg "ERROR: 未找到服务启动入口: ${MAIN_SCRIPT}"
-    notify_user "QwenPaw 外壳已升级，但启动入口缺失，请在应用中心手动启动。"
-    exit 1
+if [ -z "$candidate" ]; then
+    exit 127
 fi
-
-log_msg "QwenPaw 外壳升级完成！"
-exit 0
+exec "$candidate" platform upgrade
