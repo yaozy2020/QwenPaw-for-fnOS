@@ -604,6 +604,12 @@ run_crash_test() (
     done
     if [ -z "$OWNED_SUP_START" ]; then
         printf '  [FAIL] %s: 无法核验新启动 supervisor 的进程身份\n' "$desc" >&2
+        if [ -e "/proc/$sup_pid/stat" ]; then
+            printf '  [DIAG] supervisor pid=%s expected-exe=%s actual-exe=%s expected-start=%s actual-start=%s home-match=%s\n' \
+                "$sup_pid" "$BIN_ID" "$(stat -Lc '%d:%i' -- "/proc/$sup_pid/exe" 2>/dev/null || printf unavailable)" \
+                "$OWNED_SUP_START" "$(proc_start_time "$sup_pid" 2>/dev/null || printf unavailable)" \
+                "$(if tr '\0' '\n' < "/proc/$sup_pid/environ" 2>/dev/null | grep -Fqx -- "TRIM_PKGHOME=$test_dir/home"; then printf yes; else printf no; fi)" >&2
+        fi
         exit 1
     fi
 
@@ -652,6 +658,9 @@ run_crash_test() (
     done
     if [ "$exited" -ne 1 ]; then
         printf '  [FAIL] %s: 30 秒内未到达 SIGKILL 注入点\n' "$desc" >&2
+        printf '  [DIAG] install response: %s\n' "$(cat "$install_response" 2>/dev/null || printf unavailable)" >&2
+        printf '  [DIAG] supervisor log tail:\n' >&2
+        tail -n 60 "$test_dir/supervisor.log" >&2 2>/dev/null || true
         if ! stop_owned_supervisor; then
             printf '  [FAIL] %s: 未能安全清理超时 supervisor\n' "$desc" >&2
         fi
