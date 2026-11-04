@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       # action 一律固定到提交 SHA(可变 tag 是供应链风险;SHA 与 tag 对应关系见注释)
@@ -92,7 +92,7 @@ jobs:
           test -x app/ui/api.cgi
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
       run:
