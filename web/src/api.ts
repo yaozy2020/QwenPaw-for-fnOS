@@ -77,15 +77,20 @@ export interface ApiClientOptions {
   cookie?: () => string;
   fetch?: FetchLike;
   now?: () => number;
+  readTimeoutMs?: number;
 }
 
 export type ServiceAction = "start" | "stop" | "restart";
 
+function isGatewayPathname(pathname: string): boolean {
+  return pathname === "/app/qwenpaw" || pathname.startsWith("/app/qwenpaw/");
+}
+
 export function deriveApiBase(pathname: string): string {
-  if (pathname.includes("index.cgi")) {
-    return pathname.substring(0, pathname.indexOf("index.cgi")) + "api.cgi";
+  if (!isGatewayPathname(pathname)) {
+    throw new Error("Gateway API requires the /app/qwenpaw console path");
   }
-  return "/cgi/ThirdParty/qwenpaw/api.cgi";
+  return "/app/qwenpaw/api";
 }
 
 function cookieValue(cookie: string, name: string): string | undefined {
@@ -110,10 +115,17 @@ function isJsonContentType(contentType: string): boolean {
   return mediaType === "application/json" || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
 }
 
+export interface ApiBeaconRequest {
+  url: string;
+  body?: Blob;
+}
+
 export interface ApiClient {
   readonly base: string;
   status(): Promise<ApiResult<StatusResponse>>;
   changePort(port: number): Promise<ApiResult<ApiMessageResponse>>;
+  webProxyPort(): Promise<ApiResult<{ port: number }>>;
+  changeWebProxyPort(port: number): Promise<ApiResult<ApiMessageResponse & { port: number }>>;
   resetAuth(): Promise<ApiResult<ApiMessageResponse>>;
   uninstallKernel(): Promise<ApiResult<ApiMessageResponse>>;
   controlService(action: ServiceAction): Promise<ApiResult<ApiMessageResponse>>;
@@ -122,7 +134,7 @@ export interface ApiClient {
   versionList(): Promise<ApiResult<VersionListResponse>>;
   upgradeStatus(): Promise<ApiResult<InstallStatusResponse>>;
   upgrade(version: string, mirror: string): Promise<ApiResult<InstallStatusResponse>>;
-  upgradeBeaconUrl(version: string, mirror: string): string;
+  upgradeBeaconRequest(version: string, mirror: string): ApiBeaconRequest;
   upgradeLogs(): Promise<ApiResult<LogsResponse>>;
   logs(lines: number): Promise<ApiResult<LogsResponse>>;
   clearLogs(): Promise<ApiResult<ApiMessageResponse>>;
@@ -133,70 +145,109 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
   const cookie = options.cookie || (() => typeof document === "undefined" ? "" : document.cookie);
   const fetcher = options.fetch || globalThis.fetch.bind(globalThis);
   const now = options.now || Date.now;
+  const configuredReadTimeout = options.readTimeoutMs;
+  const readTimeoutMs = typeof configuredReadTimeout === "number"
+    && Number.isFinite(configuredReadTimeout)
+    && configuredReadTimeout > 0
+    ? configuredReadTimeout
+    : 5_000;
 
   function csrfHeaders(): Record<string, string> {
     const token = readCsrfToken(cookie());
     return token ? { "X-CSRF-Token": token } : {};
   }
 
-  function upgradeQuery(version: string, mirror: string): string {
-    return `action=upgrade&version=${encodeURIComponent(version)}&mirror=${encodeURIComponent(mirror)}`;
-  }
+  async function request<T>(url: string, init?: RequestInit, timeoutMs?: number): Promise<ApiResult<T>> {
+    let controller: AbortController | undefined;
+    if (timeoutMs !== undefined && typeof globalThis.AbortController === "function") {
+      try {
+        controller = new globalThis.AbortController();
+      } catch {}
+    }
+    const requestInit = controller ? { ...init, signal: controller.signal } : init;
+    const operation = async (): Promise<ApiResult<T>> => {
+      let response: Response;
+      try {
+        response = await fetcher(url, requestInit);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new ApiClientError("network", `API network request failed: ${detail}`);
+      }
 
-  async function request<T>(query: string, init?: RequestInit): Promise<ApiResult<T>> {
-    let response: Response;
+      if (!isJsonContentType(response.headers.get("content-type") || "")) {
+        throw new ApiClientError("non-json", `API returned a non-JSON response (HTTP ${response.status})`, response.status);
+      }
+
+      let data: T;
+      try {
+        data = await response.json() as T;
+      } catch (error) {
+        const detail = error instanceof Error ? `: ${error.message}` : "";
+        throw new ApiClientError("json", `API returned invalid or truncated JSON (HTTP ${response.status})${detail}`, response.status);
+      }
+      return { status: response.status, ok: response.ok, data };
+    };
+
+    if (timeoutMs === undefined) return operation();
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        try { controller?.abort(); } catch {}
+        reject(new ApiClientError("network", `API request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
     try {
-      response = await fetcher(`${base}?${query}`, init);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new ApiClientError("network", `API network request failed: ${detail}`);
+      return await Promise.race([operation(), timedOut]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
     }
-
-    if (!isJsonContentType(response.headers.get("content-type") || "")) {
-      throw new ApiClientError("non-json", `API returned a non-JSON response (HTTP ${response.status})`, response.status);
-    }
-
-    let data: T;
-    try {
-      data = await response.json() as T;
-    } catch (error) {
-      const detail = error instanceof Error ? `: ${error.message}` : "";
-      throw new ApiClientError("json", `API returned invalid or truncated JSON (HTTP ${response.status})${detail}`, response.status);
-    }
-    return { status: response.status, ok: response.ok, data };
   }
 
-  function get<T>(action: string, params = ""): Promise<ApiResult<T>> {
-    return request<T>(`action=${action}${params}&_t=${now()}`);
+  function get<T>(route: string, routeParams = ""): Promise<ApiResult<T>> {
+    const query = routeParams ? `${routeParams}&_t=${now()}` : `_t=${now()}`;
+    return request<T>(`${base}/${route}?${query}`, undefined, readTimeoutMs);
   }
 
-  function postQuery<T>(query: string, init: RequestInit = {}): Promise<ApiResult<T>> {
-    const headers = new Headers(init.headers);
-    for (const [name, value] of Object.entries(csrfHeaders())) {
-      if (!headers.has(name)) headers.set(name, value);
+  function post<T>(route: string, body?: unknown, keepalive = false): Promise<ApiResult<T>> {
+    const headers = new Headers(csrfHeaders());
+    const init: RequestInit = { method: "POST", headers, keepalive };
+    if (body !== undefined) {
+      headers.set("Content-Type", "application/json");
+      init.body = JSON.stringify(body);
     }
-    return request<T>(query, { ...init, method: "POST", headers });
+    return request<T>(`${base}/${route}`, init);
   }
 
-  function post<T>(action: string, params = "", init: RequestInit = {}): Promise<ApiResult<T>> {
-    return postQuery<T>(`action=${action}${params}`, init);
+  function upgrade(version: string, mirror: string): Promise<ApiResult<InstallStatusResponse>> {
+    return post<InstallStatusResponse>("kernel/install", { version, mirror }, true);
+  }
+
+  function upgradeBeaconRequest(version: string, mirror: string): ApiBeaconRequest {
+    const csrf = encodeURIComponent(readCsrfToken(cookie()));
+    return {
+      url: `${base}/kernel/install?_csrf=${csrf}`,
+      body: new Blob([JSON.stringify({ version, mirror })], { type: "application/json" }),
+    };
   }
 
   return {
     base,
     status: () => get<StatusResponse>("status"),
-    changePort: (port) => post<ApiMessageResponse>("change_port", `&port=${port}`),
-    resetAuth: () => post<ApiMessageResponse>("reset_auth"),
-    uninstallKernel: () => post<ApiMessageResponse>("uninstall_kernel"),
+    changePort: (port) => post<ApiMessageResponse>("port", { port }),
+    webProxyPort: () => get<{ port: number }>("web-proxy/port"),
+    changeWebProxyPort: (port) => post<ApiMessageResponse & { port: number }>("web-proxy/port", { port }),
+    resetAuth: () => post<ApiMessageResponse>("kernel/reset-auth"),
+    uninstallKernel: () => post<ApiMessageResponse>("kernel/uninstall"),
     controlService: (action) => post<ApiMessageResponse>(action),
-    getMirror: () => get<MirrorResponse>("get_mirror"),
-    setMirror: (mirror) => post<ApiMessageResponse>("set_mirror", `&mirror=${encodeURIComponent(mirror)}`),
-    versionList: () => get<VersionListResponse>("version_list"),
-    upgradeStatus: () => get<InstallStatusResponse>("upgrade_status"),
-    upgrade: (version, mirror) => postQuery<InstallStatusResponse>(upgradeQuery(version, mirror), { keepalive: true }),
-    upgradeBeaconUrl: (version, mirror) => `${base}?${upgradeQuery(version, mirror)}&_csrf=${encodeURIComponent(readCsrfToken(cookie()))}`,
-    upgradeLogs: () => get<LogsResponse>("upgrade_logs"),
-    logs: (lines) => get<LogsResponse>("logs", `&lines=${lines}`),
-    clearLogs: () => post<ApiMessageResponse>("clear_logs"),
+    getMirror: () => get<MirrorResponse>("mirror"),
+    setMirror: (mirror) => post<ApiMessageResponse>("mirror", { mirror }),
+    versionList: () => get<VersionListResponse>("kernel/versions"),
+    upgradeStatus: () => get<InstallStatusResponse>("kernel/install-status"),
+    upgrade,
+    upgradeBeaconRequest,
+    upgradeLogs: () => get<LogsResponse>("kernel/install-log", "tail=40"),
+    logs: (lines) => get<LogsResponse>("logs", `tail=${lines}`),
+    clearLogs: () => post<ApiMessageResponse>("logs/clear"),
   };
 }

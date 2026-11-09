@@ -160,9 +160,9 @@ fn parse_mode(option: &str) -> (Mode, bool) {
 }
 
 fn build_plan(cfg: &Config, mode: Mode, share_paths: Option<&str>) -> Result<Plan, String> {
-    let home = validate_named_directory(Path::new(&cfg.home_dir), "home", "home")?;
-    let etc = validate_named_directory(Path::new(&cfg.etc_dir), "etc", "etc")?;
-    let var = validate_named_directory(Path::new(&cfg.var_dir), "var", "var")?;
+    let home = validate_package_directory(Path::new(&cfg.home_dir), "home", "@apphome")?;
+    let etc = validate_package_directory(Path::new(&cfg.etc_dir), "etc", "@appconf")?;
+    let var = validate_package_directory(Path::new(&cfg.var_dir), "var", "@appdata")?;
     ensure_disjoint(&[home.clone(), etc.clone(), var.clone()], "package roots")?;
 
     match mode {
@@ -287,6 +287,25 @@ fn validate_share_base(path: &Path) -> Result<PathBuf, String> {
     reject_symlink_components(&base)?;
     validate_directory_if_present(&base, "shared root")?;
     Ok(base)
+}
+
+fn validate_package_directory(
+    path: &Path,
+    legacy_name: &str,
+    platform_parent: &str,
+) -> Result<PathBuf, String> {
+    let path = validate_path(path, legacy_name)?;
+    let has_legacy_name = path.file_name() == Some(OsStr::new(legacy_name));
+    let has_platform_name = path.file_name() == Some(OsStr::new("qwenpaw"))
+        && path.parent().and_then(|parent| parent.file_name()) == Some(OsStr::new(platform_parent));
+    if !has_legacy_name && !has_platform_name {
+        return Err(format!(
+            "{legacy_name} must be named {legacy_name} or qwenpaw under {platform_parent}"
+        ));
+    }
+    reject_symlink_components(&path)?;
+    validate_directory_if_present(&path, legacy_name)?;
+    Ok(path)
 }
 
 fn validate_named_directory(
@@ -584,16 +603,19 @@ mod tests {
                 home_dir: home.to_string_lossy().into_owned(),
                 share_dir: share.join(".qwenpaw").to_string_lossy().into_owned(),
                 ui_config_file: String::new(),
+                supervisor_binary: package.join("target/bin/qwenpaw-supervisor"),
                 kernel_venv: home.join("venv").to_string_lossy().into_owned(),
                 kernel_pid_file: var.join("kernel.pid").to_string_lossy().into_owned(),
                 kernel_log: var.join("qwenpaw.log").to_string_lossy().into_owned(),
                 kernel_port: crate::api::test_support::free_port(),
+                web_proxy_port: None,
                 kernel_log_level: "info".into(),
                 token_file: var.join("supervisor-token").to_string_lossy().into_owned(),
                 supervisor_pid_file: var.join("supervisor.pid").to_string_lossy().into_owned(),
                 supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
                 listen_port: crate::api::test_support::free_port(),
                 auto_start: false,
+                gateway_socket: None,
             }
         }
 
@@ -683,6 +705,63 @@ mod tests {
             .with_file_name(".qwenpaw.secret")
             .join("auth.json")
             .exists());
+    }
+
+    #[test]
+    fn real_fn_os_package_roots_are_accepted_for_keep_and_remove() {
+        let root = TempTrimRoot::new();
+        let mut cfg = root.config();
+        let package = root.0.join("vol1");
+        let home = package.join("@apphome/qwenpaw");
+        let etc = package.join("@appconf/qwenpaw");
+        let var = package.join("@appdata/qwenpaw");
+        for path in [&home, &etc, &var] {
+            fs::create_dir_all(path).unwrap();
+        }
+        cfg.home_dir = home.to_string_lossy().into_owned();
+        cfg.etc_dir = etc.to_string_lossy().into_owned();
+        cfg.var_dir = var.to_string_lossy().into_owned();
+        cfg.kernel_venv = home.join("venv").to_string_lossy().into_owned();
+        cfg.kernel_pid_file = var.join("kernel.pid").to_string_lossy().into_owned();
+        cfg.kernel_log = var.join("qwenpaw.log").to_string_lossy().into_owned();
+        cfg.token_file = var.join("supervisor-token").to_string_lossy().into_owned();
+        cfg.supervisor_pid_file = var.join("supervisor.pid").to_string_lossy().into_owned();
+        cfg.supervisor_log = var.join("supervisor.log").to_string_lossy().into_owned();
+        root.populate(&cfg);
+        let share_paths = root.share_base().to_string_lossy().into_owned();
+
+        let keep = build_plan(&cfg, Mode::Keep, None);
+        assert!(
+            keep.is_ok(),
+            "real fnOS keep layout was rejected: {:?}",
+            keep.err()
+        );
+        let remove = build_plan(&cfg, Mode::Remove, Some(&share_paths));
+        assert!(
+            remove.is_ok(),
+            "real fnOS remove layout was rejected: {:?}",
+            remove.err()
+        );
+
+        let invalid_roots = [
+            ("home", package.join("@appdata/qwenpaw")),
+            ("etc", package.join("@appconf/not-qwenpaw")),
+            ("var", package.join("@wrong/qwenpaw")),
+        ];
+        for (field, path) in invalid_roots {
+            let mut invalid_cfg = cfg.clone();
+            match field {
+                "home" => invalid_cfg.home_dir = path.to_string_lossy().into_owned(),
+                "etc" => invalid_cfg.etc_dir = path.to_string_lossy().into_owned(),
+                "var" => invalid_cfg.var_dir = path.to_string_lossy().into_owned(),
+                _ => unreachable!(),
+            }
+            assert!(
+                build_plan(&invalid_cfg, Mode::Keep, None).is_err(),
+                "invalid {field} platform root was accepted: {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

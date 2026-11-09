@@ -46,7 +46,7 @@ SHARE_ROOT="$T/share"
 VENV="$PKGHOME/venv"
 PYTHON_BIN="$VENV/bin/python3"
 UI_CONFIG="$PKG/ui/config"
-SUP_BIN="$PKG/app/bin/qwenpaw-supervisor"
+SUP_BIN="$PKG/bin/qwenpaw-supervisor"
 CALLBACK="$PKG/cmd/config_callback"
 SOCKET="$VAR/supervisor-control.sock"
 TEMP_LOGFILE="$T/trim-temp.log"
@@ -211,13 +211,12 @@ wait_for_runtime() {
     return 1
 }
 
-assert_desktop_port() {
-    local expected_port="$1"
-    awk -v expected="\"port\": \"$expected_port\"" '
+assert_desktop_port_absent() {
+    awk '
         /"qwenpaw\.main"[[:space:]]*:/ { in_main = 1; next }
         /"qwenpaw\.console"[[:space:]]*:/ { in_main = 0 }
-        in_main && index($0, expected) { found = 1 }
-        END { exit !found }
+        in_main && index($0, "\"port\":") { found = 1 }
+        END { exit found ? 1 : 0 }
     ' "$UI_CONFIG"
 }
 
@@ -225,7 +224,21 @@ assert_desktop_sentinels() {
     grep -Fq '"root-sentinel": "preserve-root"' "$UI_CONFIG" \
         && grep -Fq '"entry-sentinel": "preserve-main"' "$UI_CONFIG" \
         && grep -Fq '"console-sentinel": "preserve-console"' "$UI_CONFIG" \
-        && grep -Fq '"type": "iframe"' "$UI_CONFIG"
+        && grep -Fq '"type": "iframe"' "$UI_CONFIG" \
+        && grep -Fq '"url": "/app/qwenpaw/"' "$UI_CONFIG" \
+        && grep -Fq '"gatewayPrefix": "/app/qwenpaw"' "$UI_CONFIG" \
+        && grep -Fq '"gatewaySocket": "app.sock"' "$UI_CONFIG" \
+        && grep -Fq '"allUsers": false' "$UI_CONFIG" \
+        && grep -Fq '"accessPerm": "editable"' "$UI_CONFIG" \
+        && awk '
+            index($0, "\"qwenpaw.main\":") { in_main = 1; next }
+            index($0, "\"qwenpaw.console\":") { in_main = 0 }
+            in_main && index($0, "\"url\": \"/app/qwenpaw/web/\"") { web = 1 }
+            in_main && index($0, "\"gatewayPrefix\": \"/app/qwenpaw\"") { prefix = 1 }
+            in_main && index($0, "\"gatewaySocket\": \"app.sock\"") { socket = 1 }
+            in_main && index($0, "\"noDisplay\": false") { visible = 1 }
+            END { exit !(web && prefix && socket && visible) }
+        ' "$UI_CONFIG"
 }
 
 run_env() { env "${BASE_ENV[@]}" "$@"; }
@@ -336,7 +349,7 @@ trap cleanup_fixture EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if ! mkdir -p "$PKG/app/bin" "$PKG/cmd" "$PKG/ui" "$VAR" "$VENV/bin" "$PKGETC" "$SHARE_ROOT" "$DENY_BIN"; then
+if ! mkdir -p "$PKG/bin" "$PKG/cmd" "$PKG/ui" "$VAR" "$VENV/bin" "$PKGETC" "$SHARE_ROOT" "$DENY_BIN"; then
     bad '无法建立临时 TRIM 目录'
     exit 1
 fi
@@ -385,12 +398,19 @@ cat > "$UI_CONFIG" <<EOF
     "qwenpaw.main": {
       "title": "QwenPaw",
       "port": "$INITIAL_PORT",
-      "url": "/",
+      "url": "/app/qwenpaw/web/",
+      "gatewayPrefix": "/app/qwenpaw",
+      "gatewaySocket": "app.sock",
       "noDisplay": false,
       "entry-sentinel": "preserve-main"
     },
     "qwenpaw.console": {
       "type": "iframe",
+      "url": "/app/qwenpaw/",
+      "gatewayPrefix": "/app/qwenpaw",
+      "gatewaySocket": "app.sock",
+      "allUsers": false,
+      "control": { "accessPerm": "editable" },
       "port": "15666",
       "console-sentinel": "preserve-console"
     }
@@ -419,6 +439,7 @@ BASE_ENV=(
     "TRIM_SERVICE_PORT=$INITIAL_PORT"
     "SUPERVISOR_PORT=$SUP_PORT"
     "SUPERVISOR_AUTOSTART=0"
+    "QWENPAW_WEB_PROXY_PORT=off"
     "QWENPAW_PYTHON_BIN=$PYTHON_BIN"
     "QWENPAW_TEST_CONTROL=$T"
     "QWENPAW_FORBIDDEN_TOOLS=$FORBIDDEN_TOOLS"
@@ -564,7 +585,7 @@ if [ "$service_ready" -eq 1 ] && [ "$uds_ready" -eq 1 ]; then
     if [ "$rc" -eq 0 ] \
         && [ "$(<"$VAR/service_port")" = "$BATCH_PORT" ] \
         && [ "$(<"$VAR/qwenpaw-log-level")" = warning ] \
-        && assert_desktop_port "$BATCH_PORT" \
+        && assert_desktop_port_absent "$BATCH_PORT" \
         && assert_desktop_sentinels \
         && process_identity_matches "$SUP_PID" "$SUP_STARTTIME" "$SUP_EXE"; then
         ok '薄 config_callback 经真实 UDS 批量应用端口/日志，并同步桌面配置'
@@ -588,7 +609,7 @@ if [ "$service_ready" -eq 1 ] && [ "$uds_ready" -eq 1 ]; then
     if [ "$rc" -eq 0 ] \
         && [ "$(<"$VAR/service_port")" = "$PORT_ONLY_PORT" ] \
         && [ "$(<"$VAR/qwenpaw-log-level")" = warning ] \
-        && assert_desktop_port "$PORT_ONLY_PORT" \
+        && assert_desktop_port_absent "$PORT_ONLY_PORT" \
         && assert_desktop_sentinels \
         && process_identity_matches "$SUP_PID" "$SUP_STARTTIME" "$SUP_EXE"; then
         ok '薄 config_callback 单字段端口经真实 UDS 更新，未覆盖日志级别/桌面其他字段'
@@ -612,7 +633,7 @@ if [ "$service_ready" -eq 1 ] && [ "$uds_ready" -eq 1 ]; then
     if [ "$rc" -eq 0 ] \
         && [ "$(<"$VAR/service_port")" = "$PORT_ONLY_PORT" ] \
         && [ "$(<"$VAR/qwenpaw-log-level")" = debug ] \
-        && assert_desktop_port "$PORT_ONLY_PORT" \
+        && assert_desktop_port_absent "$PORT_ONLY_PORT" \
         && assert_desktop_sentinels \
         && process_identity_matches "$SUP_PID" "$SUP_STARTTIME" "$SUP_EXE"; then
         ok '薄 config_callback 单字段日志级别经真实 UDS 更新，端口与桌面其他字段保持'

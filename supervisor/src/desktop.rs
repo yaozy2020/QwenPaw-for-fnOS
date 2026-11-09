@@ -48,7 +48,7 @@ fn read_ui_config(path: &std::path::Path) -> std::io::Result<serde_json::Value> 
     serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-pub fn sync_main_entry(path: &std::path::Path, port: u16, installed: bool) -> std::io::Result<()> {
+pub fn sync_main_entry(path: &std::path::Path, installed: bool) -> std::io::Result<()> {
     let mut config = read_ui_config(path)?;
     let urls = config
         .get_mut(".url")
@@ -57,7 +57,12 @@ pub fn sync_main_entry(path: &std::path::Path, port: u16, installed: bool) -> st
     let entry_matches = urls
         .get("qwenpaw.main")
         .map(|entry| {
-            entry["port"].as_str() == Some(&port.to_string())
+            entry.get("port").is_none()
+                && entry["type"].as_str() == Some("iframe")
+                && entry["protocol"].as_str() == Some("")
+                && entry["url"].as_str() == Some("/app/qwenpaw/web/")
+                && entry["gatewayPrefix"].as_str() == Some("/app/qwenpaw")
+                && entry["gatewaySocket"].as_str() == Some("app.sock")
                 && entry["noDisplay"].as_bool() == Some(!installed)
         })
         .unwrap_or(false);
@@ -68,36 +73,23 @@ pub fn sync_main_entry(path: &std::path::Path, port: u16, installed: bool) -> st
         json!({
             "title": "QwenPaw",
             "icon": "images/icon_{0}.png",
-            "type": "url",
-            "protocol": "http",
-            "port": port.to_string(),
-            "url": "/",
             "allUsers": false,
             "control": {"accessPerm": "editable"}
         })
     });
-    // 存量配置可能把该键写成字符串/数组等非 object 值,
-    // 直接 entry["port"] 赋值会 panic(serde_json IndexMut 仅对 object 有效)
     if !entry.is_object() {
         *entry = serde_json::json!({});
     }
-    entry["port"] = serde_json::Value::String(port.to_string());
+    if let Some(object) = entry.as_object_mut() {
+        object.remove("port");
+    }
+    entry["type"] = serde_json::Value::String("iframe".into());
+    entry["protocol"] = serde_json::Value::String(String::new());
+    entry["url"] = serde_json::Value::String("/app/qwenpaw/web/".into());
+    entry["gatewayPrefix"] = serde_json::Value::String("/app/qwenpaw".into());
+    entry["gatewaySocket"] = serde_json::Value::String("app.sock".into());
     entry["noDisplay"] = serde_json::Value::Bool(!installed);
     write_ui_config(path, &config)
-}
-
-#[cfg(test)]
-fn sync_ui_port(path: &std::path::Path, port: u16) -> std::io::Result<()> {
-    let mut config = read_ui_config(path)?;
-    if let Some(entry) = config.pointer_mut("/.url/qwenpaw.main") {
-        // 同上:非 object 时赋值会 panic
-        if !entry.is_object() {
-            *entry = serde_json::json!({});
-        }
-        entry["port"] = serde_json::Value::String(port.to_string());
-        write_ui_config(path, &config)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -132,11 +124,12 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        sync_main_entry(&path, 18099, true).unwrap();
+        sync_main_entry(&path, true).unwrap();
 
         let config = read_ui_config(&path).unwrap();
         assert_eq!(config["custom"]["nested"], 42);
         assert_eq!(config[".url"]["qwenpaw.main"]["title"], "custom");
+        assert!(config[".url"]["qwenpaw.main"].get("port").is_none());
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o644
@@ -151,41 +144,63 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config");
         std::fs::write(&path, r#"{".url":{"qwenpaw.console":{"type":"iframe"}}}"#).unwrap();
-        sync_main_entry(&path, 18088, false).unwrap();
-        sync_main_entry(&path, 18088, true).unwrap();
+        sync_main_entry(&path, false).unwrap();
+        sync_main_entry(&path, true).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value[".url"]["qwenpaw.main"]["port"], "18088");
+        assert!(value[".url"]["qwenpaw.main"].get("port").is_none());
+        assert_eq!(value[".url"]["qwenpaw.main"]["type"], "iframe");
+        assert_eq!(value[".url"]["qwenpaw.main"]["url"], "/app/qwenpaw/web/");
+        assert_eq!(
+            value[".url"]["qwenpaw.main"]["gatewayPrefix"],
+            "/app/qwenpaw"
+        );
+        assert_eq!(value[".url"]["qwenpaw.main"]["gatewaySocket"], "app.sock");
         assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], false);
         assert_eq!(value[".url"]["qwenpaw.console"]["type"], "iframe");
-        sync_main_entry(&path, 18088, false).unwrap();
+        sync_main_entry(&path, false).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], true);
-        sync_ui_port(&path, 18099).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value[".url"]["qwenpaw.main"]["port"], "18099");
         assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ui_port_sync_updates_only_the_main_entry() {
-        let dir = std::env::temp_dir().join(format!("qwenpaw-ui-port-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config");
+    fn ui_main_entry_migration_never_reintroduces_a_direct_port() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = TestDir::new("ui-port-migration");
+        let path = dir.0.join("config");
         std::fs::write(
             &path,
-            r#"{".url":{"qwenpaw.console":{"type":"iframe"},"qwenpaw.main":{"type":"url","port":"18088"}}}"#,
+            r#"{".url":{"qwenpaw.console":{"type":"iframe"},"qwenpaw.main":{"type":"url","port":"18088","title":"custom"}}}"#,
         )
         .unwrap();
-        sync_ui_port(&path, 18099).unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value[".url"]["qwenpaw.main"]["port"], "18099");
+        sync_main_entry(&path, true).unwrap();
+        let migrated = std::fs::read(&path).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&migrated).unwrap();
+        assert!(value[".url"]["qwenpaw.main"].get("port").is_none());
+        assert_eq!(value[".url"]["qwenpaw.main"]["type"], "iframe");
+        assert_eq!(value[".url"]["qwenpaw.main"]["protocol"], "");
+        assert_eq!(value[".url"]["qwenpaw.main"]["url"], "/app/qwenpaw/web/");
+        assert_eq!(
+            value[".url"]["qwenpaw.main"]["gatewayPrefix"],
+            "/app/qwenpaw"
+        );
+        assert_eq!(value[".url"]["qwenpaw.main"]["gatewaySocket"], "app.sock");
+        assert_eq!(value[".url"]["qwenpaw.main"]["title"], "custom");
         assert_eq!(value[".url"]["qwenpaw.console"]["type"], "iframe");
-        assert!(!dir.join("config.tmp").exists());
-        let _ = std::fs::remove_dir_all(&dir);
+
+        sync_main_entry(&path, true).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), migrated);
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!((after.dev(), after.ino()), (metadata.dev(), metadata.ino()));
+
+        sync_main_entry(&path, false).unwrap();
+        let value = read_ui_config(&path).unwrap();
+        assert!(value[".url"]["qwenpaw.main"].get("port").is_none());
+        assert_eq!(value[".url"]["qwenpaw.main"]["noDisplay"], true);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
     }
 }

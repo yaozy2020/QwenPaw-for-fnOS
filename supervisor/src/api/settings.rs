@@ -130,11 +130,120 @@ struct PortReq {
     port: u16,
 }
 
+#[derive(serde::Deserialize)]
+struct MirrorReq {
+    mirror: String,
+}
+
+pub(super) async fn mirror_get(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    match crate::mirror::read(&state.var_dir) {
+        Ok(mirror) => Json(json!({"success": true, "mirror": mirror})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "success": false,
+                "mirror": "",
+                "message": format!("下载源读取失败: {error}")
+            })),
+        )
+            .into_response(),
+    }
+}
+
+pub(super) async fn mirror_set(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let body = match axum::body::to_bytes(req.into_body(), 4 * 1024).await {
+        Ok(body) => body,
+        Err(error) => return err_json(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let request = match serde_json::from_slice::<MirrorReq>(&body) {
+        Ok(request) => request,
+        Err(error) => return err_json(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    match state.core.set_mirror(&request.mirror) {
+        Ok(()) => Json(json!({"success": true, "message": "下载源已保存"})).into_response(),
+        Err(error) => management_error_response(error),
+    }
+}
+
 pub(super) async fn port(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
 ) -> axum::response::Response {
     settings_request(state, req, true).await
+}
+
+pub(super) async fn web_proxy_port_get(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let Some(manager) = state.web_proxy.clone() else {
+        return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
+    };
+    Json(json!({"success": true, "port": manager.port().await})).into_response()
+}
+
+pub(super) async fn web_proxy_port_set(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let _operation = match begin_operation(&state) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
+    let body = match axum::body::to_bytes(req.into_body(), 4 * 1024).await {
+        Ok(body) => body,
+        Err(error) => return err_json(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    let request = match serde_json::from_slice::<PortReq>(&body) {
+        Ok(request) if request.port == 0 || request.port >= 1024 => request,
+        Ok(_) => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                "端口需为 0（自动分配）或 1024-65535",
+            )
+        }
+        Err(error) => return err_json(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
+    if request.port != 0
+        && (request.port == state.kernel.port() || request.port == state.supervisor_port)
+    {
+        return err_json(StatusCode::BAD_REQUEST, "端口已被内核或管理器使用");
+    }
+    let Some(manager) = state.web_proxy.clone() else {
+        return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
+    };
+    match manager.reconfigure(request.port).await {
+        Ok(port) => {
+            let snap_state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                snap_state.events.publish(render_snapshot(&snap_state));
+            });
+            Json(json!({"success": true, "port": port, "message": "Web 反代端口已切换"}))
+                .into_response()
+        }
+        Err(error) => err_json(
+            StatusCode::CONFLICT,
+            &format!("无法绑定 Web 反代端口，已保留原端口: {error}"),
+        ),
+    }
 }
 
 pub(super) async fn settings(
@@ -203,6 +312,36 @@ async fn settings_request(
 mod tests {
     use super::*;
     use crate::api::test_support::{install_python, ChildGuard, KernelGuard, TestDir, TestServer};
+
+    #[tokio::test]
+    async fn mirror_handlers_reject_missing_tokens_without_touching_the_mirror() {
+        let dir = TestDir::new("mirror-token");
+        let state = dir.state(crate::api::test_support::free_port());
+        let path = std::path::Path::new(&state.var_dir).join("pip-mirror");
+        let original = b"https://existing.example/simple\n";
+        std::fs::write(&path, original).unwrap();
+
+        let get = Request::builder()
+            .method("GET")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            mirror_get(State(state.clone()), get).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let post = Request::builder()
+            .method("POST")
+            .body(axum::body::Body::from(
+                r#"{"mirror":"https://attacker.example/simple"}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            mirror_set(State(state), post).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(std::fs::read(path).unwrap(), original);
+    }
 
     #[tokio::test]
     async fn settings_handler_publishes_snapshots_after_success_and_rollback() {

@@ -126,7 +126,7 @@ pub async fn apply(core: &ManagementCore, patch: SettingsPatch) -> ApplyOutcome 
         }
         let ui = core.ui_config_file.clone();
         tokio::task::spawn_blocking(move || {
-            crate::desktop::sync_main_entry(Path::new(&ui), new_port, installed)
+            crate::desktop::sync_main_entry(Path::new(&ui), installed)
         })
         .await
         .map_err(|error| error.to_string())?
@@ -279,7 +279,9 @@ mod tests {
         );
         let ui: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&core.ui_config_file).unwrap()).unwrap();
-        assert_eq!(ui[".url"]["qwenpaw.main"]["port"], port.to_string());
+        assert!(ui[".url"]["qwenpaw.main"].get("port").is_none());
+        assert_eq!(ui[".url"]["qwenpaw.main"]["url"], "/app/qwenpaw/web/");
+        assert_eq!(ui[".url"]["qwenpaw.main"]["gatewaySocket"], "app.sock");
         assert_eq!(ui[".url"]["qwenpaw.console"]["port"], "15666");
         assert!(!root.join("var/settings-transaction.json").exists());
         core.kernel.stop().await;

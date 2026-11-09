@@ -13,7 +13,7 @@ use std::{
 use crate::{
     cli::{PlatformAction, ServiceAction},
     config::Config,
-    control,
+    control, helper,
     runtime_settings::SettingsPatch,
     service,
 };
@@ -30,8 +30,17 @@ pub fn run(action: PlatformAction, cfg: &Config) -> i32 {
             0
         }
         PlatformAction::UpgradeInit => {
-            print!("{}", upgrade_init(&cfg.var_dir));
-            0
+            let output = upgrade_init(&cfg.var_dir);
+            match helper::stage_current_executable(&cfg.var_dir) {
+                Ok(()) => {
+                    print!("{output}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("升级初始化无法暂存 supervisor helper: {error}");
+                    1
+                }
+            }
         }
         PlatformAction::Install => finish_operation(cfg, "安装", install_callback),
         PlatformAction::Upgrade => finish_operation(cfg, "升级", upgrade_callback),
@@ -97,6 +106,7 @@ fn install_callback(cfg: &Config) -> Result<(), String> {
     let log_level = env::var("wizard_log_level").unwrap_or_default();
     configure_patch(&port, &log_level, cfg.listen_port)?;
     prepare_var_directory(cfg)?;
+    helper::stage_current_executable(&cfg.var_dir)?;
     let mirror_seed = env::var("wizard_pypi_mirror").unwrap_or_else(|_| "aliyun".into());
     mirror_seed_if_needed(cfg, &mirror_seed)?;
 
@@ -110,15 +120,46 @@ fn install_callback(cfg: &Config) -> Result<(), String> {
 }
 
 fn upgrade_callback(cfg: &Config) -> Result<(), String> {
+    log_message(cfg, "开始升级回调", false);
     prepare_var_directory(cfg)?;
+    log_message(cfg, "准备var完成", false);
+
     if service::run(ServiceAction::Stop, cfg) != 0 {
+        log_message(cfg, "ERROR: stop失败", true);
         return Err("升级前停止监督者失败".into());
     }
+    log_message(cfg, "stop成功", false);
+
     apply_platform_permissions(cfg, true)?;
+    log_message(cfg, "权限应用完成", false);
+
+    match env::current_exe() {
+        Ok(path) => log_message(
+            cfg,
+            &format!(
+                "准备启动: current_exe={} exists={}",
+                path.display(),
+                path.exists()
+            ),
+            false,
+        ),
+        Err(_) => log_message(
+            cfg,
+            "准备启动: current_exe=<unavailable> exists=false",
+            false,
+        ),
+    }
     if service::run(ServiceAction::Start, cfg) != 0 {
         return Err("升级后启动监督者失败".into());
     }
-    run_runtime_install_flow(cfg, Lifecycle::Upgrade)
+    log_message(cfg, "start成功", false);
+
+    log_message(cfg, "runtime flow开始", false);
+    let result = run_runtime_install_flow(cfg, Lifecycle::Upgrade);
+    if result.is_ok() {
+        log_message(cfg, "runtime flow完成", false);
+    }
+    result
 }
 
 fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), String> {
@@ -129,7 +170,7 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
         RuntimePlan::Keep
     } else {
         let active_venv = Path::new(&cfg.kernel_venv).exists();
-        runtime_plan(lifecycle, false, active_venv, read_pin_state(&cfg.var_dir)?)?
+        runtime_plan(false, active_venv, read_pin_state(&cfg.var_dir)?)?
     };
     match plan {
         RuntimePlan::Keep => {
@@ -137,11 +178,15 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
             Ok(())
         }
         RuntimePlan::FirstInstall => {
-            log_message(
-                cfg,
-                "首次安装未提供合法版本钉；仅安装外壳，不创建 venv 或运行 pip",
-                false,
-            );
+            let message = match lifecycle {
+                Lifecycle::Install => {
+                    "首次安装未提供合法版本钉；仅安装外壳，不创建 venv 或运行 pip"
+                }
+                Lifecycle::Upgrade => {
+                    "外壳升级未检测到内核且缺少版本钉；仅升级外壳，不创建 venv 或运行 pip"
+                }
+            };
+            log_message(cfg, message, false);
             Ok(())
         }
         RuntimePlan::Repair(version) => {
@@ -175,25 +220,17 @@ fn runtime_is_installed(response: &serde_json::Value) -> Result<bool, String> {
     Ok(installed)
 }
 
-fn runtime_plan(
-    lifecycle: Lifecycle,
-    installed: bool,
-    active_venv: bool,
-    pin: PinState,
-) -> Result<RuntimePlan, String> {
+fn runtime_plan(installed: bool, active_venv: bool, pin: PinState) -> Result<RuntimePlan, String> {
     if installed {
         return Ok(RuntimePlan::Keep);
     }
     match pin {
         PinState::Exact(version) => Ok(RuntimePlan::Repair(version)),
         PinState::Invalid(reason) => Err(format!("版本钉无效，拒绝猜测内核版本: {reason}")),
-        PinState::Missing if lifecycle == Lifecycle::Install && !active_venv => {
-            Ok(RuntimePlan::FirstInstall)
-        }
         PinState::Missing if active_venv => {
             Err("运行环境缺损且没有合法精确版本钉，拒绝重装或升级内核".into())
         }
-        PinState::Missing => Err("升级时版本钉缺失，拒绝盲目安装最新内核".into()),
+        PinState::Missing => Ok(RuntimePlan::FirstInstall),
     }
 }
 
@@ -794,16 +831,19 @@ mod tests {
             home_dir: var.join("home").to_string_lossy().into_owned(),
             share_dir: var.join("share").to_string_lossy().into_owned(),
             ui_config_file: var.join("ui-config").to_string_lossy().into_owned(),
+            supervisor_binary: var.join("bin/qwenpaw-supervisor"),
             kernel_venv: var.join("venv").to_string_lossy().into_owned(),
             kernel_pid_file: var.join("kernel.pid").to_string_lossy().into_owned(),
             kernel_log: var.join("kernel.log").to_string_lossy().into_owned(),
             kernel_port: crate::api::test_support::free_port(),
+            web_proxy_port: None,
             kernel_log_level: "info".into(),
             token_file: var.join("supervisor-token").to_string_lossy().into_owned(),
             supervisor_pid_file: var.join("supervisor.pid").to_string_lossy().into_owned(),
             supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
             listen_port: crate::api::test_support::free_port(),
             auto_start: false,
+            gateway_socket: None,
         };
 
         let (missing_status, missing_json) = mirror_set(None, &cfg);
@@ -838,37 +878,30 @@ mod tests {
             PinState::Invalid("latest".into()),
             PinState::Invalid("malformed".into()),
         ] {
-            assert_eq!(
-                runtime_plan(Lifecycle::Upgrade, true, true, pin),
-                Ok(RuntimePlan::Keep)
-            );
+            assert_eq!(runtime_plan(true, true, pin), Ok(RuntimePlan::Keep));
         }
     }
 
     #[test]
-    fn install_and_upgrade_recovery_require_an_exact_pin() {
+    fn empty_runtime_without_pin_skips_kernel_install() {
         assert_eq!(
-            runtime_plan(Lifecycle::Install, false, false, PinState::Missing),
+            runtime_plan(false, false, PinState::Missing),
             Ok(RuntimePlan::FirstInstall)
         );
+    }
+
+    #[test]
+    fn broken_runtime_without_pin_fails_closed() {
+        assert!(runtime_plan(false, true, PinState::Missing).is_err());
+    }
+
+    #[test]
+    fn missing_runtime_is_repaired_only_from_an_exact_pin() {
         assert_eq!(
-            runtime_plan(
-                Lifecycle::Upgrade,
-                false,
-                false,
-                PinState::Exact("2.4.1".into())
-            ),
+            runtime_plan(false, false, PinState::Exact("2.4.1".into())),
             Ok(RuntimePlan::Repair("2.4.1".into()))
         );
-        assert!(runtime_plan(Lifecycle::Install, false, true, PinState::Missing).is_err());
-        assert!(runtime_plan(Lifecycle::Upgrade, false, false, PinState::Missing).is_err());
-        assert!(runtime_plan(
-            Lifecycle::Install,
-            false,
-            false,
-            PinState::Invalid("latest".into())
-        )
-        .is_err());
+        assert!(runtime_plan(false, false, PinState::Invalid("latest".into())).is_err());
     }
 
     #[test]
@@ -915,16 +948,19 @@ mod tests {
             home_dir: var.join("home").to_string_lossy().into_owned(),
             share_dir: var.join("share").to_string_lossy().into_owned(),
             ui_config_file: var.join("ui-config").to_string_lossy().into_owned(),
+            supervisor_binary: var.join("bin/qwenpaw-supervisor"),
             kernel_venv: var.join("venv").to_string_lossy().into_owned(),
             kernel_pid_file: var.join("kernel.pid").to_string_lossy().into_owned(),
             kernel_log: var.join("kernel.log").to_string_lossy().into_owned(),
             kernel_port: crate::api::test_support::free_port(),
+            web_proxy_port: None,
             kernel_log_level: "info".into(),
             token_file: var.join("supervisor-token").to_string_lossy().into_owned(),
             supervisor_pid_file: var.join("supervisor.pid").to_string_lossy().into_owned(),
             supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
             listen_port: crate::api::test_support::free_port(),
             auto_start: false,
+            gateway_socket: None,
         };
 
         mirror_seed_if_needed(&cfg, "official").unwrap();

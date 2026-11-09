@@ -1,9 +1,13 @@
 # 管理层去脚本化整改计划与测试方案
 
-- 初始计划日期：2026-11-03；本次进度更新：2026-11-04。
-- 当前进度：P0–P5 本地实现及安全复核修复已完成；生产管理层已迁入 Rust/native CGI 薄桥，QwenPaw 本体未修改。P4 fnOS 网关/真机验收仍阻塞。初审整改后的最新本地包为 1.1.1 RC1 `build/output/qwenpaw-1.1.1-1-x86.fpk`，SHA256 `ec6850e3196f69545e66d649c4ce15a59b70529c6dc1ab45845fcc8d12ed2e0a`，大小 2,071,727 字节；Rust 222+13、Node 30 及完整本地门禁通过。下文早期 `p6-candidate` 摘要保留为整改前历史记录。候选不是生产可用声明，且不代表外部平台或发布门禁通过。
-- Rust 206+13、严格 Clippy、lint、audit、自测、包内 API/lifecycle 120 并发、七点恢复、native API 15、index 22、platform 11、真实 venv 和 Chromium 1 项均通过。复用同一环境 `target` 的双构建 SHA 一致，但不是洁净房构建证明。包内 supervisor SHA256 `4969a976f1c13f9d20f835eecc48b222001eb63ec9925e7760927e2add12da79`；test helper SHA256 `dd59f19e53204fa9f81d4cab097c0d89af002a95d595cc7247cfb84584521c91`。
-- 调查基线：先前工作树包含大量未提交的模块化、配置事务、安装恢复及管理层实现。必须按当前工作树判断并保留既有改动。本次只更新文档，不改实现，不重跑完整构建/测试，也不部署或操作真实数据。未 commit、push、发布或部署。
+- 初始计划日期：2026-11-03；本次进度更新：2026-11-09。
+- 当前状态：G0–G3 按已批准范围完成，G4 已实施；生产管理 Web 为 Gateway-only，CGI 文件、生产 CGI 子命令、前端 action fallback、CGI 专属测试与 CI 门禁均已删除。真实手机 fnOS App 暂不纳入本轮验收，最终手机复测仍待用户。fnOS logout 后旧会话仍有效是已知平台问题，用户确认不阻塞应用验收；不称其已撤销或已修复。官方 PyPI 直连 15 分钟无输出超时；阿里云真实 `qwenpaw==2.2.2.post1` 上游安装/卸载通过，但不是官方 PyPI 直连通过。
+- 当前测试候选 FPK：`build/candidates/1.1.1-11-dual-web-proxy-20261109/qwenpaw-1.1.1-11-x86.fpk`，SHA256 `2db563daa353fca8ac1ed6c59275375787eb1fae37abc722a49434a8098723c1`；supervisor SHA256 `b7813f1ab26315599035acfd042656c82634624c225005c1f0a36d1758bb3f6f`。远端为 `1.1.1-11 running`，内核 `2.3.0b2 running`，无活动事务；不代表生产发布。独立TCP反代自动分配、冲突回退、var持久化、前端可改且先bind再切换，当前33083；独立图标不写port并走Gateway。双入口真实Chromium鉴权/中文/en保留/无启动超时通过，gzip生效。Rust 283+13、Clippy、Node 41、typecheck、build/audit通过，真实手机复测仍待用户。
+- 桌面控制台与 `qwenpaw.main` 均经 `/app/qwenpaw/web/` 使用同一 Gateway/Socket，不直连内核端口、不使用 `target blank`。Rust `web_proxy` 适配上游路径、流式 SSE 与 Bearer Authorization，并分离管理系统 CSRF 与上游请求；WebSocket 返回 501，不宣称完整支持。合法 `seq + instance` 使用 `sessionStorage`，页面重建/pageshow 恢复同一任务轮询而不重复 POST；存储不可用时安全降级。语言只在首次初始化时默认中文，不覆盖已有英文。
+- 下文截至 2026-11-08 的详细进度与候选摘要均为历史记录，保留审计脉络，不覆盖本节当前状态。P0–P5 本地实现及安全复核修复已完成；G2 本地实现、真实 Chromium 双协议回归和候选包内复验已完成；1.1.1-3 阶段的正式升级及 A/B/C/D 远端验收按当时证据完成。匿名/伪造会话仅为平台 HTTP 200 `text/plain` `invalid token`，不构成公开 HTML 或授权通过。手机 fnOS App 暂不纳入本轮 G3，最终复测仍待用户；本地 WebKit/Chromium Gateway 2/2 是浏览器兼容证据。2026-11-08 记录的 logout 现象是 fnOS 公开 logout 后旧会话仍有效，不称其已撤销或已修复；用户确认不阻塞应用验收。官方 PyPI 直连 15 分钟无输出超时；阿里云真实上游安装/卸载通过，不等于官方 PyPI 直连通过。G4 后续已实施并退役 CGI，当前状态见本节顶部；1.1.1-3 不再是当前候选。生产管理层已迁入 Rust，QwenPaw 本体未修改。
+- **历史候选（截至 2026-11-08）：**FPK `build/candidates/1.1.1-3-gateway-g3-20261108/qwenpaw-1.1.1-3-x86.fpk`，SHA256 `94679e4d8343c1bf341e8a1cc2a1451a9ad0ad3296d2fc668deab456db601b51`；supervisor SHA256 `2829f1a4079139f166f78478de804d3f619226d646ea93d58d0965718dbc4400`。该候选已从 1.1.1-2 经官方 update 单次升级并在远端验收；1.1.1-2 c571 为历史本地候选，667 为更早远端包。证据总目录为 `/tmp/qwenpaw-g3-1.1.1-3-20261108/`。
+- 本地最终修复/验证还包括 `supervisor/src/install/process.rs` 的短命子进程登记竞态修复：仅同一身份已退出时允许 executable 缺失，存活或身份变化仍失败关闭。RED/GREEN 证据为 `/tmp/qwenpaw-g3-process-identity-20261107/`；install 87、runtime 5、严格 Clippy、user namespace 全 crate 276+13 通过。最终 helper-first 契约取代旧 sibling-first 表述。
+- 调查基线：先前工作树包含大量未提交的模块化、配置事务、安装恢复及管理层实现。必须按当前工作树判断并保留既有改动。本轮只更新交付文档，不改实现或产物，不部署或操作真实数据；未 reset、clean、checkout、commit、push、tag、发布或部署。历史 RC1、G2/G1 候选及 1.1.1-2/c571、667 等早期摘要继续保留，但均明确为非当前记录。
 
 ## 1. 目标、范围与非目标
 
@@ -17,7 +21,7 @@
 
 1. JSON、URL、版本列表、配置、状态转换、安装编排、生命周期与恢复逻辑，不由自研 Python 或业务 Shell 实现。
 2. fnOS 必需的 `cmd/*` 保留为薄入口，只定位原生程序、传递固定子命令并 `exec`；不承载业务判断、配置写入、网络请求、进程清扫或安装策略。
-3. CGI 仅作为迁移期兼容入口；只有网关路径、鉴权和平台兼容均通过真机验收后，才可退役。当前尚未达到此条件。
+3. 生产管理 Web 当前为 Gateway-only；CGI 文件、生产子命令、前端 action fallback、CGI 专属测试与 CI 门禁均已退役。WebSocket 代理返回 501，不宣称已支持。任何未来入口变化都须另行通过授权、兼容和回归门禁，不得恢复隐式 CGI fallback。
 4. 管理写操作经共享 Rust 管理核心；在线平台命令和 HTTP 入口复用管理规则。不得把 loopback HTTP 或私有控制 UDS 误称为 fnOS 网关传输。
 5. 不因控制台关闭、请求断连、平台重试或管理器重启重复执行、误认成功、误杀进程或丢失恢复依据。
 
@@ -36,48 +40,36 @@
 
 | 当前实现 | 源码位置 | 边界/未完成项 |
 | --- | --- | --- |
-| Rust 启动装配 `ManagementCore`；CLI 有 `serve`、`service`、`platform`、`doctor --json`、`web api-cgi`、`web index-cgi` | `supervisor/src/main.rs`、`cli.rs`、`management.rs` | 本地管理核心已实现；不等于 fnOS 网关验收完成 |
-| 管理 HTTP 仅监听 loopback；HTTP 与私有平台控制入口共用管理核心 | `supervisor/src/` | 私有控制通道不公开，也不是统一网关 Socket |
-| 私有 control UDS 0600 且用 `SO_PEERCRED` 核验 UID | `supervisor/src/control.rs` | 仅证明本地私有 IPC 设计，不证明网关身份或管理员授权 |
-| 生命周期、配置、安装/卸载、镜像等回调转发 Rust 固定子命令 | `cmd/`、`supervisor/src/platform.rs`、`service.rs` | fnOS 回调阶段和实际平台重试语义仍待真机验证 |
-| API CGI 为薄入口，由 Rust 处理兼容 action、方法/CSRF 和 loopback token 转发；index CGI 由 Rust 提供静态服务 | `app/ui/`、`supervisor/src/api_cgi.rs`、`index_cgi.rs` | 两个 CGI 仍随包使用；API CGI 是迁移期兼容桥，未退役，且不是网关认证 |
+| Rust 启动装配共享 `ManagementCore`；生产 CLI 提供 `serve`、`service`、`platform`、`doctor --json` 等子命令 | `supervisor/src/main.rs`、`cli.rs`、`management.rs` | 生产 CGI 子命令已删除；静态源码契约不替代本轮测试结果 |
+| 管理 HTTP loopback、Gateway UDS 与私有平台控制入口使用各自传输，共用管理核心 | `supervisor/src/` | Gateway UDS 与私有控制通道用途、权限和身份边界不同 |
+| 私有 control UDS 0600 且用 `SO_PEERCRED` 核验 UID | `supervisor/src/control.rs` | 私有 IPC 不向浏览器开放，也不等同 Gateway 身份或管理员授权 |
+| 生命周期、配置、安装/卸载、镜像等回调转发 Rust 固定子命令 | `cmd/`、`supervisor/src/platform.rs`、`service.rs` | 回调契约与平台证据按实际验收范围描述 |
+| Gateway UDS 提供管理 API、控制台静态资源及 `/web/` 上游代理 | `app/ui/config`、`supervisor/src/gateway.rs`、`supervisor/src/web_static.rs` | 生产 CGI 文件、子命令、action fallback、专属测试与 CI 门禁已删除；WebSocket 返回 501 |
 | 版本索引由 Rust HTTP/HTML 解析；运行时由固定 argv 的 `RuntimeAdapter` 管理 | `supervisor/src/version_index.rs`、`runtime.rs` | Python 仅作为受管 QwenPaw/venv 运行依赖，不承担管理策略 |
-| 激活暂存 venv 前重定位 console-script shebang | `supervisor/src/install/io.rs` | 最终候选包内真实 venv 契约测试通过；不代表真实 PyPI 上游包已验证 |
-| 前端 API 客户端、TypeScript 检查和 Playwright E2E 已存在 | `web/src/api.ts`、`web/package.json`、`web/e2e/control-panel.spec.ts` | Chromium 1 项通过；仍未验证 fnOS App/WebKit/网关鉴权 |
-| Shell 管理库已删除；审计、边界和事务测试入口已存在 | `cmd/`、`scripts/` | 候选 FPK 物料摘要及包内测试已验证；真机验证仍未关闭 |
+| 激活暂存 venv 前重定位 console-script shebang | `supervisor/src/install/io.rs` | 既有候选包内真实 venv 契约测试通过；阿里云真实上游安装/卸载通过，不等于官方 PyPI 直连通过 |
+| 前端 API 客户端、TypeScript 检查和 Gateway Playwright E2E 已存在 | `web/src/api.ts`、`web/package.json`、`web/e2e/gateway.spec.ts`、`web/playwright.config.ts`、`web/e2e/run.mjs` | 历史 WebKit/Chromium 结果是浏览器兼容证据；真实 fnOS 手机 App 最终复测仍待用户 |
+| Shell 管理库已删除；审计、边界和事务测试入口已存在 | `cmd/`、`scripts/` | 1.1.1-6 是测试候选而非生产发布；平台与网络验证范围见本节顶部及历史记录 |
 
 必须保留的运行时能力包括安装事务恢复、配置快照恢复、关闭门禁、终态收尾互斥、进程组清扫、桌面入口定点更新及前端 `seq + instance` 任务归属判断。`docs/backend-design.md` 是历史提案，不作为当前实现依据。
 
 
 ## 3. 推荐架构与职责边界
 
-当前工作树路径：
-
-```text
-浏览器
-  └── app/ui/index.cgi → Rust 静态服务
-      └── app/ui/api.cgi → Rust CGI 兼容处理 → loopback HTTP / private control UDS
-                                               └── ManagementCore
-                                                   ├── 配置、安装、恢复、生命周期事务
-                                                   └── RuntimeAdapter → 受管 QwenPaw 运行时
-
-fnOS cmd 薄入口 → Rust platform/service 子命令 → private control UDS（在线）
-                                          └── ManagementCore
-```
-
-`api.cgi` 和 `index.cgi` 仍随包使用。`supervisor-control.sock` 是应用私有控制通道，不是 fnOS 网关 Socket；loopback HTTP 也不是统一网关。
-
-目标平台路径（当前未接入、未验收）：
+当前工作树路径（Gateway-only）：
 
 ```text
 浏览器 / fnOS App
-  → fnOS 登录与应用授权
-  → 统一网关 /app/qwenpaw
-  → gatewaySocket（受验证的网关身份上下文）
-  → Rust 管理 HTTP 服务 / ManagementCore
+  → fnOS 统一网关 `/app/qwenpaw`
+  → gatewaySocket (`app.sock`)
+  → Rust Gateway / ManagementCore
+      ├── 管理 API 与控制台静态服务
+      ├── `/web/` → QwenPaw Web 上游（流式 SSE、Bearer Authorization）
+      └── 私有 `supervisor-control.sock`（仅平台私有控制）
+
+fnOS cmd 薄入口 → Rust platform/service 子命令 → ManagementCore
 ```
 
-不得把目标路径画成当前已实现架构，也不得在真机网关、鉴权与最低版本验证完成前退役 CGI。
+控制台与 `qwenpaw.main` 均经 `/app/qwenpaw/web/` 使用同一 Gateway/Socket；浏览器不直连内核端口，也不使用 `target blank`。生产 CGI、CGI 子命令及旧 action fallback 已删除。`supervisor-control.sock` 仍是独立私有控制通道，loopback HTTP 也不是 Gateway 入口。WebSocket 代理返回 501，不能描述为已支持。
 
 ### 3.1 当前模块边界
 
@@ -87,34 +79,33 @@ fnOS cmd 薄入口 → Rust platform/service 子命令 → private control UDS�
 - `platform.rs`、`service.rs`、`cli.rs`：分别承接平台回调、服务控制及 Rust CLI；平台 Shell 入口只定位二进制并转发固定子命令。
 - `runtime.rs`、`install/`：受管程序固定 argv/env、探针和超时，以及安装编排、venv 事务、进程和 I/O。
 - `runtime_settings.rs`、`settings_transaction.rs`、`desktop.rs`：配置事务、恢复快照和桌面入口定点更新。
-- `api/`、`api_cgi.rs`、`index_cgi.rs`、`control.rs`：loopback HTTP API、迁移期 CGI 兼容处理、静态资源及 private control UDS。尚无 fnOS gatewaySocket 路由。
-- `web/src/api.ts`、类型定义及任务模块：封装现有 api.cgi 兼容地址、请求、错误与任务身份；网关前缀迁移仍待真机验收后另行决定。
+- `api/`、`gateway.rs`、`web_static.rs`、`control.rs`：管理 HTTP API、fnOS Gateway UDS、控制台静态资源与 `/web/` 上游代理，以及独立 private control UDS。生产 CGI 文件和 CGI handler 已删除，WebSocket 返回 501。
+- `web/src/api.ts`、类型定义及任务模块：通过 `/app/qwenpaw` Gateway REST 路由提交管理请求；旧 `api.cgi` 地址推导与 action fallback 已删除。任务归属使用 `seq + instance`。
 
-只在 HTTP、CLI、平台命令和恢复入口确实共用的规则上复用管理核心，不泛化成插件框架。
+只在 Gateway、管理 HTTP、CLI、平台命令和恢复入口确实共用的规则上复用管理核心，不泛化成插件框架。
 
 ### 3.2 当前原生 CLI
 
-当前 CLI 已实现 `serve`、`service`、`platform`、`doctor --json`、`web api-cgi` 与 `web index-cgi` 子命令。具体命令参数、状态码和输出以 `supervisor/src/cli.rs`、`platform.rs` 与 `service.rs` 为准；本节不将旧提案中的示例命令名视为当前 API 契约。
+当前生产 CLI 提供 `serve`、`service`、`platform`、`doctor --json` 等子命令；生产 `web api-cgi` 与 `web index-cgi` 子命令已删除。具体命令参数、状态码和输出以 `supervisor/src/cli.rs`、`platform.rs` 与 `service.rs` 为准；本节不将旧提案中的示例命令名视为当前 API 契约。
 
-- `cmd/main` 和平台回调转发固定子命令；配置、安装、停止和卸载业务由 Rust 处理。
+- `cmd/main` 和平台回调转发固定子命令；配置、安装、停止和卸载业务由 Rust 处理。最终回调契约以 helper-first 取代旧 sibling-first 表述：install 与 upgrade-init 在 target 可执行窗口内把当前 Rust supervisor 原子暂存为 `${TRIM_PKGVAR}/qwenpaw-supervisor-helper`（0750 普通文件）；upgrade/uninstall 回调按可执行 var helper、sibling、fail closed `127` 的顺序查找，var helper 可用于 target binary 缺失时的回调，install 不使用该 fallback；helper 不进入全局目录或 Shell 复制链路。keep 保留 var helper，remove 由既有 var 删除范围清理。最终 fnOS 路径核验包括 `/vol1/@appcenter/qwenpaw/bin/qwenpaw-supervisor`、`/var/apps/qwenpaw/cmd/qwenpaw-supervisor`、`/var/apps/qwenpaw/var/qwenpaw-supervisor-helper`。
 - 管理 HTTP 服务状态与内核运行状态是不同概念；内核未安装/损坏不应被表述为管理页面已通过平台验收。
 - 诊断和本地 CLI 的存在不证明 fnOS 生命周期窗口、回调顺序或应用中心错误呈现已验证。
 
 ### 3.3 所有权与传输边界
 
-源码有监督者所有权锁、服务控制、进程内操作协调和私有控制 UDS。具体锁顺序、CLI 行为及异常状态以当前 `supervisor/src/` 实现为准；这里不再把旧计划中的额外平台生命周期锁或离线执行协议写成已实现事实。
+源码有监督者所有权锁、服务控制、进程内操作协调、Gateway UDS 和私有控制 UDS。具体锁顺序、CLI 行为及异常状态以当前 `supervisor/src/` 实现为准；这里不再把旧计划中的额外平台生命周期锁或离线执行协议写成已实现事实。
 
-- loopback HTTP 仅供本机管理兼容路径；私有 control UDS 仅供受信的平台私有命令，不接受浏览器身份。
+- fnOS Gateway UDS 是生产 Web 入口；loopback HTTP 仅供本机管理兼容路径，private control UDS 仅供受信的平台私有命令，不接受浏览器身份。三者的用途、权限与身份边界不可混称。
 - 服务仍持有所有权但 IPC 不可达时不得绕过管理核心直接写盘。
 - 状态和诊断不得隐式启动、修配置或消除恢复证据；恢复门禁失败时保留证据并阻断变更。
-- fnOS 网关 UDS 是目标平台传输，当前尚未实现/验收；不得与 `supervisor-control.sock` 混称。
 
 ### 3.4 当前管理接口与任务协议
 
-- Web 客户端仍通过 api.cgi 兼容路径进入 loopback 管理 API；目标 `/app/qwenpaw` 网关前缀及 gatewaySocket 路径未接入。
-- 原生 CGI 处理兼容 action、方法、CSRF 和请求转发；这不是 fnOS 登录态或管理员角色授权的替代证明。
+- Web 控制台与 `qwenpaw.main` 经 `/app/qwenpaw/web/` 进入同一 Gateway/Socket；管理 API 使用 Gateway REST 路径。浏览器不直连内核端口，也不使用 `target blank`。
+- 管理写操作仍须经过管理员授权与 CSRF；上游代理请求与管理系统 CSRF 分离处理。生产 CGI 与前端 action fallback 已删除，不能作为隐式回退路径。
 - 安装任务依赖 `seq + instance` 归属判定；客户端在无法确认提交结果时不得猜测成功或重复提交。
-- HTTP/CGI 兼容响应和状态码以当前 handler 为准。旧计划中的持久化 `operation_id`/请求指纹和统一新 API 语义属于未验收的后续设计，不可写为当前契约。
+- Gateway/管理 HTTP 响应和状态码以当前 handler 为准。旧计划中的持久化 `operation_id`/请求指纹和统一新 API 语义属于未验收的后续设计，不可写为当前契约。
 - 安装事务 journal 与配置恢复记录支持可判定恢复；如需扩展到其他操作，仍须另行定义并验证，不能假定所有操作共用同一种持久化记录。
 - 状态、日志和事件观察不得代替写操作协调；busy、恢复阻断与失败状态应按现有响应契约如实呈现。
 
@@ -172,7 +163,7 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 1. 网关登录校验不代替业务授权。管理 API、日志和敏感状态要求管理员权限；非管理员即使知道 URL 也不能调用。
 2. `X-Trim-*` 只在经验证的网关传输上作为身份上下文；回环 TCP或 private control UDS 不因携带同名 Header 自动获得管理员权限。
 3. private control UDS 仅允许应用/受信的平台调用者，不能复用浏览器鉴权策略。
-4. CSRF 签发与校验迁入 Rust，使用服务签发、绑定浏览器上下文的 token；Cookie 限定路径和 SameSite，在 HTTPS 环境设置 Secure。不能重新引入“Host 必须等于 Origin”的反代误杀。
+4. CSRF 签发与校验迁入 Rust，使用服务签发、绑定浏览器上下文的 token；Cookie 限定路径和 SameSite，在 HTTPS 环境设置 Secure。变更请求若带 `Origin`，只接受唯一合法的 `http`/`https` origin；`Sec-Fetch-Site: cross-site` 直接拒绝。优先用唯一 `X-Forwarded-Host` + `X-Forwarded-Proto` 比较外部 origin，兼容 fnOS 将 `Host` 改写为 `127.0.0.1`；无 forwarded host 时要求唯一合法 `Referer` 的 origin 与 `Origin` 一致，缺失、非法或重复则拒绝。不得简单比较 `Origin == Host`；该校验不替代 HMAC 签名/double-submit CSRF 主防线，拒绝日志固定为 `invalid origin` 且不记录来源值。
 5. 变更只允许 POST 等约定方法；GET/HEAD 无写入副作用；未知路由 404，方法错误 405 并返回 Allow；不开放通配 CORS。
 6. 新静态服务仅提供构建物白名单，拒绝编码/双重编码穿越、NUL、越界软链，不能把整个 target/var 暴露出来。
 7. 保留 gzip/br 协商，正确处理 q=0、Vary、Content-Type、HEAD 和不存在资源。HTML 不长期缓存旧 API 地址；压缩物必须与原文一致。
@@ -180,21 +171,21 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 9. 版本索引 HTTP 请求需 TLS 验证、连接/总超时、响应上限和重定向限制。不以 curl 子进程替代原生网络实现，也不手写 TLS。
 10. 镜像策略保持管理员显式配置内网镜像的能力；同时拒绝非法 scheme、参数注入和凭据泄露。不得以安全整改为由静默把自定义源改成官方源。
 
-网关验证失败时，暂停 CGI 退役，不自动新增公开端口或提高最低系统版本。需显式确认兼容范围后再推进。过渡兼容桥可以是薄入口调用 Rust 的 native CGI 子命令；不保留 Shell/Python 的业务回退。
+历史迁移门禁（截至 2026-11-08）：若网关验证失败，应暂停入口切换，不自动新增公开端口或提高最低系统版本；当时设计的过渡桥仅可为薄入口调用 Rust native CGI 子命令，不保留 Shell/Python 业务回退。当前截至 2026-11-09，G4 已实施，生产管理 Web 为 Gateway-only，CGI 文件与生产 CGI 子命令均已删除；该旧方案不再是当前架构或待办。若后续发现 Gateway 回归，应阻止候选发布并按另行批准、已验证的回退流程处理，不得恢复隐式 CGI fallback。
 
 ## 6. 分阶段实施计划
 
 下列工作清单保留原始计划和验收目标，不应被理解为当前尚未开始的实现任务。当前状态按本地源码实现与外部验收分开记录；命令/测试入口存在也不代表执行或通过。每阶段独立可审查、可回退，不自动 commit/push 或修改部署。
 
-| 阶段 | 当前状态 |
+| 阶段 | 当前状态（更新至 2026-11-09） |
 | --- | --- |
-| P0 | 本地契约盘点与测试入口实现已完成；fnOS 网关能力、回调窗口和鉴权仍需真机证据。 |
-| P1 | 本地管理核心、所有权协调及原生 CLI 已实现；最终候选包内 API/lifecycle 120 并发及相关自测通过，平台并发/故障语义仍需真机验证。 |
-| P2 | 本地配置、镜像、向导与生命周期入口已迁入 Rust；平台回调真实语义未验证。 |
-| P3 | 本地安装、恢复、卸载和受管运行时路径已实现；最终候选七点恢复与真实 venv 契约测试通过，真实 PyPI 上游及更广泛平台故障矩阵仍未验证。 |
-| P4 | 本地 API/静态 CGI 兼容、HTTP、私有 control UDS 和 TS 客户端已存在；fnOS gatewaySocket/登录与管理员授权/移动 App/最低版本验收阻塞，CGI 未退役。 |
-| P5 | TS 客户端、typecheck 与 Playwright E2E 入口已存在；最终候选 Chromium 1 项通过，fnOS App/WebKit 未验证。 |
-| P6 | 最终候选 FPK、本地物料审计、包内测试和 SHA 摘要已完成；真机升级/回退及平台、上游验证未完成，不构成生产发布结论。 |
+| P0 | 契约盘点、支持下限与平台执行窗口已按批准范围完成；剩余生产发布门禁单独记录，不由 P0 状态推断。 |
+| P1 | Rust 管理核心、所有权协调及原生 CLI 已实现；既有 API/lifecycle 测试结果属于相应历史候选，不替代当前候选验证。 |
+| P2 | 配置、镜像、向导与生命周期管理已迁入 Rust；当前架构与源码契约见本计划和 `management-contract-inventory.md`。 |
+| P3 | 安装、恢复、卸载和受管运行时路径已实现；真实阿里云 `qwenpaw==2.2.2.post1` 安装/卸载通过。官方 PyPI 直连 15 分钟无输出超时，不等于官方源通过。 |
+| P4 | 管理 Web 已切为 Gateway-only，G3 按已批准范围完成；手机 App 最终复测仍待用户且不阻塞本轮验收。fnOS logout 后旧会话仍有效是已知平台问题，不称已撤销或已修复。 |
+| P5 | TS 客户端与 Playwright E2E 入口存在；截至 2026-11-08 的隔离 Docker WebKit Gateway 2/2、Chromium Gateway 2/2 是浏览器兼容证据，不代表真实手机 App 或当前候选的全量测试。 |
+| P6 | 当前测试候选为 1.1.1-6；经官方 update 后远端为 `1.1.1-6 running`，无 QwenPaw 内核、无未决事务。此状态不代表生产发布；候选路径与摘要见本节顶部。 |
 
 ### P0：冻结契约与验证平台可行性
 
@@ -206,7 +197,7 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 - 列出全部管理入口、写入文件、外部命令、错误码、默认值、向导回显和保留数据语义。
 - 用独立 fnOS 测试安装验证第 5 节网关边界及实际平台超时。
 - 验证 install_init 时原生程序是否已解包，upgrade 各阶段可执行路径，以及 uninstall_callback 时 target 是否仍存在。
-- 原生卸载应放在“用户选择已确认、原生程序尚可执行”的阶段。若不存在此窗口，先设计并验证私有临时 helper 的存活和清理协议；没有可用原生执行窗口就阻塞该里程碑，不能回退 Shell 删除业务。
+- 原生卸载应放在“用户选择已确认、原生程序尚可执行”的阶段。target 可能在卸载回调前被平台移除，因此由 install/upgrade-init 在 target 可执行窗口原子生成 `${TRIM_PKGVAR}/qwenpaw-supervisor-helper`；upgrade/uninstall 入口仅作固定 helper 定位回退，keep 保留 var helper，remove 由既有 var 删除范围清理。没有可用原生执行窗口仍阻塞该里程碑，不能回退 Shell 删除业务。
 - 先修测试可信度：任何前置失败、端口不可用、就绪超时、未触发注入点都必须失败；健康端点由受管替身自身提供。
 
 交付：契约清单、平台能力记录、测试基线及风险关闭结果。
@@ -249,7 +240,7 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 
 ### P3：统一安装、精确修复、升级和卸载
 
-本地安装/恢复/卸载路径及受管运行时适配已实现；最终候选的七点恢复和真实 venv 契约测试通过。真实 PyPI 上游包及全量平台崩溃故障矩阵仍未验证。下列原计划项及退出标准保留为验收基准，不表示所有测试已通过。
+本地安装/恢复/卸载路径及受管运行时适配已实现；最终候选的七点恢复和真实 venv 契约测试通过。阿里云真实 `qwenpaw==2.2.2.post1` 上游冒烟已完成，官方 PyPI seq1 因 15 分钟无输出超时失败且未重投；全量平台崩溃故障矩阵仍未验证。下列原计划项及退出标准保留为验收基准，不表示所有测试已通过。
 
 计划工作项：
 
@@ -268,17 +259,9 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 
 ### P4：原生 Web/网关接入与管理用 Python 清零
 
-当前状态：Rust 静态服务、管理 API、迁移期 CGI 兼容、CSRF 处理、私有 control UDS 和原生 HTTP/HTML 版本索引已在本地工作树实现；fnOS `gatewaySocket` 路由与网关登录/管理员授权未实现或未验收。以下保留为目标平台验收与剩余迁移清单：
+**当前状态（2026-11-09）：**P4/G4 的生产入口迁移已实施，管理 Web 为 Gateway-only。控制台与 `qwenpaw.main` 经 `/app/qwenpaw/web/` 使用同一 Gateway/Socket；Rust `web_proxy` 保留上游路径、流式 SSE 和 Bearer Authorization，管理 CSRF 与上游请求分离，WebSocket 返回 501。生产 CGI 文件、子命令、前端 action fallback、CGI 专属测试与 CI 门禁已删除。G3 按已批准范围完成；真实手机 fnOS App 最终复测仍待用户。fnOS logout 后旧会话仍有效是已知平台问题，用户确认不阻塞应用验收；官方 PyPI 直连 15 分钟无输出超时，阿里云真实 `qwenpaw==2.2.2.post1` 安装/卸载通过但不等同官方 PyPI 直连通过。该候选尚非生产发布。
 
-- 在目标系统验证网关鉴权、CSRF、Header 身份上下文及最低版本能力；私有 control UDS 不替代该工作。
-- 版本选择与降级判断由后端权威，TS 不维护第二套安装决策；该项按当前源码契约实现，仍需集成验证。
-- 前端 API 地址脱离 `index.cgi/api.cgi`，迁移到经验证的稳定网关前缀；当前仍使用 CGI 兼容路径。
-- 保留轮询可靠路径；现有 SSE 可测试后使用，不把新增 WebSocket 或 SSE 重构作为去脚本化前提。
-- 只有网关、鉴权和目标平台兼容通过后，才改 `app/ui/config` 并停止打包旧 CGI；不反代 QwenPaw 本体。
-
-目标交付：原生管理入口和完整安全边界，并在具备真机证据后退役生产 CGI；此目标尚未完成。
-
-退出标准：未登录/非管理员/伪造 Header/CSRF 全部负例通过；Host 重写不误杀；手机/浏览器/外网 HTTPS 路径可用；内核损坏不影响管理页面；管理业务不再调用辅助 Python。
+本节下方的旧迁移条目保留为历史设计与验收参考，不再表示 CGI 退役或 Gateway 接入尚待开始。后续任何改动仍须保持管理员授权、CSRF、网关身份上下文、稳定前缀和“内核损坏时管理页面仍可用”等安全边界。
 
 ### P5：TS 客户端协议和前端测试门禁
 
@@ -286,7 +269,7 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 
 - 维护 API client、DTO、错误、轮询/重连与任务归属，保留当前视觉和已有 `installTask` 规则。
 - 对受理响应丢失、跨实例、乱序响应、关闭重开、后台切换确认“未确认/恢复中”状态语义。
-- 扩充真实浏览器闭环；纯逻辑测试与 DOM/网络测试各自负责，不重复堆叠同类用例。最终候选 Chromium 1 项通过；Node 纯逻辑测试/typecheck 的执行结果未在本次报告中列出，fnOS App 仍需真机独立验证。
+- 浏览器闭环已完成本地验证：隔离 Docker WebKit Gateway 2/2、Chromium Gateway 2/2、typecheck 通过，HTTPS fixture 日志为 `/tmp/qwenpaw-gateway-webkit-20261107/e2e-webkit-https.log`，Chromium 最终输出可写主控复验通过。WebKit 丢回执不是生产 beacon 失败：第三次 beacon `success=false` 复用 seq/instance 且不新建事务；测试严格检查 done/upgrading=false/recovery=false、marker/pin/健康，不依赖可选 pip 日志，跨引擎 console 错误分别精确匹配。真实 fnOS 手机 App 暂不纳入本轮 G3；本地 WebKit/Chromium 证据不扩展为手机 App 结论。
 
 目标交付：类型化客户端及浏览器验收证据。
 
@@ -294,20 +277,20 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 
 ### P6：打包门禁、兼容回退和候选交付
 
-当前状态：本地最终候选已构建并通过物料审计、包内测试与摘要核对。候选为 `build/p6-candidate/qwenpaw-2.1.0-9-x86.fpk`（2,070,195 字节，SHA256 `b0a1fa9ec952eedcb02a1e9ad4d3e69aaf2e645760e0c1e7507ab695ac08413d`）；包内 supervisor SHA256 `4969a976f1c13f9d20f835eecc48b222001eb63ec9925e7760927e2add12da79`，test helper SHA256 `dd59f19e53204fa9f81d4cab097c0d89af002a95d595cc7247cfb84584521c91`。Rust 206+13、严格 Clippy、lint、audit、自测、包内 API/lifecycle 120 并发、七点恢复、native API 15、index 22、platform 11、真实 venv 及 Chromium 1 均通过。同环境复用 `target` 的双构建 SHA 一致，但不是洁净房可复现性证明。fnOS 真机升级/回退与其余平台门禁未完成；候选不是生产可用声明，也未发布。以下仍列出未关闭的发布与平台验收门禁。
+**历史状态（截至 2026-11-08；不代表当前候选或当前阶段状态）：**当时 1.1.1-3 候选为 `build/candidates/1.1.1-3-gateway-g3-20261108/qwenpaw-1.1.1-3-x86.fpk`，FPK SHA256 `94679e4d8343c1bf341e8a1cc2a1451a9ad0ad3296d2fc668deab456db601b51`；supervisor SHA256 `2829f1a4079139f166f78478de804d3f619226d646ea93d58d0965718dbc4400`。该候选已从 1.1.1-2 经官方 update 单次升级并在远端验收。A/B/C/D 证据及最终清理/重装记录位于 `/tmp/qwenpaw-g3-1.1.1-3-20261108/`；1.1.1-2 c571 为历史本地候选，667 为更早远端包。当时最终 App Center 为 `1.1.1-3 running`，唯一 manager、Gateway HTTP 200、无 QwenPaw 内核/未决事务/18088 listener，双 UDS mode `0600`、UID/GID `994/989`。当时真实手机 fnOS App 不纳入 G3，logout 后旧 `ost` cookie 仍可访问有效 Gateway page/status/SSE，真实失效会话门禁未通过；官方 PyPI 直连和完整生产发布门禁未完成，因此该日记录为 G3 尚未整体关闭、G4 尚未开始且 CGI 仍保留。**当前状态以本计划顶部及 2026-11-09 的 P4 状态为准：**G3 按批准范围完成，G4 已实施并退役 CGI，当前 1.1.1-6 仅为测试候选、不是生产发布；手机 App 最终复测待用户且不阻塞本轮验收，logout 平台现象未修复也未撤销会话。
 
-计划工作项：
+计划工作项（原计划保留作审计参考；当前完成状态见本节顶部）：
 
-- 同步修改 `build.sh`、preflight、lint、audit-fpk、gen-audit 和 CI/Release 对 CGI、执行位、Shell 的假设。
+- G4 已同步 `build.sh`、preflight、lint、audit-fpk、gen-audit 与 CI/Release 的物料和入口假设；CGI 专属测试及门禁已删除，Gateway 回归保留。此项已完成，不是当前待办。
 - 保持单二进制优先；若增加原生 helper，明确加入 staging 和审计，不依赖 Cargo 自动复制。
 - 物料清单由单一来源消费，覆盖路径、文件类型、模式与架构；归档先验成员再解包，拒绝越界项与未声明特殊项。
-- 对最终 FPK 解出程序和薄入口重跑集成测试，比较被测二进制 SHA256 与包内物料。
-- 在独立 fnOS 安装完成旧包升级、系统重启、候选回退和卸载保留/删除验收。
-- 更新 README 的架构/入口/故障排查和自动生成审计说明；不把历史提案改成虚假现状。
+- 对最终 FPK 解出程序和薄入口重跑集成测试，比较被测二进制 SHA256 与包内物料；这是生产候选门禁，不因当前测试候选远端 `running` 而自动视为通过。
+- **历史平台验收（截至 2026-11-08）：**1.1.1-3 已按受支持回退路径验收，并完成 A/B/C/D、manager SIGKILL 后官方 start 接管、仅卸载、remove 范围核对及同一 FPK 官方重装恢复，证据总目录为 `/tmp/qwenpaw-g3-1.1.1-3-20261108/`。手机 fnOS App 最终复测仍待用户且不阻塞本轮验收；fnOS logout 后旧 `ost` cookie 仍可访问有效 Gateway page/status/SSE，未观察到服务端 session revoke，不称其已撤销或已修复。官方 PyPI 直连 15 分钟无输出超时；真实阿里云 `qwenpaw==2.2.2.post1` 安装/卸载通过不等于官方 PyPI 直连通过。原位降级被平台按设计拒绝的记录仅作禁令证据，不得再次尝试。
+- README、架构/入口/故障排查和自动生成审计说明已按当前状态同步；历史提案保留为历史，不作为当前契约。
 
-交付：候选 FPK、SHA256、测试证据、兼容矩阵、已演练回退步骤。
+交付目标：候选 FPK、SHA256、测试证据、兼容矩阵、已演练的受支持回退步骤。
 
-退出标准：全部发布阻塞项通过；无旧生产管理业务；包内程序就是已测程序；没有未决事务或未披露兼容变化。
+**生产发布退出标准（仍未全部满足；与 G3 按批准范围完成、G4 已实施分开判断）：**所有生产发布阻塞项通过；无旧生产管理业务；包内程序就是已测程序；没有未决事务或未披露兼容变化。历史 1.1.1-3 的 A/B/C/D、真实阿里云上游冒烟、manager SIGKILL 接管、remove 范围和同一 FPK 重装恢复已按范围通过；本地 WebKit/Chromium Gateway 2/2 是浏览器兼容证据。真实手机 fnOS App 最终复测待用户，不阻塞本轮已批准范围。fnOS logout 后旧会话仍有效是已知平台问题，未观察到服务端 session revoke，不称已撤销或已修复。官方 PyPI 直连曾 15 分钟无输出超时，完整路径/错误矩阵与完整生产发布门禁仍未完成。因此当前 G3 仍按已批准范围完成、G4 已完成，但 1.1.1-6 仅为测试候选而非生产发布；未完成的生产门禁不得反向写成 G3 未完成或 G4 未开始。
 
 关键路径：`P0 → P1 → P2 → P3 → P4 → P6`。P5 的客户端基础可在协议稳定后并行，但网关浏览器验收依赖 P4。工期在 P0 明确真机可用性和兼容目标后估算，不以固定日期代替退出标准。
 
@@ -315,12 +298,12 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 
 ### 7.1 已有测试，可继承但不能扩大结论
 
-仓库已有 Rust、Shell/Python 集成与边界检查，以及 Node/typecheck/Playwright 前端入口；具体命令见第 11 节。本次最终候选验证中，Rust 206+13、严格 Clippy、lint、audit、自测、包内 API/lifecycle 120 并发、七点恢复、native API 15、index 22、platform 11、真实 venv 与 Chromium 1 项均通过。完整候选路径、SHA 与复现性边界见交接文档。以上结果不证明 fnOS 真机网关、真实 PyPI 上游、WebKit 或 App 验收通过。
+仓库已有 Rust、Shell/Python 集成与边界检查，以及 Node/typecheck/Playwright 前端入口；具体命令见第 11 节。本次最终候选验证中，`test-platform-callbacks` 33 项、卸载 Rust 15 项、严格 Clippy、preflight、`STRICT_CI`、build、audit 通过；Rust 结果按既有执行分组记录为普通 UID 272、root-only 隔离 1、runtime 13，不能扩大成一次未过滤的全量 Rust 全绿。全 crate `fmt` 仍有 `config`/`version` 的既有差异。最终 A/B 重建与 667 参照字节一致，但不构成洁净构建或远端 CI 证明。新增真实 fnOS 生命周期子项证据见 `/tmp/qwenpaw-g3-lifecycle-20261107`：独立监听核查未发现 QwenPaw TCP listener，两个预期 UDS 正常，但归属仅到服务/内核级而非完整 FD 逐 PID；精确 PID 459807 的一次 SIGKILL 后立即仅一次官方 App Center start/start HTTP 200/code 0，恢复为 PID 462058；正常 sudo reboot 后自动接管亦通过。旧浏览器上下文 401/轮询超时已由全新认证上下文只读复核排除。以上仅关闭生命周期子项，不证明完整 fnOS 网关授权、真实平台独立陈旧 Socket/完整路径错误矩阵、真实手机 App 或生产发布通过；本地 WebKit Gateway 2/2、process identity 回归和阿里云真实上游冒烟已分别按前述证据通过，官方 PyPI seq1 因 15 分钟无输出超时且未重投；受支持回退链的真实平台证据另见 `/tmp/qwenpaw-g3-supported-rollback-20261107`。另：本地 Gateway 故障矩阵以 release SHA256 `162b02bbb79eb59b6b084675a121005cdaffb805961392e437fd8c39cd3c49f4` 实测，隔离 Rust `gateway::` 23/23、`test-gateway-uds.py` 23 项 OK/2 skipped，普通 UID `--permission-only` 1/1；覆盖 stale/active socket、普通文件、软链接、拒绝权限、inode 替换防误删、孤儿内核接管与哨兵存活。随后主控在隔离 Docker `--user 0 --cap-add CHOWN` 目标回归实跑 foreign-owner stale、reconnect、service readiness 3/3、0 跳过，关闭对应本地补测；`test_service_start_stop_restart_reconnects_gateway` 覆盖连续 start 保持唯一同一 manager、旧 SSE 在 stop 后 EOF/reset、control socket 保持 0600/当前 UID 但不可连接、管理 TCP 关闭、restart 后新 manager 与 Gateway 200、sentinel 存活。证据 `/tmp/qwenpaw-g3-local-socket-20261107/`；本地结果不替代 fnOS 真机专属 Socket/完整矩阵。远端 1.1.1-3 A/B/C/D 网关、生命周期、Socket、上游、remove 与重装证据及其限制见 `docs/platform-validation-2026-11-03.md`。
 
 | 入口类别 | 代表入口 | 不证明什么 |
 | --- | --- | --- |
 | Rust 单元与集成 | `cargo test --locked`、`python3 scripts/test-supervisor-api.py` | 不证明 fnOS 网关、真实 App 授权或最终 FPK |
-| 平台回调/CGI 与边界 | `scripts/test-platform-callbacks.py`、`test-native-api-cgi.py`、`test-native-index-cgi.py`、`test-management-boundary.py` | 不等于目标 fnOS 上的回调时序或网关鉴权 |
+| 平台回调与管理边界 | `scripts/test-platform-callbacks.py`、`test-management-boundary.py`、`test-gateway-uds.py` | 不等于目标 fnOS 上的回调时序或网关鉴权 |
 | 生命周期/事务/venv | `test-lifecycle.sh`、`test-config-callback.sh`、`test-venv-recovery.sh`、`test-runtime-venv-contract.py` | 不证明断电持久性、真实 fnOS 或移动 App 行为 |
 | 前端与浏览器 | `npm test --prefix web`、`npm run typecheck --prefix web`、`npm run test:e2e --prefix web` | 不证明 fnOS 网关和真实手机 App |
 
@@ -383,9 +366,9 @@ P0 必须实测：Socket 路径和生命周期、网关进程身份/访问权限
 
 ### L5：TS 与浏览器
 
-Node 纯逻辑测试、独立 typecheck 与 Playwright 浏览器测试入口均已存在。最终候选 Chromium 1 项通过；Node 纯逻辑测试与 typecheck 是否运行不在本次报告范围内，不据此推断。真实 WebKit、fnOS App、网关登录与管理员授权仍须单独在目标平台验证。
+Node 纯逻辑测试、独立 typecheck 与 Playwright 浏览器测试入口均已存在。2026-11-07/08 主控 Node 35/35、typecheck、Chromium Gateway 2/2、隔离 Docker WebKit Gateway 2/2、CGI 1/1 通过；HTTPS fixture 日志为 `/tmp/qwenpaw-gateway-webkit-20261107/e2e-webkit-https.log`。WebKit 丢回执不是生产 beacon 失败：第三次 beacon `success=false` 复用同一 `seq/instance` 且不新建事务；测试严格检查 `done`、`upgrading=false`、`recovery=false`、marker/pin/健康，不依赖可选 pip 日志，跨引擎 console 错误分别精确匹配。真实 fnOS App 暂不纳入本轮 G3；前序网关登录与管理员授权证据已记录，本地 WebKit/Chromium 仅作为浏览器兼容证据；UI logout 已重新登录但真实失效会话门禁仍未通过。
 
-- Chromium覆盖完整关键流程，WebKit覆盖移动端相关路径；真实 fnOS App必须另测，不能用WebKit模拟器替代结论。
+- Chromium覆盖完整关键流程，WebKit覆盖移动端相关路径；真实 fnOS App 不纳入本轮 G3，后续平台范围恢复时仍需另测，不能用 WebKit 模拟器替代结论。
 - 页面经真实管理HTTP读取状态、设置镜像、提交配置、安装/取消任务、读取日志、卸载内核；与后台/落盘状态交叉断言。
 - 受理后响应丢失、首拍已终态、busy附加、同seq跨instance、旧响应乱序、重复点击、两标签页和两设备。
 - 关闭重开、最小化、hidden→visible、离线/恢复、登录过期、403/409/502、非JSON/截断JSON。
@@ -399,10 +382,10 @@ Node 纯逻辑测试、独立 typecheck 与 Playwright 浏览器测试入口均�
 - 通过应用中心实际安装最终FPK，验证TRIM、运行用户、权限、向导回显、失败退出和通知。
 - 新装外壳→未装内核仍可管理→选择版本→启动→改设置→停/启→仅卸载内核→重新安装。
 - 从上一稳定包及当前已有事务化候选升级，验证版本、用户数据、认证、管理入口和桌面入口保持。
-- 正常重启系统、管理器崩溃后接管、安装中平台停止、外壳升级重启、失联后恢复。
+- 在真实 fnOS 1.2.0800 上，1.1.1-3 远端已通过正常重启自动接管、管理器 SIGKILL 后官方 App Center 恢复、连续 stop/start/reconnect、独立 `app.sock` stale/active listener/普通文件/软链接/unknown owner 的 fail-closed 与恢复、remove 范围核对和同一 FPK 重装恢复，以及阿里云真实上游安装/健康/停止冒烟；证据总目录为 `/tmp/qwenpaw-g3-1.1.1-3-20261108/`。这些子项不能替代真实失效会话、官方 PyPI 直连或完整断电/崩溃/错误矩阵；真实手机 App 暂不纳入本轮 G3。
 - 管理员/非管理员/未登录，NAS本地域名、HTTPS反代和手机App的实际授权链。
 - 卸载保留后重装，及隔离数据下完整删除；外围哨兵目录必须保留。
-- 完成已知SHA256旧包的回退演练；只有确认兼容的schema/layout才允许直接回退。
+- 完成已知 SHA256 旧包的受支持回退演练：恢复未决事务并确认 schema/layout 兼容后，通过官方保留数据的卸载流程卸载当前版，安装精确旧包，验证版本/外壳/数据/入口状态，再正式升级最终版；该回退子项已在真实 fnOS 1.2.0800 通过，证据见 `/tmp/qwenpaw-g3-supported-rollback-20261107`。不得把被平台拒绝的直接原位降级当作回退演练，也不得再次尝试该路径。
 
 ## 9. 关键用例矩阵
 
@@ -520,15 +503,14 @@ bash scripts/audit-fpk.sh build/output/qwenpaw-<manifest-version>-x86.fpk
 
 ```bash
 python3 scripts/test-platform-callbacks.py
-python3 scripts/test-native-api-cgi.py
-python3 scripts/test-native-index-cgi.py
+python3 scripts/test-gateway-uds.py
 python3 scripts/test-management-boundary.py
 python3 scripts/test-runtime-venv-contract.py
 npm run typecheck --prefix web
 npm run test:e2e --prefix web
 ```
 
-前端纯逻辑测试由 `npm test --prefix web` 运行。旧计划里提议的 `cargo test --test management_cli/management_http/management_recovery/runtime_contract` 目标当前不作为已接入入口；不要将其列作可执行门禁。最终候选 FPK 的包内测试已完成；fnOS 真机安装、升级、兼容性与回退验收仍未完成。
+前端纯逻辑测试由 `npm test --prefix web` 运行。CGI 专属测试入口已删除；旧计划里提议的 `cargo test --test management_cli/management_http/management_recovery/runtime_contract` 目标当前不作为已接入入口，不要将其列作可执行门禁。**历史验证（截至 2026-11-08）**：1.1.1-3 远端已通过 helper-first 基线安装、外壳升级、统一网关 A/B/C/D、受支持回退、SIGKILL 后官方恢复、正常系统重启自动接管、remove 范围核对及同一 FPK 重装恢复；详细范围与限制见平台验证文档。直接原位安装精确旧包被 fnOS 按设计拒绝，仅作为原位降级禁令证据保留，不是平台异常，也不是有效回退演练，不得再次尝试原位降级。当前 1.1.1-6 仅为测试候选，远端 `running` 不等于生产发布或其全量门禁均已通过。
 
 ### 11.3 新的发布阻塞顺序
 
@@ -539,41 +521,45 @@ npm run test:e2e --prefix web
 5. 打包、归档成员完整审计、解压内容/执行位/目标架构和ABI检查。
 6. 对包内程序及薄入口重跑黑盒核心用例，记录摘要。
 7. 固定工具链、SOURCE_DATE_EPOCH等输入做双构建字节比较；另有洁净构建才可宣称洁净环境可复现。当前复用Cargo target的双构建不等于洁净房构建。
-8. 使用同一个最终候选FPK完成fnOS安装/升级/权限/回退验收及必要上游适配冒烟。
+8. 使用同一个最终候选 FPK 完成 fnOS 安装/升级/权限验收，并按受支持路径完成回退验收：恢复未决事务并确认 schema/layout 兼容、官方保留数据卸载当前版、安装精确旧包、验证、再正式升级最终版；本轮该受支持回退链已通过，阿里云真实上游适配冒烟已通过；官方 PyPI 直连超时未重投及其他完整平台门禁仍需完成。
 9. 明确批准后才发布；保留tag→commit校验、不可变资产、上传后回读SHA256。不能只凭CI绿灯自动跳过真机门禁。
 
-CI可并行独立检查，但Release必须聚合全部阻塞结果。修复门禁对旧CGI的硬编码时，迁移行为断言，不通过删测试获得绿灯。
+CI 可并行独立检查，但 Release 必须聚合全部生产发布阻塞结果。CGI 专属测试与 CI 门禁已随 G4 退役，Gateway 回归仍保留；此处不再要求旧 CGI 行为断言，也不代表 CGI 是当前入口。
 
 ## 12. 发布、回退和验收交付
 
 ### 12.1 候选发布切分
 
-本节原候选 A/B/C 是旧计划的逻辑切分，不是当前发布安排。本地最终候选及包内验证已完成，具体路径与摘要见第 6 节；这不代表生产发布或真机验收完成。任何候选版本或 CGI 退役安排，都必须等相应平台验收门禁关闭后再确定。未完成退出标准不得提前对外宣称“管理层已无脚本业务”。
+本节原候选 A/B/C 是旧计划的逻辑切分，不是当前发布安排。**历史候选与验收记录（截至 2026-11-08）**：1.1.1-3 FPK `build/candidates/1.1.1-3-gateway-g3-20261108/qwenpaw-1.1.1-3-x86.fpk`，SHA256 `94679e4d8343c1bf341e8a1cc2a1451a9ad0ad3296d2fc668deab456db601b51`；包内 supervisor SHA256 `2829f1a4079139f166f78478de804d3f619226d646ea93d58d0965718dbc4400`。该包经官方 update 单次升级并完成远端验收，helper-first 基线升级、A/B/C/D、stop/start 面板、受支持回退链、SIGKILL 后官方 start 接管、remove 范围核对及同一 FPK 重装恢复均通过，证据总目录为 `/tmp/qwenpaw-g3-1.1.1-3-20261108/`。直接原位安装精确旧包被 fnOS 按设计拒绝，仅作为原位降级禁令证据保留，不是平台异常或有效回退演练，不得重试。历史 UI logout 后旧 `ost` cookie 仍能访问有效 Gateway page/status/SSE；这是 fnOS 公开 logout 未观察到服务端 session revoke 的平台现象，不是应用层鉴权绕过，也不是自然时间过期测试。官方 PyPI 直连 15 分钟无输出超时；阿里云真实上游安装/卸载通过不等于官方 PyPI 直连通过。当前状态以本文顶部为准：截至 2026-11-09，G3 已按批准范围完成、G4 已实施并退役生产 CGI，当前 1.1.1-6 仍是测试候选、不是生产发布；真实手机 App 最终复测仍待用户，已知 logout 问题不阻塞应用验收。
 
 ### 12.2 回退纪律
 
-- 只有在未决事务恢复完成、并确认目标旧包兼容当前 schema/layout 后，才考虑回退到已知 SHA256 的旧包；不能确认兼容时不得直接回退。
-- 回退前停止写操作、等待/恢复未决事务、确认 journal/schema/layout 可被目标版本理解。
-- 旧包不理解新记录时，不能直接安装旧包；使用明确的导出/兼容转换或受测快照恢复步骤，无法证明则阻止直接回退。
-- 真机回退未演练。程序/包回退不保证用户数据可逆；完整删除用户数据不可回滚，测试只在可丢弃数据副本进行。
-- 网关变更回退需同时恢复入口注册、静态物料和服务配置；不保留自动 Shell 业务回退分支。
+- fnOS 不允许直接原位降级安装 FPK，只能更新；要回到旧版本，必须先完成未决事务恢复并确认目标旧包兼容当前 schema/layout，再通过官方保留数据的卸载流程卸载当前版，安装精确旧包，验证版本/外壳/数据/入口状态，最后再正式升级最终版。
+- 历史上直接原位安装精确 helper-first 旧包时，平台返回“已安装相同或更高版本”；当时记录的状态为 `1.1.1-2 running`。该原始响应证明原位降级按设计被禁止，不是平台异常，也不是有效回退演练；截至 2026-11-08，该历史测试链路最终经官方 update/同一 FPK 重装恢复为 `1.1.1-3 running`，不代表当前远端版本或生产发布。不得再次尝试原位降级。
+- 受支持回退流程的验证项包括：未决 journal 恢复、schema/layout 兼容性、官方 keep 卸载不误删数据、精确旧包安装与启动、版本/外壳/数据/入口验证，以及从旧包再次正式升级最终版；该完整路径已在真实 fnOS 1.2.0800 通过，原始证据见 `/tmp/qwenpaw-g3-supported-rollback-20261107`。该证据关闭回退子项；G3 当前已按批准范围完成、G4 已实施并退役 CGI。此历史回退证据与其余未完成的生产发布门禁分开记录，不得据后者倒推 G3 未完成或 G4 未开始。
+- 旧包不理解新记录时，不得跳过 schema/layout 兼容确认或直接换旧管理器接管；应在上述流程中使用明确的兼容转换或受测恢复步骤，无法证明则停止。历史 `905e`/`59023c` 结果有既有限制，一次性 sibling 改名只用于基线准备，均不能算正式升级或回退通过。
+- 程序/包回退不保证用户数据可逆；完整删除用户数据不可回滚。keep 保留 var helper，remove 仍只按既有 var 删除范围清理。
+- **历史平台证据（截至 2026-11-08，候选 1.1.1-3）：**正常系统重启自动接管、SIGKILL 后官方 App Center start 恢复、连续 stop/start/reconnect、独立陈旧 Socket fail-closed 与恢复、remove 范围、同一 FPK 重装及受支持回退均按记录范围通过；本地 WebKit Gateway 2/2、Chromium Gateway 2/2 和阿里云真实上游冒烟也已通过，WebKit/Chromium 仅为浏览器兼容证据。真实手机 fnOS App 暂不纳入本轮 G3，不作为阻塞。UI logout 后旧 `ost` cookie 仍可访问有效 Gateway page/status/SSE，未观察到服务端 session revoke；该已知平台现象未修复、未撤销会话。官方 PyPI 直连曾 15 分钟无输出超时；完整生产路径/错误矩阵仍有未完成项。当前 G3 按批准范围完成、G4 已实施并退役 CGI；Gateway 变更如需回退，应同时恢复入口注册、静态物料和服务配置，不保留自动 Shell 业务或 CGI fallback。
 - 不在本轮执行部署、卸载、删除真实数据、commit、push、tag或发布。
 
 ### 12.3 最终验收清单
 
-以下复选项是生产发布验收门禁，不是本地实现状态表。最终候选的本地物料审计、包内测试及摘要核对已通过；但 P4 真机网关和平台验收未完成，因此不能据此宣称达到生产发布条件。
+以下复选项是生产发布验收门禁，不是本地实现状态表，也不改变 G3 已按批准范围完成、G4 已实施并退役 CGI 的当前结论。历史 1.1.1-3 的本地审计/包内测试/摘要及远端 A/B/C/D 结果按其证据范围保留；当前 1.1.1-6 是测试候选，远端 `running` 不代表生产发布。真实手机 fnOS App 最终复测仍待用户且不阻塞本轮验收。fnOS logout 后旧 `ost` 会话仍有效是已知平台问题，未观察到服务端 session revoke，不称已撤销或已修复；官方 PyPI 直连 15 分钟无输出超时，阿里云真实上游安装/卸载通过不等同官方 PyPI 直连通过。完整生产发布门禁仍未全部完成。
 
 - [ ] Rust/TS管理职责明确，无重叠Node管理服务。
 - [ ] 生产Python管理业务退出；剩余Python调用全部属于集中受管运行时适配。
-- [ ] Shell仅薄平台入口；旧业务lib和最终CGI不在包内。
+- [ ] 最终发布 FPK 经审计确认仅含薄平台入口且不含旧业务 lib/CGI；生产 CGI 文件、子命令与 fallback 已退役，但当前测试候选不代替最终发布包审计。
 - [ ] 安装、配置、镜像、生命周期和平台回调共用单一写入权威。
 - [ ] 在线/离线互斥、任务幂等、关闭、恢复门禁及故障矩阵通过。
 - [ ] 真实venv路径/脚本/import/pip验证通过。
-- [ ] fnOS网关鉴权、管理员授权、CSRF、静态资源和移动端实测通过。
+- [ ] 最终生产发布包的 fnOS 网关授权/CSRF/静态资源验收通过；手机 App 最终复测仍待用户，已明确暂不纳入本轮且不阻塞 G3 按批准范围完成，若未来恢复该范围须单独补测。
 - [ ] 用户数据、认证、双轨版本和卸载保留语义不回退。
 - [ ] TS typecheck和浏览器关键流程通过，不误报任务成功。
-- [x] 本地候选FPK包内测试、物料审计、supervisor/helper/FPK摘要核对通过；同环境复用target的双构建SHA一致，不构成洁净房可复现性证明。
-- [ ] fnOS真机新装、旧包升级、重启、故障恢复、回退和隔离卸载通过。
+- [x] **历史候选（截至 2026-11-08）：**1.1.1-3 FPK 包内测试、物料审计、supervisor/helper/FPK 摘要核对通过：FPK SHA256 `94679e4d8343c1bf341e8a1cc2a1451a9ad0ad3296d2fc668deab456db601b51`，supervisor SHA256 `2829f1a4079139f166f78478de804d3f619226d646ea93d58d0965718dbc4400`；此前 A/B 重建与 667 参照字节一致仅是历史比较，不构成洁净房或远端 CI 证明。当前测试候选为 1.1.1-6（摘要见本文顶部），不是生产发布。
+- [x] G3 受支持回退子项已在真实 fnOS 1.2.0800 通过：官方保留数据卸载 → 精确旧包安装与验证 → 再正式升级最终版；原始证据见 `/tmp/qwenpaw-g3-supported-rollback-20261107`。
+- [x] G3 SIGKILL 官方恢复子项通过：历史生命周期证据中精确核验 PID/starttime 459807/23000247 后只发一次 SIGKILL，立即且仅一次官方 start/start HTTP 200/code 0，恢复到唯一新 manager PID 462058，双 Socket/pidfiles/二进制 SHA 正常，无内核和未决事务；1.1.1-3 D 矩阵另验证新包 manager 一次 SIGKILL → 一次官方 start → 原内核 PID/starttime/exe 接管、sentinel 存活，随后停止并卸载。
+- [x] G3 正常系统重启自动接管子项通过（此前生命周期验收）：boot_id `2f296c6f-0e40-4a6d-956d-2d08fa27b96e`→`24485936-0f2d-40a9-8017-cd658dab4dc1`，未手工 start；App Center 记录 `APP_AUTO_STARTED` 与 `qwenpaw.console` 注册成功，最终 manager PID 2697，Gateway 相关页面/API 均 HTTP 200、idle、`recovery_required=false`。证据目录：`/tmp/qwenpaw-g3-lifecycle-20261107`。真实手机 fnOS App 暂不纳入本轮 G3；该子项也不等于真实失效会话、官方 PyPI 直连或完整发布门禁通过。
+- [ ] 其余完整生产发布平台矩阵与故障门禁通过（**此项不表示 G3 未完成**：G3 已按批准范围完成，G4 已实施并退役 CGI。历史 1.1.1-3 已通过 helper-first 基线到最终外壳升级、A/B/C/D、stop/start 面板、Socket fail-closed 与恢复、受支持回退、SIGKILL 官方恢复、正常重启自动接管、remove 范围核对及同一 FPK 重装恢复；本地 WebKit/Chromium 与阿里云真实上游各自仅支持对应证据范围。匿名/伪造会话为平台 HTTP 200 `text/plain` `invalid token`，不构成授权通过。真实手机 fnOS App 暂不纳入本轮且不阻塞 G3；fnOS logout 后旧 `ost` 会话仍有效，未观察到服务端 session revoke，不称会话已撤销或问题已修复。官方 PyPI 直连 15 分钟无输出超时，完整路径/错误矩阵及其他生产发布门禁仍有未完成项；直接原位降级被平台按设计拒绝，仅保留原始响应作为禁令证据。当前 1.1.1-6 只是测试候选，不是生产发布。）
 - [ ] 报告列明测试环境、包摘要、结果、未验证项和已知限制；没有静默skip的核心用例。
 
 最终交付应包括实现、测试、CI/审计调整、候选FPK及SHA256、兼容矩阵和回退步骤。计划本身不等于上述交付已完成。

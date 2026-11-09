@@ -414,6 +414,7 @@ def create_trim_fixture(root, system_python, index_url, supervisor_port, kernel_
             "TRIM_SERVICE_PORT": str(kernel_port),
             "SUPERVISOR_PORT": str(supervisor_port),
             "SUPERVISOR_AUTOSTART": "0",
+            "QWENPAW_WEB_PROXY_PORT": "off",
             "QWENPAW_PYTHON_BIN": str(system_python),
             "QWENPAW_CONTRACT_ROOT": str(root),
             "QWENPAW_CONTRACT_INDEX": index_url,

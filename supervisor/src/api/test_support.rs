@@ -43,6 +43,7 @@ impl TestDir {
             kernel_log: var.join("kernel.log").to_string_lossy().into_owned(),
             operations: Arc::new(tokio::sync::Mutex::new(())),
             auth_cache: Arc::new(std::sync::Mutex::new(AuthCache::default())),
+            web_proxy: None,
             supervisor_port: 19090,
         }
     }

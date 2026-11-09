@@ -1,8 +1,8 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.1.1-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.1.1-11-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
-[![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.0.0-orange)](https://www.fnnas.com/)
+[![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
 将 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) 一键部署到飞牛 NAS 的**轻量外壳包（Launcher）**。
 
@@ -26,7 +26,7 @@
 
 ### 前置要求
 
-- 飞牛 NAS 系统 **≥ 1.0.0**
+- 飞牛 NAS 系统 **≥ 1.2.0800**
 - 依赖应用 **nodejs_v24** 与 **python312** 由系统在安装时自动拉起，无需手动安装
 - 如需使用 Ollama 本地模型，请先在飞牛应用商店安装 **Ollama** 应用
 
@@ -67,7 +67,7 @@
 QwenPaw-for-fnOS/
 ├── app/
 │   ├── bin/                  # 监督者二进制（构建时放入）
-│   ├── ui/                   # 迁移期原生 CGI 入口（index.cgi 静态服务、api.cgi 兼容桥）与桌面图标
+│   ├── ui/                   # Gateway 桌面入口配置与图标（生产 CGI 已退役）
 │   └── www/                  # 控制台编译产物（由 web/ 构建，不入库）
 ├── cmd/                      # 薄生命周期入口，转发给 Rust 固定子命令
 ├── config/                   # 权限与资源配置
@@ -82,31 +82,33 @@ QwenPaw-for-fnOS/
 
 ### 运行时职责与事务边界
 
-主线为 **fnOS 生命周期入口 → Rust 监督者/共享管理核心 → 受管 Python venv 中的 QwenPaw**。监督者管理 HTTP 只监听 `127.0.0.1:${SUPERVISOR_PORT}`；平台回调通过权限受限的私有 `supervisor-control.sock` 提交控制操作。该私有 UDS 不是 fnOS 统一网关 Socket，也不证明网关鉴权或管理员授权已验证。
+主线为 **fnOS Gateway → Rust Gateway/Socket → QwenPaw Web**；fnOS 生命周期入口仍是固定子命令的薄转发。管理系统 loopback HTTP 与私有 `supervisor-control.sock` 保持内部用途，后者不是 fnOS Gateway Socket。
 
-- `supervisor/src/management.rs` 提供 HTTP 与平台控制入口共用的管理核心；`supervisor/src/control.rs` 实现私有控制 UDS。`supervisor/src/api/` 按状态、生命周期、安装、配置和日志分组，状态查询不写桌面配置；`desktop.rs` 负责桌面入口的定点原子更新。
+- `supervisor/src/management.rs` 提供 Gateway、管理 HTTP 与平台私有控制入口共用的管理核心；`supervisor/src/control.rs` 实现私有控制 UDS。`supervisor/src/api/` 按状态、生命周期、安装、配置和日志分组，状态查询不写桌面配置；`desktop.rs` 负责桌面入口的定点原子更新。
 - `supervisor/src/install/` 分离安装编排、持久化环境事务与子进程执行。失败路径先停新实例，再回滚环境，最后恢复旧服务；安全收尾完成前不释放安装槽。
 - `runtime_settings.rs` 与 `settings_transaction.rs` 统一端口、日志级别和桌面配置变更：持久化恢复日志后执行，内核健康检查通过才提交，中断则在启动时恢复。平台配置回调由 Rust 子命令处理，不再自行构造管理 JSON 或写配置。
 - `supervisor/src/runtime.rs` 的 `RuntimeAdapter` 集中以固定 argv 调用受管 venv、pip 与 QwenPaw；这不代表 Python 内核依赖被移除，也不把管理策略交还给 Python。
-- `app/ui/api.cgi` 是薄入口，转发到 Rust 原生 `web api-cgi` 兼容处理；`app/ui/index.cgi` 转发到 Rust 原生静态资源服务。两者仍随包使用，属于迁移期兼容桥，不是 fnOS 网关登录或管理员授权实现，也未宣称已退役。
+- 管理控制台与 `qwenpaw.main` 均经 `/app/qwenpaw/web/` 走同一 Gateway/Socket。Rust `web_proxy` 适配上游路径、流式 SSE 和 Bearer Authorization，并将管理系统 CSRF 与上游请求分离；WebSocket 返回 501，不属于完整支持。生产 CGI 与相关回退逻辑已删除。
 - 无法完成恢复时禁止自动启动和运维变更，保留状态、日志查询及故障文件供排查。停止监督者时禁止新内核启动，并等待进行中事务安全收尾。
-- `web/src/installTask.mjs` 独立判定安装任务归属；受理序号与监督者进程身份都匹配才确认终态，响应丢失时明确显示无法确认，不猜测成功。
+- `web/src/installTask.mjs` 用合法 `seq + instance` 和 `sessionStorage` 恢复同一任务轮询，页面重建/pageshow 不重复 POST；存储不可用时安全降级。语言仅在首次初始化时默认中文，不覆盖已有英文。
 
-现有本地回归入口包括 `python3 scripts/test-platform-callbacks.py`、`python3 scripts/test-native-api-cgi.py`、`python3 scripts/test-native-index-cgi.py`、`python3 scripts/test-runtime-venv-contract.py`、`python3 scripts/test-management-boundary.py`、`python3 scripts/test-supervisor-api.py`、`bash scripts/test-lifecycle.sh`、`bash scripts/test-config-callback.sh`、`bash scripts/test-venv-recovery.sh`、`STRICT_CI=1 bash scripts/lint.sh` 与 `python3 scripts/gen-audit.py --check`。`test-supervisor-api.py`、`test-venv-recovery.sh` 及 lifecycle 脚本中的真实监督者场景需要先构建 release 二进制；按各脚本要求使用隔离临时目录，不操作已部署服务。前端可用 `npm run typecheck --prefix web`、`npm test --prefix web` 和 `npm run test:e2e --prefix web`。
+现有本地回归入口包括 `python3 scripts/test-platform-callbacks.py`、`python3 scripts/test-runtime-venv-contract.py`、`python3 scripts/test-management-boundary.py`、`python3 scripts/test-supervisor-api.py`、`bash scripts/test-lifecycle.sh`、`bash scripts/test-config-callback.sh`、`bash scripts/test-venv-recovery.sh`、`STRICT_CI=1 bash scripts/lint.sh` 与 `python3 scripts/gen-audit.py --check`。`test-supervisor-api.py`、`test-venv-recovery.sh` 及 lifecycle 脚本中的真实监督者场景需要先构建 release 二进制；按各脚本要求使用隔离临时目录，不操作已部署服务。前端可用 `npm run typecheck --prefix web`、`npm test --prefix web`、`npm run test:e2e --prefix web`、`npm run test:e2e:gateway --prefix web` 和 `npm run test:e2e:gateway:webkit --prefix web`；没有 CGI E2E 命令。
 
-### 当前本地候选验证（非生产可用声明）
+### Gateway-only 当前状态与测试候选（非生产发布声明）
 
-2026-11-04 初审整改后的 1.1.1 RC1 本地包为 `build/output/qwenpaw-1.1.1-1-x86.fpk`（2,071,727 字节，SHA256 `ec6850e3196f69545e66d649c4ce15a59b70529c6dc1ab45845fcc8d12ed2e0a`）。Rust 222+13、Node 30、严格 Clippy/typecheck、lint、audit、自测、API/lifecycle 120 并发、七点恢复、native API 15、index 22、platform 11、真实 venv 与 Chromium 1 项均通过；原始 SIGKILL→service stop/restart 已在隔离环境实测通过。完整结果与边界见 [`docs/session-handoff-2026-11-04.md`](docs/session-handoff-2026-11-04.md)。
+G4 已实施，当前生产管理 Web 为 Gateway-only：`app/ui` 提供 Gateway 桌面配置和图标，不再包含生产 CGI；CGI 子命令、前端 action fallback、CGI 专属测试和 CI 步骤均已删除。`qwenpaw.console` 与 `qwenpaw.main` 均经 `/app/qwenpaw/web/` 进入同一 Gateway/Socket，不裸连 QwenPaw 内核端口，也不使用 `target blank`。Rust `web_proxy` 适配上游路径、流式 SSE 和 Bearer Authorization，并分离管理系统 CSRF 与上游请求；WebSocket 返回 501，不宣称完整支持。
 
-候选未经 fnOS 真机网关/UDS/鉴权、回调执行窗口、最低版本、实际平台停止预算、真实 PyPI 上游包、WebKit 或 fnOS App 验证；候选通过本地验证不表示生产可用或已发布。
+当前测试候选 FPK 为 `build/candidates/1.1.1-6-unified-web-20261109/qwenpaw-1.1.1-6-x86.fpk`，SHA256 `5db4c355433eb263cc48b5c52a2a4b37f991c30fd53407d4d4736579a0d9382b`；包内 supervisor SHA256 `cd00440f2a2c4d842f0cc4a510c757df2f4b28a8eaa57d9ca59f310065905ecb`。该测试候选经官方 update 后远端为 `1.1.1-6 running`，无内核、无未决事务；不代表生产发布。G3 按已批准范围完成，手机 App 最终复测仍待用户；fnOS logout 后旧会话仍有效是已知平台问题，用户确认不阻塞应用验收。官方 PyPI 直连 15 分钟无输出超时；阿里云真实 `qwenpaw==2.2.2.post1` 安装/卸载通过，但不是官方 PyPI 直连通过。
+
+前端合法 `seq + instance` 使用 `sessionStorage`，页面重建/pageshow 恢复同一任务轮询且不重复 POST；存储不可用时安全降级。语言只在首次初始化时默认为中文，不覆盖已有英文。旧 G1/G2 候选和测试数量保留在 Git/历史资料中，不是当前候选，也不替代此处的状态。
 
 ## 版本历史
 
 版本呈现自当前候选起统一为：架构变更前的原 `1.0.x` 归入 `0.0.x`，引入常驻 Rust 监督者后的原 `2.x` 归入 `1.x`。这是文档与后续版本的归一化规则；既有 Git tag 和已发布 Release 名称保持原样，不重写历史发布对象。
 
-### v1.1.1-rc.1（当前候选，FPK 版本 1.1.1-1）
+### v1.1.1-rc.1（历史候选，FPK 版本 1.1.1-1）
 
-- 管理层统一迁入 Rust/native CGI 薄桥，生命周期、配置、安装和恢复共用管理核心与私有控制 UDS；
+- 当时管理层统一迁入 Rust，CGI 作为迁移期薄桥；生命周期、配置、安装和恢复共用管理核心与私有控制 UDS。此历史描述不代表当前生产 CGI 仍存在；
 - 修复崩溃后 service 恢复、提交写失败、Web 停止/卸载门禁和跨实例任务归属；
 - 前端类型纪律、真实 venv、并发与故障恢复回归纳入发布门禁。
 

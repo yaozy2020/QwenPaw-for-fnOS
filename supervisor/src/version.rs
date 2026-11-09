@@ -1,5 +1,5 @@
 //! PEP 440 版本解析、稳定/Beta 分类与语义排序。
-//! 后端唯一实现：统一 CGI、监督者与前端三方口径。
+//! 后端唯一实现：统一监督者与前端版本口径。
 //!
 //! 覆盖范围（非完整 PEP 440）：epoch、release、pre/post/dev 阶段与编号。
 //! 未实现 local version(`+abc`)、隐式 post(`1.0-1`)与任意 dash/underscore 归一化的全部细节。
@@ -325,7 +325,21 @@ mod tests {
         assert_eq!(res.latest_beta, "2.1.0b2");
         assert_eq!(res.versions[0].version, "2.10.0");
         assert_eq!(res.versions[0].action, "upgrade");
-        assert_eq!(res.versions.iter().find(|v| v.version == "2.1.0").unwrap().action, "reinstall");
-        assert_eq!(res.versions.iter().find(|v| v.version == "2.0.0").unwrap().action, "downgrade");
+        assert_eq!(
+            res.versions
+                .iter()
+                .find(|v| v.version == "2.1.0")
+                .unwrap()
+                .action,
+            "reinstall"
+        );
+        assert_eq!(
+            res.versions
+                .iter()
+                .find(|v| v.version == "2.0.0")
+                .unwrap()
+                .action,
+            "downgrade"
+        );
     }
 }

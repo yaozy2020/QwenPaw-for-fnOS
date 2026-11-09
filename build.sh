@@ -121,6 +121,8 @@ for f in main install_init install_callback upgrade_init upgrade_callback uninst
   cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f"
   chmod 0755 "$STAGE/cmd/$f"
 done
+cp "$SUP_BIN_SRC" "$STAGE/cmd/qwenpaw-supervisor"
+chmod 0755 "$STAGE/cmd/qwenpaw-supervisor"
 
 # config 目录白名单精准物化 (mode 0644)
 mkdir -p "$STAGE/config"
@@ -134,11 +136,8 @@ for f in install upgrade config uninstall; do
   [ -f "$PROJ_DIR/wizard/$f" ] && cp "$PROJ_DIR/wizard/$f" "$STAGE/wizard/$f" && chmod 0644 "$STAGE/wizard/$f"
 done
 
-# app 运行时白名单精准物化 (包含 4 个桌面图标)
+# app 运行时白名单精准物化 (统一 Gateway 静态控制台与 4 个桌面图标)
 mkdir -p "$STAGE/app/ui/images" "$STAGE/app/www" "$STAGE/app/bin"
-cp "$PROJ_DIR/app/ui/api.cgi" "$STAGE/app/ui/api.cgi"
-cp "$PROJ_DIR/app/ui/index.cgi" "$STAGE/app/ui/index.cgi"
-chmod 0755 "$STAGE/app/ui/api.cgi" "$STAGE/app/ui/index.cgi"
 
 cp "$PROJ_DIR/app/ui/config" "$STAGE/app/ui/config"
 chmod 0644 "$STAGE/app/ui/config"

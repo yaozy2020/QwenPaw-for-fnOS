@@ -4,8 +4,6 @@ pub enum Command {
     Service(ServiceAction),
     Platform(PlatformAction),
     DoctorJson,
-    WebApiCgi,
-    WebIndexCgi,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -61,11 +59,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 value.clone(),
             ))))
         }
-        [command, action] if command == "web" && action == "api-cgi" => Ok(Command::WebApiCgi),
-        [command, action] if command == "web" && action == "index-cgi" => Ok(Command::WebIndexCgi),
         [command, flag] if command == "doctor" && flag == "--json" => Ok(Command::DoctorJson),
         _ => Err(
-            "usage: qwenpaw-supervisor [serve | service start|stop|restart|status | platform install|upgrade|uninstall|configure|config-init|upgrade-init|mirror-get|mirror-set <value> | web api-cgi|index-cgi | doctor --json]"
+            "usage: qwenpaw-supervisor [serve | service start|stop|restart|status | platform install|upgrade|uninstall|configure|config-init|upgrade-init|mirror-get|mirror-set <value> | doctor --json]"
                 .into(),
         ),
     }
@@ -91,14 +87,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_native_web_index_cgi_command() {
-        assert!(parse_args(&["web", "index-cgi"]).is_ok());
-        assert!(parse_args(&["web", "index-cgi", "extra"]).is_err());
-    }
-
-    #[test]
-    fn parses_native_web_api_cgi_command() {
-        assert_eq!(parse_args(&["web", "api-cgi"]), Ok(Command::WebApiCgi));
+    fn rejects_retired_web_cgi_commands() {
+        assert!(parse_args(&["web", "api-cgi"]).is_err());
+        assert!(parse_args(&["web", "index-cgi"]).is_err());
         assert!(parse_args(&["web", "unknown"]).is_err());
     }
 

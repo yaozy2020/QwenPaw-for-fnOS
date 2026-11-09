@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -65,7 +67,6 @@ PLATFORM_ENTRY_RULES = SHELL_ENTRY_RULES + (
     ("sources files", SHELL_SOURCE_COMMAND),
 )
 PLATFORM_EXEC_COMMAND = re.compile(r"(?m)^[ \t]*exec\b")
-SHELL_PYTHON_COMMAND = re.compile(r"\bpython(?:[0-9]+(?:\.[0-9]+)*)?\b", re.IGNORECASE)
 SERVICE_EXEC = re.compile(
     r'(?m)^[ \t]*exec[ \t]+(?:"\$(?:\{candidate\}|candidate)"|\$(?:\{candidate\}|candidate))'
     r'[ \t]+service[ \t]+(?:"\$@"|\$@)[ \t]*(?:;[ \t]*|$)'
@@ -154,6 +155,14 @@ def inspect_main_entry(repo_root):
     for label, pattern in SHELL_ENTRY_RULES:
         for match in pattern.finditer(code):
             errors.append(f"cmd/main:{line_number(code, match.start())}: {label}")
+    socket_export = re.compile(
+        r'(?m)^[ \t]*export[ \t]+QWENPAW_GATEWAY_SOCKET="\$\{APPDEST\}/app\.sock"[ \t]*$'
+    )
+    socket_references = list(re.finditer(r"\bQWENPAW_GATEWAY_SOCKET\b", code))
+    if len(socket_references) != 1 or len(socket_export.findall(code)) != 1:
+        errors.append(
+            'cmd/main: QWENPAW_GATEWAY_SOCKET must be exported exactly once as "${APPDEST}/app.sock"'
+        )
     if not SERVICE_EXEC.search(code):
         errors.append(
             'cmd/main: does not forward service parameters through exec "$candidate" service "$@"'
@@ -178,18 +187,62 @@ def inspect_platform_entry(repo_root, entry, subcommand):
             errors.append(f"{rel}:{line_number(code, match.start())}: {label}")
 
     execs = list(PLATFORM_EXEC_COMMAND.finditer(code))
-    fixed_exec = re.compile(
-        r'(?m)^[ \t]*exec[ \t]+(?:"\$(?:\{candidate\}|candidate)"|\$(?:\{candidate\}|candidate))'
-        + r"[ \t]+platform[ \t]+"
-        + re.escape(subcommand)
-        + r"[ \t]*(?:;[ \t]*|$)"
-    )
-    fixed_execs = [match for match in execs if fixed_exec.match(code, match.start())]
-    if len(execs) != 1 or len(fixed_execs) != 1:
-        offset = execs[0].start() if execs else 0
-        errors.append(
-            f"{rel}:{line_number(code, offset)}: must use exactly one fixed platform {subcommand} exec"
+    helper_literal = "qwenpaw-supervisor-helper"
+    active = [line.strip() for line in code.splitlines() if line.strip()]
+    if entry in {"upgrade_callback", "uninstall_callback"}:
+        expected = [
+            'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then',
+            f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {subcommand}',
+            "fi",
+            'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
+            f'exec "${{0%/*}}/qwenpaw-supervisor" platform {subcommand}',
+            "fi",
+            "exit 127",
+        ]
+        if len(execs) != 2 or active != expected:
+            offset = execs[0].start() if execs else 0
+            errors.append(
+                f"{rel}:{line_number(code, offset)}: must use TRIM_PKGVAR helper then sibling for fixed platform {subcommand}"
+            )
+    elif entry == "upgrade_init":
+        expected = [
+            'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
+            'exec "${0%/*}/qwenpaw-supervisor" platform upgrade-init',
+            "fi",
+            'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"',
+            "for candidate in " + chr(92),
+            '"${APPDEST}/app/bin/qwenpaw-supervisor" ' + chr(92),
+            '"${APPDEST}/bin/qwenpaw-supervisor" ' + chr(92),
+            '"/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" ' + chr(92),
+            '"/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"',
+            "do",
+            'if [ -x "$candidate" ]; then',
+            'exec "$candidate" platform upgrade-init',
+            "fi",
+            "done",
+            'printf \'%s\\n\' "supervisor binary not found" >&2',
+            "exit 1",
+        ]
+        if len(execs) != 2 or active != expected:
+            offset = execs[0].start() if execs else 0
+            errors.append(
+                f"{rel}:{line_number(code, offset)}: must prioritize staged sibling over target platform upgrade-init candidates"
+            )
+    else:
+        fixed_exec = re.compile(
+            r'(?m)^[ \t]*exec[ \t]+(?:"\$(?:\{candidate\}|candidate)"|\$(?:\{candidate\}|candidate))'
+            + r"[ \t]+platform[ \t]+"
+            + re.escape(subcommand)
+            + r"[ \t]*(?:;[ \t]*|$)"
         )
+        fixed_execs = [match for match in execs if fixed_exec.match(code, match.start())]
+        if len(execs) != 1 or len(fixed_execs) != 1:
+            offset = execs[0].start() if execs else 0
+            errors.append(
+                f"{rel}:{line_number(code, offset)}: must use exactly one fixed platform {subcommand} exec"
+            )
+        if entry == "install_callback" and helper_literal in code:
+            errors.append(f"{rel}: install callback must not use a persistent helper fallback")
     return errors
 
 
@@ -226,138 +279,6 @@ def inspect_noop_entry(repo_root, entry):
     if statements != ["exit 0"]:
         return [f"{rel} must remain an explicit no-op (only `exit 0` is allowed)"]
     return []
-
-
-def supervisor_candidates(source):
-    code = shell_code(source)
-    loop = re.search(
-        r"(?ms)^[ \t]*for[ \t]+candidate[ \t]+in[ \t]*\\[ \t]*\n(?P<items>.*?)^[ \t]*do[ \t]*$",
-        code,
-    )
-    if loop is None:
-        return None
-
-    candidates = []
-    for line in loop.group("items").splitlines():
-        item = line.strip()
-        if item.endswith("\\"):
-            item = item[:-1].rstrip()
-        match = re.fullmatch(r'"([^"\n]+)"', item)
-        if match is None:
-            return None
-        candidates.append(match.group(1))
-    return candidates or None
-
-
-def api_cgi_code(candidates):
-    path_lines = [
-        f'    "{candidate}"' + (" \\" if index < len(candidates) - 1 else "")
-        for index, candidate in enumerate(candidates)
-    ]
-    return [
-        'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"',
-        "for candidate in \\",
-        *path_lines,
-        "do",
-        '    if [ -x "$candidate" ]; then',
-        '        exec "$candidate" web api-cgi',
-        "    fi",
-        "done",
-        'printf \'%s\\n\' "supervisor binary not found" >&2',
-        "exit 1",
-    ]
-
-
-def inspect_api_cgi(repo_root):
-    rel = "app/ui/api.cgi"
-    path = repo_root / rel
-    if not path.is_file():
-        return [f"{rel} is required as the native CGI thin entry"]
-
-    source = path.read_text(encoding="utf-8")
-    code = shell_code(source)
-    errors = []
-    candidates = supervisor_candidates(source)
-    main_path = repo_root / "cmd" / "main"
-    main_candidates = (
-        supervisor_candidates(main_path.read_text(encoding="utf-8"))
-        if main_path.is_file()
-        else None
-    )
-    if candidates is None:
-        errors.append(f"{rel}: cannot resolve supervisor candidate paths")
-    elif main_candidates is None or candidates != main_candidates:
-        errors.append(f"{rel}: candidate paths must match cmd/main")
-
-    if re.search(r"(?i)\baction\b", code):
-        errors.append(f"{rel}: contains action dispatch")
-    if re.search(r"(?i)\bcurl\b", code):
-        errors.append(f"{rel}: invokes curl")
-    if SHELL_PYTHON_COMMAND.search(code):
-        errors.append(f"{rel}: invokes Python")
-    if re.search(r"(?i)csrf", code):
-        errors.append(f"{rel}: contains CSRF logic")
-    pip_mirror_write = re.compile(
-        r'''(?ix)(?<![<])(?:>>?|>\||&>|<>)[ \t]*(?:"[^"\n]*\bpip-mirror\b[^"\n]*"|'[^'\n]*\bpip-mirror\b[^'\n]*'|[^\s;|&]*\bpip-mirror\b[^\s;|&]*)'''
-    )
-    pip_mirror_mutation = re.compile(
-        r"(?i)\b(?:tee|cp|mv|install|rm|unlink|truncate)\b[^\n;|&]*\bpip-mirror\b"
-    )
-    pip_mirror_in_place_edit = re.compile(
-        r"(?i)\bsed\b[^\n;|&]*\s-i(?:\s|$)[^\n;|&]*\bpip-mirror\b"
-    )
-    if any(pattern.search(code) for pattern in (
-        pip_mirror_write,
-        pip_mirror_mutation,
-        pip_mirror_in_place_edit,
-    )):
-        errors.append(f"{rel}: writes pip-mirror directly")
-
-    exec_commands = re.findall(r"(?m)^[ \t]*exec[ \t]+([^\n]+)$", code)
-    if exec_commands != ['"$candidate" web api-cgi']:
-        errors.append(f"{rel}: executes only web api-cgi")
-    if candidates is not None and main_candidates == candidates:
-        expected = [line.strip() for line in api_cgi_code(candidates)]
-        actual = [line.strip() for line in code.splitlines() if line.strip()]
-        if actual != expected:
-            errors.append(f"{rel}: must only locate the supervisor and exec web api-cgi")
-    return errors
-
-
-def index_cgi_code(candidates):
-    return [line.replace("web api-cgi", "web index-cgi") for line in api_cgi_code(candidates)]
-
-
-def inspect_index_cgi(repo_root):
-    rel = "app/ui/index.cgi"
-    path = repo_root / rel
-    if not path.is_file():
-        return [f"{rel} is required as the native CGI thin entry"]
-
-    source = path.read_text(encoding="utf-8")
-    code = shell_code(source)
-    errors = []
-    candidates = supervisor_candidates(source)
-    main_path = repo_root / "cmd" / "main"
-    main_candidates = (
-        supervisor_candidates(main_path.read_text(encoding="utf-8"))
-        if main_path.is_file()
-        else None
-    )
-    if candidates is None:
-        errors.append(f"{rel}: cannot resolve supervisor candidate paths")
-    elif main_candidates is None or candidates != main_candidates:
-        errors.append(f"{rel}: candidate paths must match cmd/main")
-
-    exec_commands = re.findall(r"(?m)^[ \t]*exec[ \t]+([^\n]+)$", code)
-    if exec_commands != ['"$candidate" web index-cgi']:
-        errors.append(f"{rel}: executes only web index-cgi")
-    if candidates is not None and main_candidates == candidates:
-        expected = [line.strip() for line in index_cgi_code(candidates)]
-        actual = [line.strip() for line in code.splitlines() if line.strip()]
-        if actual != expected:
-            errors.append(f"{rel}: must only locate the supervisor and exec web index-cgi")
-    return errors
 
 
 def inspect_source(src_root):
@@ -428,8 +349,6 @@ def inspect_source(src_root):
         errors.extend(inspect_platform_entry(repo_root, entry, subcommand))
     for entry in NOOP_PLATFORM_ENTRIES:
         errors.extend(inspect_noop_entry(repo_root, entry))
-    errors.extend(inspect_api_cgi(repo_root))
-    errors.extend(inspect_index_cgi(repo_root))
     return errors, blockers, notes
 
 
@@ -444,18 +363,63 @@ def write_fixture(src_root, rel, source):
 
 
 def valid_platform_entry(subcommand):
-    return (
+    if subcommand in {"upgrade", "uninstall"}:
+        return (
+            "#!/bin/sh\n"
+            'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then\n'
+            f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {subcommand}\n'
+            "fi\n"
+            'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then\n'
+            f'exec "${{0%/*}}/qwenpaw-supervisor" platform {subcommand}\n'
+            "fi\n"
+            "exit 127\n"
+        )
+    if subcommand == "upgrade-init":
+        return (
+            "#!/bin/bash\n"
+            'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then\n'
+            '    exec "${0%/*}/qwenpaw-supervisor" platform upgrade-init\n'
+            "fi\n"
+            'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n'
+            "for candidate in \\\n"
+            '    "${APPDEST}/app/bin/qwenpaw-supervisor" \\\n'
+            '    "${APPDEST}/bin/qwenpaw-supervisor" \\\n'
+            '    "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" \\\n'
+            '    "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"\n'
+            "do\n"
+            '    if [ -x "$candidate" ]; then\n'
+            '        exec "$candidate" platform upgrade-init\n'
+            "    fi\n"
+            "done\n"
+            'printf \'%s\\n\' "supervisor binary not found" >&2\n'
+            "exit 1\n"
+        )
+    source = (
         "#!/bin/bash\n"
-        "# Thin entry only; no pip, Python, curl, rm, chown, source, or case business logic.\n"
-        'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n'
-        'for candidate in "${APPDEST}/bin/qwenpaw-supervisor"; do\n'
-        '    if [ -x "$candidate" ]; then\n'
-        f'        exec "$candidate" platform {subcommand}\n'
-        "    fi\n"
-        "done\n"
-        'printf \'%s\\n\' "supervisor binary not found" >&2\n'
-        "exit 1\n"
+        'candidate=""\n'
+        'if [ -n "${TRIM_APPDEST:-}" ]; then\n'
+        '    for candidate_path in "$TRIM_APPDEST/app/bin/qwenpaw-supervisor" '
+        '"$TRIM_APPDEST/bin/qwenpaw-supervisor"; do\n'
+        '        if [ -x "$candidate_path" ]; then\n'
+        '            candidate=$candidate_path\n'
+        '            break\n'
+        '        fi\n'
+        '    done\n'
+        'fi\n'
+        'if [ -z "$candidate" ]; then\n'
+        '    for candidate_path in "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" '
+        '"/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"; do\n'
+        '        if [ -x "$candidate_path" ]; then\n'
+        '            candidate=$candidate_path\n'
+        '            break\n'
+        '        fi\n'
+        '    done\n'
+        'fi\n'
+        'if [ -z "$candidate" ]; then\n'
+        '    exit 127\n'
+        "fi\n"
     )
+    return source + f'exec "$candidate" platform {subcommand}\n'
 
 
 def write_valid_platform_entries(repo):
@@ -465,47 +429,6 @@ def write_valid_platform_entries(repo):
         ("upgrade_init", "upgrade-init"),
     ):
         write_fixture(repo, f"cmd/{name}", valid_platform_entry(subcommand))
-
-
-def api_cgi_thin_fixture(extra="", candidates=None):
-    candidates = candidates or supervisor_candidates(valid_management_main())
-    path_lines = "\n".join(
-        f'    "{candidate}"' + (" \\" if index < len(candidates) - 1 else "")
-        for index, candidate in enumerate(candidates)
-    )
-    return (
-        "#!/bin/bash\n"
-        'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n'
-        "for candidate in \\\n"
-        + path_lines
-        + "\ndo\n"
-        '    if [ -x "$candidate" ]; then\n'
-        '        exec "$candidate" web api-cgi\n'
-        "    fi\n"
-        "done\n"
-        'printf \'%s\\n\' "supervisor binary not found" >&2\n'
-        "exit 1\n"
-        + extra
-    )
-
-
-def index_cgi_thin_fixture(extra="", candidates=None):
-    return api_cgi_thin_fixture(extra, candidates).replace("web api-cgi", "web index-cgi")
-
-
-def write_valid_management_cmd_entries(repo):
-    write_fixture(repo, "cmd/main", valid_management_main())
-    write_fixture(repo, "app/ui/api.cgi", api_cgi_thin_fixture())
-    write_fixture(repo, "app/ui/index.cgi", index_cgi_thin_fixture())
-    write_valid_platform_entries(repo)
-    for name, subcommand in (
-        ("install_callback", "install"),
-        ("upgrade_callback", "upgrade"),
-        ("uninstall_callback", "uninstall"),
-    ):
-        write_fixture(repo, f"cmd/{name}", valid_platform_entry(subcommand))
-    write_fixture(repo, "cmd/install_init", "#!/bin/bash\nexit 0\n")
-    write_fixture(repo, "cmd/uninstall_init", "#!/bin/bash\nexit 0\n")
 
 
 def valid_management_main():
@@ -522,6 +445,7 @@ def valid_management_main():
     return (
         "#!/bin/bash\n"
         'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n'
+        'export QWENPAW_GATEWAY_SOCKET="${APPDEST}/app.sock"\n'
         "for candidate in \\\n"
         + path_lines
         + "\ndo\n"
@@ -530,6 +454,19 @@ def valid_management_main():
         "    fi\n"
         "done\n"
     )
+
+
+def write_valid_management_cmd_entries(repo):
+    write_fixture(repo, "cmd/main", valid_management_main())
+    write_valid_platform_entries(repo)
+    for name, subcommand in (
+        ("install_callback", "install"),
+        ("upgrade_callback", "upgrade"),
+        ("uninstall_callback", "uninstall"),
+    ):
+        write_fixture(repo, f"cmd/{name}", valid_platform_entry(subcommand))
+    write_fixture(repo, "cmd/install_init", "#!/bin/bash\nexit 0\n")
+    write_fixture(repo, "cmd/uninstall_init", "#!/bin/bash\nexit 0\n")
 
 
 def callback_layout_self_test():
@@ -563,7 +500,9 @@ def callback_layout_self_test():
         ("uninstall_callback", "uninstall", ". ./lib.sh\n", "sources files"),
         ("upgrade_callback", "upgrade", "source ./helper.sh\n", "sources files"),
         ("install_callback", "install", 'case "$1" in install) : ;; esac\n', "case business logic"),
-        ("upgrade_callback", "upgrade", 'exec "$candidate" platform install\n', "fixed platform upgrade"),
+        ("upgrade_callback", "upgrade", 'exec "$candidate" platform install\n', "TRIM_PKGVAR helper then sibling"),
+        ("uninstall_callback", "uninstall", 'candidate="$TRIM_PKGVAR/qwenpaw-supervisor-helper"\n', "TRIM_PKGVAR helper then sibling"),
+        ("upgrade_callback", "upgrade", 'true\n', "TRIM_PKGVAR helper then sibling"),
     ]
     for entry, subcommand, injected, expected in callback_violations:
         with tempfile.TemporaryDirectory(prefix="management-p3-callback-negative-") as temp:
@@ -571,12 +510,7 @@ def callback_layout_self_test():
             repo = src.parent.parent
             write_fixture(src, "runtime_settings.rs", "pub struct RuntimeSettings;\n")
             write_valid_management_cmd_entries(repo)
-            target = valid_platform_entry(subcommand).replace(
-                'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n',
-                'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n' + injected,
-            )
-            if expected.startswith("fixed platform"):
-                target = target.replace(f"platform {subcommand}", "platform install")
+            target = valid_platform_entry(subcommand).replace("\n", "\n" + injected, 1)
             write_fixture(repo, f"cmd/{entry}", target)
             errors, _, _ = inspect_source(src)
             assert any(f"cmd/{entry}" in error and expected in error for error in errors), (
@@ -617,6 +551,38 @@ def callback_layout_self_test():
     )
 
 
+def gateway_socket_runtime_self_test():
+    repo_root = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory(prefix="management-main-gateway-socket-") as temp:
+        appdest = Path(temp)
+        supervisor = appdest / "bin/qwenpaw-supervisor"
+        supervisor.parent.mkdir(parents=True)
+        supervisor.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$QWENPAW_GATEWAY_SOCKET\" \"$@\"\n"
+            "sh -c 'printf \"%s\\n\" \"$QWENPAW_GATEWAY_SOCKET\"'\n",
+            encoding="utf-8",
+        )
+        supervisor.chmod(0o755)
+        env = os.environ.copy()
+        env["TRIM_APPDEST"] = str(appdest)
+        env["QWENPAW_GATEWAY_SOCKET"] = str(appdest / "ignored.sock")
+        for action in ("start", "status"):
+            result = subprocess.run(
+                ["bash", str(repo_root / "cmd/main"), action, "--probe"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            expected = f"{appdest}/app.sock\nservice\n{action}\n--probe\n{appdest}/app.sock\n"
+            assert result.returncode == 0, f"cmd/main runtime probe failed: {result.stderr}"
+            assert result.stdout == expected, (
+                f"cmd/main must pass fixed Socket environment and service argv: {result.stdout!r}"
+            )
+    print("management-main gateway socket runtime self-test: PASS (start/status argv, fixed env, child inheritance)")
+
+
 def self_test():
     valid_main = valid_management_main()
     with tempfile.TemporaryDirectory(prefix="management-boundary-positive-") as temp:
@@ -634,7 +600,6 @@ def self_test():
         write_fixture(src, "bin/qwenpaw-test-runtime.rs", 'Command::new("python3").arg("-c");\n')
         write_valid_management_cmd_entries(repo)
         write_fixture(repo, "cmd/main", valid_main + "# curl python3 nohup flock case supervisor_ctl source cmd/lib.sh\n")
-        write_fixture(repo, "app/ui/api.cgi", api_cgi_thin_fixture())
         errors, blockers, _ = inspect_source(src)
         assert exit_code(errors) == 0, f"allowed fixture should pass: {errors}"
         assert not blockers, f"completed native Simple Index must not remain a blocker: {blockers}"
@@ -679,6 +644,15 @@ def self_test():
             'does not forward service parameters through exec "$candidate" service "$@"',
             valid_main.replace('exec "$candidate" service "$@"', 'exec "$candidate" service "$1"'),
         ),
+        (
+            'QWENPAW_GATEWAY_SOCKET must be exported exactly once',
+            valid_main.replace('export QWENPAW_GATEWAY_SOCKET="${APPDEST}/app.sock"\n', ""),
+        ),
+        (
+            'QWENPAW_GATEWAY_SOCKET must be exported exactly once',
+            valid_main.replace('export QWENPAW_GATEWAY_SOCKET="${APPDEST}/app.sock"',
+                               'export QWENPAW_GATEWAY_SOCKET="${TRIM_APPDEST}/other.sock"'),
+        ),
         ("cmd/main is required", None),
     ]
     for expected, bad_source in main_violations:
@@ -688,13 +662,18 @@ def self_test():
             write_fixture(src, "runtime_settings.rs", "pub struct RuntimeSettings;\n")
             write_valid_platform_entries(repo)
             if bad_source is not None:
-                main_source = bad_source if expected.startswith("does not forward") else bad_source + valid_main
+                main_source = (
+                    bad_source
+                    if expected.startswith(("does not forward", "QWENPAW_GATEWAY_SOCKET"))
+                    else bad_source + valid_main
+                )
                 write_fixture(repo, "cmd/main", main_source)
             errors, _, _ = inspect_source(src)
             assert any(expected in error for error in errors), (
                 f"cmd/main violation `{expected}` must be reported: {errors}"
             )
     print(f"management-main self-test: PASS ({len(main_violations)} negative cases, scoped positive fixture)")
+    gateway_socket_runtime_self_test()
 
     platform_violations = [
         ("config_callback", "configure", "curl --fail https://example.invalid\n", "invokes curl"),
@@ -704,6 +683,12 @@ def self_test():
             "upgrade-init",
             'printf \'%s\\n\' value > "$CONFIG_FILE"\n',
             "writes files/configuration",
+        ),
+        (
+            "upgrade_init",
+            "upgrade-init",
+            'exec "$candidate" platform upgrade-init\n',
+            "must prioritize staged sibling",
         ),
         (
             "config_callback",
@@ -724,8 +709,7 @@ def self_test():
             if expected.startswith("fixed platform"):
                 target = target.replace(f"platform {subcommand}", "platform configure")
             else:
-                target = target.replace('APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n',
-                                        'APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"\n' + injected)
+                target = target.replace("#!/bin/bash\n", "#!/bin/bash\n" + injected)
             write_fixture(repo, f"cmd/{entry}", target)
             errors, _, _ = inspect_source(src)
             assert any(f"cmd/{entry}" in error and expected in error for error in errors), (
@@ -733,104 +717,96 @@ def self_test():
             )
     print(f"management-platform self-test: PASS ({len(platform_violations)} negative cases, positive fixtures)")
 
-    api_cgi_violations = [
-        ("action dispatch", 'action=$(printf status)\n', "contains action dispatch"),
-        ("curl", "curl --fail https://example.invalid\n", "invokes curl"),
-        ("Python", "python3 -c 'pass'\n", "invokes Python"),
-        ("CSRF", "csrf_token=\"value\"\n", "contains CSRF logic"),
-        (
-            "mirror write",
-            'printf \'%s\\n\' "$m" > "${VAR_DIR}/pip-mirror"\n',
-            "writes pip-mirror directly",
-        ),
-        (
-            "candidate mismatch",
-            api_cgi_thin_fixture().replace(
-                '"${APPDEST}/app/bin/qwenpaw-supervisor"',
-                '"${APPDEST}/app/bin/other-supervisor"',
-            ),
-            "candidate paths must match cmd/main",
-        ),
-        (
-            "wrong command",
-            api_cgi_thin_fixture().replace("web api-cgi", "platform configure"),
-            "executes only web api-cgi",
-        ),
-    ]
-    for case, content, expected in api_cgi_violations:
-        with tempfile.TemporaryDirectory(prefix="management-api-cgi-negative-") as temp:
-            src = Path(temp) / "supervisor" / "src"
-            repo = src.parent.parent
-            write_fixture(src, "runtime_settings.rs", "pub struct RuntimeSettings;\n")
-            write_valid_management_cmd_entries(repo)
-            if case in {"candidate mismatch", "wrong command"}:
-                fixture = content
-            else:
-                fixture = api_cgi_thin_fixture(content)
-            write_fixture(repo, "app/ui/api.cgi", fixture)
-            errors, _, _ = inspect_source(src)
-            assert any("app/ui/api.cgi" in error and expected in error for error in errors), (
-                f"api.cgi {case} violation `{expected}` must be reported: {errors}"
-            )
-    print(f"management-api-cgi self-test: PASS ({len(api_cgi_violations)} negative cases)")
-
-    index_cgi_violations = [
-        ("candidate mismatch", index_cgi_thin_fixture().replace(
-            '"${APPDEST}/app/bin/qwenpaw-supervisor"',
-            '"${APPDEST}/app/bin/other-supervisor"',
-        ), "candidate paths must match cmd/main"),
-        ("wrong command", index_cgi_thin_fixture().replace(
-            "web index-cgi", "web api-cgi"
-        ), "executes only web index-cgi"),
-        ("awk", 'awk \'BEGIN { print "path logic" }\'\n',
-         "must only locate the supervisor and exec web index-cgi"),
-        ("sed", "sed -n '1p' /tmp/path\n",
-         "must only locate the supervisor and exec web index-cgi"),
-        ("cat", "cat /tmp/index.html\n",
-         "must only locate the supervisor and exec web index-cgi"),
-        ("cookie", 'cookie="qwenpaw_csrf=value"\n',
-         "must only locate the supervisor and exec web index-cgi"),
-        ("path business", 'REL_PATH="${REQUEST_URI#*index.cgi}"\n',
-         "must only locate the supervisor and exec web index-cgi"),
-    ]
-    for case, content, expected in index_cgi_violations:
-        with tempfile.TemporaryDirectory(prefix="management-index-cgi-negative-") as temp:
-            src = Path(temp) / "supervisor" / "src"
-            repo = src.parent.parent
-            write_fixture(src, "runtime_settings.rs", "pub struct RuntimeSettings;\n")
-            write_valid_management_cmd_entries(repo)
-            fixture = content if case in {"candidate mismatch", "wrong command"} else index_cgi_thin_fixture(content)
-            write_fixture(repo, "app/ui/index.cgi", fixture)
-            errors, _, _ = inspect_source(src)
-            assert any("app/ui/index.cgi" in error and expected in error for error in errors), (
-                f"index.cgi {case} violation `{expected}` must be reported: {errors}"
-            )
-    print(f"management-index-cgi self-test: PASS ({len(index_cgi_violations)} negative cases)")
-
-    native_cgi_violations = [
-        ("python3", 'Command::new("python3")', 'Command::new("python3")'),
-        ("python3.11", 'Command::new("python3.11")', 'Command::new("python3.11")'),
-        ("curl", 'Command::new("curl")', 'Command::new("curl")'),
-    ]
-    for command, injected, expected in native_cgi_violations:
-        with tempfile.TemporaryDirectory(prefix="management-native-cgi-negative-") as temp:
-            src = Path(temp) / "supervisor" / "src"
-            repo = src.parent.parent
-            write_fixture(src, "runtime_settings.rs", "pub struct RuntimeSettings;\n")
-            write_valid_management_cmd_entries(repo)
-            write_fixture(repo, "app/ui/api.cgi", api_cgi_thin_fixture())
-            write_fixture(src, "cgi.rs", f"fn api_cgi() {{ {injected}; }}\n")
-            errors, _, _ = inspect_source(src)
-            assert any("supervisor/src/cgi.rs" in error and expected in error for error in errors), (
-                f"native CGI Command::new({command}) must be rejected: {errors}"
-            )
-    print(f"management-native-cgi self-test: PASS ({len(native_cgi_violations)} Command negatives)")
     callback_layout_self_test()
+    gateway_only_self_test()
     return 0
+
+
+LEGACY_CGI_FILES = (
+    "app/ui/api.cgi",
+    "app/ui/index.cgi",
+    "scripts/browser-cgi-gateway.py",
+    "scripts/test-native-api-cgi.py",
+    "scripts/test-native-index-cgi.py",
+    "web/e2e/control-panel.spec.ts",
+)
+GATEWAY_ONLY_FILES = (
+    "build.sh",
+    "scripts/lint.sh",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "web/package.json",
+    "web/playwright.config.ts",
+    "web/e2e/run.mjs",
+    "web/e2e/README.md",
+    "web/e2e/gateway.spec.ts",
+    "web/src/api.ts",
+    "web/src/main.ts",
+    "web/build.mjs",
+    "scripts/browser-gateway.py",
+    "scripts/test-gateway-uds.py",
+    "scripts/test-supervisor-api.py",
+)
+LEGACY_CGI_CALLS = (
+    "app/ui/api.cgi",
+    "app/ui/index.cgi",
+    "scripts/browser-cgi-gateway.py",
+    "scripts/test-native-api-cgi.py",
+    "scripts/test-native-index-cgi.py",
+    "web/e2e/control-panel.spec.ts",
+    "test:e2e:cgi",
+    "web api-cgi",
+    "web index-cgi",
+)
+WORKFLOW_CGI_COMMANDS = (
+    "test:e2e:cgi",
+    "python3 scripts/test-native-api-cgi.py",
+    "python3 scripts/test-native-index-cgi.py",
+    "scripts/browser-cgi-gateway.py",
+)
+
+
+def inspect_gateway_only(repo_root):
+    errors = []
+    for rel in LEGACY_CGI_FILES:
+        if (repo_root / rel).exists():
+            errors.append(f"{rel} must be removed from the Gateway-only tree")
+    for rel in GATEWAY_ONLY_FILES:
+        path = repo_root / rel
+        if not path.is_file():
+            errors.append(f"{rel} is required for the Gateway-only delivery path")
+            continue
+        source = path.read_text(encoding="utf-8")
+        calls = WORKFLOW_CGI_COMMANDS if rel.startswith(".github/workflows/") else LEGACY_CGI_CALLS
+        for call in calls:
+            if call in source:
+                errors.append(f"{rel} still references retired CGI material `{call}`")
+    return errors
+
+
+def gateway_only_self_test():
+    with tempfile.TemporaryDirectory(prefix="management-gateway-only-") as temp:
+        repo = Path(temp)
+        for rel in GATEWAY_ONLY_FILES:
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("Gateway-only fixture\n", encoding="utf-8")
+        assert not inspect_gateway_only(repo)
+        old_entry = repo / LEGACY_CGI_FILES[0]
+        old_entry.parent.mkdir(parents=True, exist_ok=True)
+        old_entry.write_text("legacy\n", encoding="utf-8")
+        errors = inspect_gateway_only(repo)
+        assert any(LEGACY_CGI_FILES[0] in error for error in errors), errors
+        old_entry.unlink()
+        (repo / "build.sh").write_text("cp app/ui/api.cgi stage\n", encoding="utf-8")
+        errors = inspect_gateway_only(repo)
+        assert any("build.sh" in error and LEGACY_CGI_FILES[0] in error for error in errors), errors
+    print("management-Gateway-only self-test: PASS (retired artifacts absent; build references rejected)")
 
 
 def check_repository(src_root):
     errors, blockers, notes = inspect_source(src_root)
+    errors.extend(inspect_gateway_only(src_root.parent.parent))
     for note in notes:
         print(f"[INFO] {note}")
     for blocker in blockers:

@@ -1,22 +1,35 @@
 import { renderStatusCard, renderLogLines, renderMirrorOptions, renderVersionCards, renderHistoryItems } from "./components";
 import { formatUptime } from "./statusStore";
-import { createInstallTask, acceptInstallTask, observeInstallStatus } from "./installTask.mjs";
+import {
+  createInstallTask,
+  acceptInstallTask,
+  observeInstallStatus,
+  persistInstallTask,
+  restoreInstallTask,
+  clearStoredInstallTask,
+} from "./installTask.mjs";
 import { ApiClientError, createApiClient, type LogEntry, type VersionItem } from "./api";
 
 const api = createApiClient({ pathname: window.location.pathname, cookie: () => document.cookie });
+
+    function installTaskStorage(): Storage | null {
+      try { return window.sessionStorage; } catch { return null; }
+    }
 
     let refreshTimer: ReturnType<typeof setInterval> | null = null;
     let upgradePollTimer: ReturnType<typeof setInterval> | null = null;
     let upgradeStartedAt = 0;
     // 轮询总超时:任务真挂起(upgrading 恒 true / 后端失联)时给用户一条逃逸路径
     const UPGRADE_POLL_MAX_MS = 10 * 60 * 1000;
-    // 连续失败阈值:api.cgi 502 会走 catch,累计到此值即切"连接中断"终态
+    // 连续失败达到阈值后切换到"连接中断"终态
     const UPGRADE_POLL_FAIL_MAX = 6; // 1200ms 节流后 ≈1.6s/拍,到终态 ≈9.6s
     let pollFailureStreak = 0;
     let upPollLastAt = 0;
+    let upStatusPollInFlight = false;
+    let upLogsPollInFlight = false;
     // 任务跟踪:归属只看明确受理/附加的 seq + instance(installTask.mjs),
     // 不靠 phase 跳变或全局 seq 变化猜结果。
-    let installTask = createInstallTask({ attach: false });
+    let installTask = restoreInstallTask(installTaskStorage()) || createInstallTask({ attach: false });
 
     let rawVersionList: VersionItem[] = [];
     let userPickedVersion = false;
@@ -465,10 +478,6 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         const activePort = data.port || "18088";
         if (portEl) portEl.innerText = String(activePort);
 
-        const host = window.location.hostname || "127.0.0.1";
-        const btnConsole = document.getElementById("btnWebConsole") as HTMLAnchorElement | null;
-        if (btnConsole) btnConsole.href = `http://${host}:${activePort}`;
-
       } catch (e) {
         console.error("fetchStatus err:", e);
         if (mySeq !== statusReqSeq) return; // 过期的失败响应不覆盖新状态
@@ -577,6 +586,60 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
       } catch (e) {
         showToast("修改端口失败: " + errorMessage(e));
+      }
+    }
+
+    async function fetchWebProxyPort() {
+      try {
+        const { data } = await api.webProxyPort();
+        const element = document.getElementById("valWebProxyPort");
+        if (element && Number.isInteger(data.port) && data.port > 0) {
+          element.innerText = String(data.port);
+        }
+      } catch (e) {
+        console.error("fetchWebProxyPort err:", e);
+      }
+    }
+
+    async function changeWebProxyPort() {
+      const currentPort = document.getElementById("valWebProxyPort")?.innerText || "自动分配";
+      const raw = await showModal({
+        title: "修改 Web 反代端口",
+        message: "输入 0 自动选择空闲端口，或输入 1024~65535 的指定端口。新端口绑定成功后才会切换，失败保留原端口。",
+        type: "warn",
+        confirmText: "保存并切换",
+        input: {
+          label: "反代端口",
+          value: currentPort === "自动分配" ? "0" : currentPort,
+          inputMode: "numeric",
+          placeholder: "0 表示自动分配",
+          validate: (value) => /^[0-9]+$/.test(value) && Number(value) <= 65535,
+        },
+      });
+      if (raw === null || raw === false) return;
+      const newPort = Number(raw);
+      if (!Number.isInteger(newPort) || newPort < 0 || newPort > 65535 || (newPort > 0 && newPort < 1024)) {
+        showToast("端口无效！请输入 0 或 1024~65535");
+        return;
+      }
+      const ok = await showModal({
+        title: "切换 Web 反代端口",
+        message: newPort === 0 ? "确定自动选择空闲端口并切换 Web 反代吗？" : `确定将 Web 反代端口切换为 ${newPort} 吗？`,
+        type: "warn",
+        confirmText: "确认切换",
+      });
+      if (!ok) return;
+      try {
+        const { data } = await api.changeWebProxyPort(newPort);
+        if (data.success === false) {
+          showToast("修改反代端口失败: " + (data.message || "未知错误"));
+          return;
+        }
+        const element = document.getElementById("valWebProxyPort");
+        if (element) element.innerText = String(data.port);
+        showToast(`Web 反代端口已切换为 ${data.port}`);
+      } catch (e) {
+        showToast("修改反代端口失败: " + errorMessage(e));
       }
     }
 
@@ -949,6 +1012,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         }
         if (typeof d.seq === "number") {
           installTask = acceptInstallTask(installTask, d.seq, d.instance); // 受理确认:后端已接单
+          persistInstallTask(installTaskStorage(), installTask);
         }
         accepted = true;
       } catch (e) {
@@ -957,8 +1021,13 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           closeUpgradeModal();
           return;
         }
-        // 网络失败(切后台/网络抖动):退回 sendBeacon,送达与否交给弹窗对 seq 的轮询
-        try { accepted = Boolean(navigator.sendBeacon && navigator.sendBeacon(api.upgradeBeaconUrl(selectedVersion, currentMirror()))); } catch (e2) { accepted = false; }
+        // 网络失败(切后台/网络抖动):退回当前协议的 sendBeacon,送达与否交给弹窗对 seq 的轮询
+        try {
+          const beacon = api.upgradeBeaconRequest(selectedVersion, currentMirror());
+          accepted = Boolean(navigator.sendBeacon && (beacon.body === undefined
+            ? navigator.sendBeacon(beacon.url)
+            : navigator.sendBeacon(beacon.url, beacon.body)));
+        } catch (e2) { accepted = false; }
       }
       if (!accepted) {
         const subtitle = document.getElementById("upSubTitle");
@@ -1035,6 +1104,11 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       // 跟踪状态统一在此初始化(先于首次轮询,避免竞态):
       // 新任务此刻还没有身份,必须等受理响应;附加模式只跟随已选的 seq + instance。
       installTask = createInstallTask({ attach, attachSeq, attachInstance });
+      if (installTask.taskSeq !== null && installTask.taskInstance !== null) {
+        persistInstallTask(installTaskStorage(), installTask);
+      } else {
+        clearStoredInstallTask(installTaskStorage());
+      }
       upgradeStartedAt = Date.now();
       title.innerText = installTask.attach
         ? "正在查看进行中的安装任务..."
@@ -1045,6 +1119,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       spinner.style.display = "inline-block";
       doneIcon.style.display = "none";
       closeButton.style.display = "none";
+      upgradeLogsRendered = false;
       terminal.innerHTML = "正在获取实时安装状态...\n";
       modal.classList.add("active");
 
@@ -1057,6 +1132,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       const modal = document.getElementById("upgradeModal");
       if (modal) modal.classList.remove("active");
       stopUpgradePolling();
+      clearStoredInstallTask(installTaskStorage());
       installTask = createInstallTask({ attach: false });
       fetchStatus();
       fetchLogs();
@@ -1071,120 +1147,136 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       fetchStatus();
     }
 
-    async function pollUpgradeLogs() {
-      // 节流守卫:上游慢时不叠加请求(800ms 轮询 × 慢响应曾是界面卡顿源之一)
+    let upgradeLogsRendered = false;
+
+    async function pollUpgradeLogs(immediate = false) {
       const now = Date.now();
-      if (now - upPollLastAt < 1200) return;
+      if (!immediate && now - upPollLastAt < 1200) return;
+      if (document.hidden) return;
       upPollLastAt = now;
-      if (document.hidden) return; // 后台标签页暂停轮询
-      try {
-        const [logsRes, statusRes] = await Promise.all([
-          api.upgradeLogs(),
-          api.upgradeStatus(),
-        ]);
 
-        if (logsRes.ok) {
+      if (!upLogsPollInFlight) {
+        upLogsPollInFlight = true;
+        void api.upgradeLogs().then(logsRes => {
+          if (!logsRes.ok) return;
           const ldata = logsRes.data;
-          if (ldata.success && Array.isArray(ldata.logs)) {
-            const terminal = document.getElementById("upTerminal");
-            if (terminal) {
-              renderLogLines(ldata.logs, terminal, "正在等待 pip 安装输出...", true);
-              terminal.scrollTop = terminal.scrollHeight;
-            }
-          }
+          if (!ldata.success || !Array.isArray(ldata.logs)) return;
+          const terminal = document.getElementById("upTerminal");
+          if (!terminal) return;
+          renderLogLines(ldata.logs, terminal, "正在等待 pip 安装输出...", true);
+          terminal.scrollTop = terminal.scrollHeight;
+          upgradeLogsRendered = true;
+        }).catch(error => {
+          console.warn("pollUpgradeLogs err:", error);
+        }).finally(() => {
+          upLogsPollInFlight = false;
+        });
+      }
+
+      if (upStatusPollInFlight) return;
+      upStatusPollInFlight = true;
+      try {
+        const statusRes = await api.upgradeStatus();
+        if (!statusRes.ok) {
+          recordUpgradeStatusFailure();
+          return;
         }
 
-        if (statusRes.ok) {
-          const sdata = statusRes.data;
-          pollFailureStreak = 0;
-          // 归属只看明确受理/附加的 seq + instance,且每拍都严格匹配:
-          // 残留 done、其他进程的 seq、phase 跳变都不收口(installTask.mjs)
-          const observed = observeInstallStatus(installTask, sdata);
-          installTask = observed.state;
-
-          // 未归属且后端已无任务:10s 后给出出口,不显示成功。
-          if (!observed.owned && !sdata.upgrading && Date.now() - upgradeStartedAt > 10000) {
-            stopUpgradePolling();
-            const noReceipt = !installTask.attach && installTask.taskSeq === null;
-            updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-            updateUpgradeElement("upTitle", element => { element.innerText = "无法确认安装任务结果"; });
-            updateUpgradeElement("upSubTitle", element => {
-              element.innerText = noReceipt
-                ? "触发请求可能已送达并完成；请关闭本窗口后在控制台查看当前版本与安装日志确认"
-                : "后端任务与本次操作不匹配，请关闭本窗口后在控制台查看安装日志";
-            });
-            updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
-            updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
-            return;
-          }
-
-          if (observed.terminal) {
-            stopUpgradePolling();
-
-            updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-            updateUpgradeElement("upDoneIcon", element => { element.style.display = "inline-block"; });
-            updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
-            updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
-
-            // 终态必须用"操作发起时"的动作,不能重算:
-            // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
-            // 导致空环境首次安装也显示"重新安装已顺利完成"。
-            const doneAction = pendingInstallAction || currentInstallAction();
-            // 附加模式:任务可能是别的会话/设备发起的,动作名不得重算或沿用
-            const titleAction = installTask.attach ? "安装任务" : doneAction;
-            if (observed.outcome === "failed") {
-              updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}遇到问题`; });
-              // 恢复结果不猜测:后端有 error/recovery 字段就展示,否则提示自查日志
-              const detail = (typeof sdata.error === "string" && sdata.error.trim())
-                || (typeof sdata.message === "string" && sdata.message.trim())
-                || "";
-              const recoveryError = typeof sdata.recovery_error === "string" ? sdata.recovery_error.trim() : "";
-              const recoveryNote = sdata.recovery_required === true || recoveryError
-                ? (recoveryError
-                  ? "环境恢复未完成：" + recoveryError
-                  : "环境恢复未完成，请查看日志并按提示处理")
-                : "请查看日志确认环境恢复状态";
-              updateUpgradeElement("upSubTitle", element => {
-                element.innerText = detail ? `${detail}；${recoveryNote}` : recoveryNote;
-              });
-              updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--danger-text)"; });
-            } else {
-              updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}已顺利完成！`; });
-              updateUpgradeElement("upSubTitle", element => {
-                element.innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
-              });
-              updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--success)"; });
-            }
-            // 最小化期间错过终态:弹窗不可见时用 toast 补一条完成信号
-            const upModal = document.getElementById("upgradeModal");
-            if (upModal && !upModal.classList.contains("active")) {
-              showToast(observed.outcome === "failed" ? `${titleAction}失败,点击控制台查看详情` : `${titleAction}已完成`);
-            }
-          }
-        } else {
-          // 安装状态非 2xx:与 catch 同口径累计失败,否则监督者失联时
-          // 弹窗没有任何计数来源,永久转圈(云端界面反馈)
-          pollFailureStreak += 1;
-          const elapsed = Date.now() - upgradeStartedAt;
-          const timedOut = elapsed > UPGRADE_POLL_MAX_MS;
-          if (timedOut || pollFailureStreak >= UPGRADE_POLL_FAIL_MAX) {
-            stopUpgradePolling();
-            showUpgradePollingFailure(timedOut);
-          }
+        const sdata = statusRes.data;
+        pollFailureStreak = 0;
+        // 归属只看明确受理/附加的 seq + instance,且每拍都严格匹配:
+        // 残留 done、其他进程的 seq、phase 跳变都不收口(installTask.mjs)
+        const previousTask = installTask;
+        const observed = observeInstallStatus(installTask, sdata);
+        installTask = observed.state;
+        if (installTask.taskSeq !== previousTask.taskSeq || installTask.taskInstance !== previousTask.taskInstance) {
+          persistInstallTask(installTaskStorage(), installTask);
         }
-      } catch (e) {
-        console.error("pollUpgradeLogs err:", e);
-        // 关键路径:supervisor 挂掉时 statusRes.ok 为 false 或直接抛错,
-        // 上面那个"未归属出口"位于 if (statusRes.ok) 内,根本不会执行。
-        // 这里必须自己兜底,否则弹窗唯一出口 btnUpClose 永远 display:none,
-        // 整个页面被永久锁死。
-        pollFailureStreak += 1;
-        const elapsed = Date.now() - upgradeStartedAt;
-        const timedOut = elapsed > UPGRADE_POLL_MAX_MS;
-        if (timedOut || pollFailureStreak >= UPGRADE_POLL_FAIL_MAX) {
+        if (observed.terminal) clearStoredInstallTask(installTaskStorage());
+
+        if (observed.owned && sdata.upgrading && !upgradeLogsRendered) {
+          const phase = typeof sdata.phase === "string" ? sdata.phase : "";
+          const progress = phase === "downloading" ? "正在下载依赖包..."
+            : phase === "installing" ? "正在安装内核..."
+              : phase === "starting" ? "正在启动并检查服务..."
+                : "安装任务正在执行...";
+          updateUpgradeElement("upTerminal", element => { element.innerText = progress; });
+        }
+
+        // 未归属且后端已无任务:10s 后给出出口,不显示成功.
+        if (!observed.owned && !sdata.upgrading && Date.now() - upgradeStartedAt > 10000) {
           stopUpgradePolling();
-          showUpgradePollingFailure(timedOut);
+          const noReceipt = !installTask.attach && installTask.taskSeq === null;
+          updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
+          updateUpgradeElement("upTitle", element => { element.innerText = "无法确认安装任务结果"; });
+          updateUpgradeElement("upSubTitle", element => {
+            element.innerText = noReceipt
+              ? "触发请求可能已送达并完成；请关闭本窗口后在控制台查看当前版本与安装日志确认"
+              : "后端任务与本次操作不匹配，请关闭本窗口后在控制台查看安装日志";
+          });
+          updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
+          updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
+          return;
         }
+
+        if (observed.terminal) {
+          stopUpgradePolling();
+
+          updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
+          updateUpgradeElement("upDoneIcon", element => { element.style.display = "inline-block"; });
+          updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
+          updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
+
+          // 终态必须用"操作发起时"的动作,不能重算:
+          // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
+          // 导致空环境首次安装也显示"重新安装已顺利完成"。
+          const doneAction = pendingInstallAction || currentInstallAction();
+          // 附加模式:任务可能是别的会话/设备发起的,动作名不得重算或沿用
+          const titleAction = installTask.attach ? "安装任务" : doneAction;
+          if (observed.outcome === "failed") {
+            updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}遇到问题`; });
+            // 恢复结果不猜测:后端有 error/recovery 字段就展示,否则提示自查日志
+            const detail = (typeof sdata.error === "string" && sdata.error.trim())
+              || (typeof sdata.message === "string" && sdata.message.trim())
+              || "";
+            const recoveryError = typeof sdata.recovery_error === "string" ? sdata.recovery_error.trim() : "";
+            const recoveryNote = sdata.recovery_required === true || recoveryError
+              ? (recoveryError
+                ? "环境恢复未完成：" + recoveryError
+                : "环境恢复未完成，请查看日志并按提示处理")
+              : "请查看日志确认环境恢复状态";
+            updateUpgradeElement("upSubTitle", element => {
+              element.innerText = detail ? `${detail}；${recoveryNote}` : recoveryNote;
+            });
+            updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--danger-text)"; });
+          } else {
+            updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}已顺利完成！`; });
+            updateUpgradeElement("upSubTitle", element => {
+              element.innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
+            });
+            updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--success)"; });
+          }
+          // 最小化期间错过终态:弹窗不可见时用 toast 补一条完成信号
+          const upModal = document.getElementById("upgradeModal");
+          if (upModal && !upModal.classList.contains("active")) {
+            showToast(observed.outcome === "failed" ? `${titleAction}失败,点击控制台查看详情` : `${titleAction}已完成`);
+          }
+        }
+      } catch (error) {
+        console.error("pollUpgradeStatus err:", error);
+        recordUpgradeStatusFailure();
+      } finally {
+        upStatusPollInFlight = false;
+      }
+    }
+
+    function recordUpgradeStatusFailure(): void {
+      pollFailureStreak += 1;
+      const elapsed = Date.now() - upgradeStartedAt;
+      const timedOut = elapsed > UPGRADE_POLL_MAX_MS;
+      if (timedOut || pollFailureStreak >= UPGRADE_POLL_FAIL_MAX) {
+        stopUpgradePolling();
+        showUpgradePollingFailure(timedOut);
       }
     }
 
@@ -1298,20 +1390,26 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     fetchLogs();
     fetchVersionList();
     loadMirror();
+    fetchWebProxyPort();
     refreshTimer = setInterval(fetchLogs, 3500);
     setInterval(fetchStatus, 5000);
 
-    // 标签页切回前台时立即补一次:轮询在 hidden 期间是暂停的,
-    // 若只等下一个节拍,用户看到的最多是 5s 前的旧状态(可能是"运行中"却已停)。
-    document.addEventListener("visibilitychange", () => {
+    function resumeVisiblePage(): void {
       if (document.hidden) return;
       fetchStatus();
       fetchLogs();
-    });
+      if (upgradePollTimer !== null) void pollUpgradeLogs(true);
+    }
+    document.addEventListener("visibilitychange", resumeVisiblePage);
+    window.addEventListener("pageshow", resumeVisiblePage);
+
+    if (installTask.taskSeq !== null && installTask.taskInstance !== null) {
+      openUpgradeModal(true, installTask.taskSeq, installTask.taskInstance);
+    }
 
     // 内联 onclick/onchange 处理器需全局可见 —— esbuild IIFE 会封住顶层作用域
     Object.assign(window, {
-      fetchStatus, fetchLogs, controlService, changeServicePort, resetAuth,
+      fetchStatus, fetchLogs, controlService, changeServicePort, changeWebProxyPort, resetAuth,
       checkOrUpgrade, checkOnlineVersions, pickVersion, toggleHistoryDropdown,
       saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
       closeUpgradeModal, minimizeUpgradeModal, logGoPrev, logGoNext, logGoLatest,

@@ -1,15 +1,15 @@
-//! 监督者入口:env 解析 → 日志 → token → pid → HTTP(127.0.0.1)→ 信号处理。
+//! 监督者入口:env 解析 → 日志 → token → pid → loopback HTTP / 可选 Gateway UDS → 信号处理。
 //! fnOS 停止应用 = TERM 本进程(Supervisor.pid)→ 优雅级联停内核 → 退出(D4)。
 //! 监督者被 SIGKILL 时内核存活,下次启动由 /proc 收养(D1)。
 
 mod api;
-mod api_cgi;
 mod cli;
 mod config;
 mod control;
 mod desktop;
 mod events;
-mod index_cgi;
+mod gateway;
+mod helper;
 mod install;
 mod kernel;
 mod management;
@@ -23,6 +23,7 @@ mod settings_transaction;
 mod uninstall;
 mod version;
 mod version_index;
+mod web_static;
 
 use std::{
     io::Write,
@@ -88,11 +89,6 @@ fn main() {
             let cfg = Config::load();
             println!("{}", service::doctor_json(&cfg));
         }
-        Ok(cli::Command::WebApiCgi) => {
-            let cfg = Config::load();
-            std::process::exit(api_cgi::run(&cfg));
-        }
-        Ok(cli::Command::WebIndexCgi) => std::process::exit(index_cgi::run()),
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
@@ -117,6 +113,12 @@ fn serve() {
             std::process::exit(1);
         }
     };
+    let gateway_socket = gateway::socket_path_from_config(&cfg)
+        .and_then(|path| {
+            path.map(|path| gateway::bind(&path).map_err(|error| error.to_string()))
+                .transpose()
+        })
+        .unwrap_or_else(|error| panic!("bind gateway socket: {error}"));
 
     // 日志治理:启动时对超过 10MB 的自产日志做单代轮转(保 1 代旧文件)。
     // 内核仍持有旧 fd 时其后续写入会落在改名后的文件里,代价可接受;
@@ -165,7 +167,6 @@ fn serve() {
                     kernel_for_install.invalidate_version();
                     if let Err(e) = api::sync_main_entry(
                         std::path::Path::new(&ui_config_for_install),
-                        kernel_for_install.port(),
                         kernel_for_install.installed(),
                     ) {
                         let _ = writeln!(
@@ -398,7 +399,6 @@ fn serve() {
     if install.recovery_error().is_none() {
         if let Err(e) = api::sync_main_entry(
             std::path::Path::new(&cfg.ui_config_file),
-            kernel.port(),
             kernel.installed(),
         ) {
             logf(&format!("sync desktop kernel entry failed: {e}"));
@@ -426,11 +426,35 @@ fn serve() {
         operations: Arc::new(tokio::sync::Mutex::new(())),
         supervisor_port: cfg.listen_port,
     };
-    let state = api::AppState {
+    let mut state = api::AppState {
         core: core.clone(),
         token,
         auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
+        web_proxy: None,
     };
+    if let Some(port) = cfg.web_proxy_port {
+        let manager = rt
+            .block_on(gateway::WebProxyManager::start(state.clone(), port))
+            .unwrap_or_else(|error| panic!("start web proxy: {error}"));
+        let actual_port = rt.block_on(manager.port());
+        state.web_proxy = Some(Arc::new(manager));
+        logf(&format!("web proxy listening 0.0.0.0:{actual_port}"));
+    }
+    let stable_helper_binary = cfg.stable_helper_binary();
+    let persistent_helper_binary = crate::helper::path(&cfg.var_dir);
+    let gateway = gateway_socket.map(|bound| {
+        rt.block_on(async {
+            gateway::start(
+                bound,
+                state.clone(),
+                &cfg.supervisor_binary,
+                &stable_helper_binary,
+                &persistent_helper_binary,
+            )
+        })
+        .unwrap_or_else(|error| panic!("start gateway listener: {error}"))
+    });
+
     let control_path = control::socket_path(&cfg.var_dir);
     let control_listener = control::bind_private_socket(&control_path)
         .unwrap_or_else(|error| panic!("bind private control socket: {error}"));
@@ -528,6 +552,9 @@ fn serve() {
                 }
             }
         });
+        if let Some(gateway) = gateway {
+            rt_handle.block_on(gateway.shutdown());
+        }
         std::process::exit(if clean { 0 } else { 1 });
     });
 

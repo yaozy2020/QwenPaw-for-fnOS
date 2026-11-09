@@ -120,10 +120,12 @@ jobs:
       # [3] 文件权限检查
       - name: Verify git exec bits
         run: |
-          for f in app/ui/api.cgi app/ui/index.cgi cmd/main build.sh tools/fnpack; do
+          for f in cmd/main build.sh tools/fnpack; do
             mode=$(git ls-files -s "$f" | awk '{print $1}')
             [ "$mode" = "100755" ] || { echo "::error::$f 应为 100755,实际 ${mode:-缺失}"; exit 1; }
           done
+          test ! -e app/ui/api.cgi
+          test ! -e app/ui/index.cgi
 
       # [4] 静态检查与门禁
       - name: Preflight + AUDIT + Unit Tests + strict Clippy
@@ -154,14 +156,13 @@ jobs:
         working-directory: web
         run: npx playwright install --with-deps chromium
 
-      - name: Chromium E2E delivery gate
-        run: npm run test:e2e --prefix web
+      - name: Chromium Gateway UDS E2E delivery gate
+        run: npm run test:e2e:gateway --prefix web
 
-      # lint 内的 native CGI 回归使用 release supervisor 与 test-runtime。
-      - name: Build release binaries for native CGI regressions
+      - name: Build release binaries for runtime regressions
         run: (cd supervisor && cargo build --locked --release)
 
-      # [4c] 生命周期与 native CGI 回归(与 ci.yml 同口径)
+      # [4c] 生命周期与管理边界回归(与 ci.yml 同口径)
       - name: Lifecycle regression
         env:
           STRICT_CI: "1"
@@ -225,12 +226,6 @@ jobs:
 
       - name: Supervisor API and configuration transactions
         run: python3 scripts/test-supervisor-api.py
-
-      - name: Native API CGI regression
-        run: python3 scripts/test-native-api-cgi.py
-
-      - name: Native index CGI regression
-        run: python3 scripts/test-native-index-cgi.py
 
       # [6] FPK 内容全量审计
       - name: Audit generated FPK

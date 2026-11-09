@@ -173,7 +173,7 @@ if [ ! -f "$TEST_RELEASE_BIN" ] || [ ! -x "$TEST_RELEASE_BIN" ]; then
 fi
 
 copy_test_release() {
-    local target="$1/app/bin/qwenpaw-supervisor"
+    local target="$1/bin/qwenpaw-supervisor"
     [ "$TEST_RELEASE_READY" -eq 1 ] || return 1
     mkdir -p "${target%/*}" \
         && cp -- "$TEST_RELEASE_BIN" "$target" \
@@ -321,7 +321,7 @@ cb_before="$(cb_hashes)"
 cb_run() {
     env TRIM_PKGVAR="${CB_VAR}" TRIM_APPDEST="${CB_DEST}" \
         TRIM_PKGHOME="${T}/cb_home" TRIM_PKGETC="${T}/cb_etc" \
-        TRIM_DATA_SHARE_PATHS="${T}/cb_share" SUPERVISOR_AUTOSTART=0 \
+        TRIM_DATA_SHARE_PATHS="${T}/cb_share" SUPERVISOR_AUTOSTART=0 QWENPAW_WEB_PROXY_PORT=off \
         SUPERVISOR_PORT="$CB_SUP_PORT" TRIM_SERVICE_PORT="$CB_SERVICE_PORT" \
         "$@" bash "${CB_DEST}/cmd/config_callback"
 }
@@ -342,8 +342,8 @@ if [ "${#RESERVED_PORT_LIST[@]}" -ne 2 ]; then
 fi
 
 if [ "$CB_READY" -eq 1 ]; then
-    if [ ! -x "${CB_DEST}/app/bin/qwenpaw-supervisor" ] \
-        || ! cmp -s -- "$TEST_RELEASE_BIN" "${CB_DEST}/app/bin/qwenpaw-supervisor"; then
+    if [ ! -x "${CB_DEST}/bin/qwenpaw-supervisor" ] \
+        || ! cmp -s -- "$TEST_RELEASE_BIN" "${CB_DEST}/bin/qwenpaw-supervisor"; then
         bad "config_callback 临时包第一候选不是当前 release supervisor"
     else
         ok "config_callback 临时包第一候选为当前 release supervisor"
@@ -960,9 +960,9 @@ if [ ! -f "$L_RUNTIME" ] || [ ! -x "$L_RUNTIME" ]; then
 fi
 
 if [ "$L_SETUP_OK" -eq 1 ]; then
-    L_SUPERVISOR_COPY="${L_DEST}/app/bin/qwenpaw-supervisor"
+    L_SUPERVISOR_COPY="${L_DEST}/bin/qwenpaw-supervisor"
     L_RUNTIME_COPY="${L_VENV}/bin/python3"
-    if ! mkdir -p "${L_DEST}/app/bin" "$L_VAR" "$L_HOME/venv/bin" "$L_ETC" "$L_SHARE/.qwenpaw" "$L_CONTROL"; then
+    if ! mkdir -p "${L_DEST}/bin" "$L_VAR" "$L_HOME/venv/bin" "$L_ETC" "$L_SHARE/.qwenpaw" "$L_CONTROL"; then
         bad "无法创建隔离生命周期测试目录"
         L_SETUP_OK=0
     fi
@@ -1035,6 +1035,7 @@ PYPORTS
                 "TRIM_SERVICE_PORT=$L_KERNEL_PORT"
                 "SUPERVISOR_PORT=$L_SUP_PORT"
                 "SUPERVISOR_AUTOSTART=1"
+                "QWENPAW_WEB_PROXY_PORT=off"
                 "QWENPAW_TEST_CONTROL=$L_CONTROL"
             )
             L_ENV_READY=1

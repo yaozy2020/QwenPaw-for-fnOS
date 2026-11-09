@@ -252,12 +252,10 @@ pub(super) async fn kernel_uninstall(
     state.kernel.invalidate_version();
     // 读+可能写 ui 配置文件:与全库 async 卫生纪律一致,移入 spawn_blocking
     let ui_cfg = state.ui_config_file.clone();
-    let kernel_port = state.kernel.port();
-    let entry_result = tokio::task::spawn_blocking(move || {
-        sync_main_entry(std::path::Path::new(&ui_cfg), kernel_port, false)
-    })
-    .await
-    .unwrap_or_else(|e| Err(std::io::Error::other(format!("spawn_blocking join: {e}"))));
+    let entry_result =
+        tokio::task::spawn_blocking(move || sync_main_entry(std::path::Path::new(&ui_cfg), false))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(format!("spawn_blocking join: {e}"))));
     let snap_state = state.clone();
     tokio::task::spawn_blocking(move || {
         snap_state.events.publish(render_snapshot(&snap_state));

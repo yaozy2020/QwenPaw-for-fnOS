@@ -1,6 +1,7 @@
 #!/bin/bash
 
 APPDEST="${TRIM_APPDEST:-/var/apps/qwenpaw/target}"
+export QWENPAW_GATEWAY_SOCKET="${APPDEST}/app.sock"
 for candidate in \
     "${APPDEST}/app/bin/qwenpaw-supervisor" \
     "${APPDEST}/bin/qwenpaw-supervisor" \

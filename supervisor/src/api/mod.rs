@@ -1,6 +1,6 @@
 //! 路由与处理器。鉴权:X-Supervisor-Token 头(vs VAR_DIR/supervisor-token,0600)。
-//! 监督者只绑 127.0.0.1;控制台经 cgi 桥接访问(App 切后台不影响本服务)。
-//! 响应形状与旧 api.cgi 兼容(控制台零改动)。
+//! loopback HTTP 提供本机 API;Gateway UDS 在 peer/角色/CSRF 门禁后复用这些处理器。
+//! 响应形状供桌面控制台和 Gateway API 使用。
 
 use std::sync::Arc;
 
@@ -37,6 +37,7 @@ pub struct AppState {
     pub core: ManagementCore,
     pub token: String,
     pub auth_cache: Arc<std::sync::Mutex<AuthCache>>,
+    pub web_proxy: Option<Arc<crate::gateway::WebProxyManager>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -70,7 +71,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/kernel/pin", post(kernel_pin))
         .route("/kernel/reset-auth", post(kernel_reset_auth))
         .route("/port", post(port))
+        .route(
+            "/web-proxy/port",
+            get(settings::web_proxy_port_get).post(settings::web_proxy_port_set),
+        )
         .route("/settings", post(settings))
+        .route(
+            "/mirror",
+            get(settings::mirror_get).post(settings::mirror_set),
+        )
         .with_state(state)
 }
 
@@ -132,7 +141,10 @@ pub(crate) mod test_support {
     use std::{
         collections::HashMap,
         net::TcpListener,
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc, Mutex, OnceLock,
+        },
     };
 
     use super::{AppState, AuthCache};
@@ -143,9 +155,27 @@ pub(crate) mod test_support {
         management::ManagementCore,
     };
 
-    fn port_reservations() -> &'static Mutex<HashMap<u16, TcpListener>> {
-        static RESERVATIONS: OnceLock<Mutex<HashMap<u16, TcpListener>>> = OnceLock::new();
+    struct PortReservation {
+        id: u64,
+        listener: TcpListener,
+    }
+
+    fn port_reservations() -> &'static Mutex<HashMap<u16, PortReservation>> {
+        static RESERVATIONS: OnceLock<Mutex<HashMap<u16, PortReservation>>> = OnceLock::new();
         RESERVATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn next_port_reservation_id() -> u64 {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn port_reservation_id(port: u16) -> Option<u64> {
+        port_reservations()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&port)
+            .map(|reservation| reservation.id)
     }
 
     pub(crate) fn free_port() -> u16 {
@@ -158,7 +188,13 @@ pub(crate) mod test_support {
             port_reservations()
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .insert(port, listener);
+                .insert(
+                    port,
+                    PortReservation {
+                        id: next_port_reservation_id(),
+                        listener,
+                    },
+                );
             return port;
         }
     }
@@ -171,12 +207,12 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn serve_reserved_port(port: u16) -> TestServer {
-        let listener = port_reservations()
+        let reservation = port_reservations()
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&port)
             .unwrap_or_else(|| panic!("no test port reservation exists for {port}"));
-        TestServer::from_listener(listener)
+        TestServer::from_listener(reservation.listener)
     }
 
     pub(crate) fn free_port_other_than(other: u16) -> u16 {
@@ -192,21 +228,56 @@ pub(crate) mod test_support {
     #[test]
     fn free_port_reservation_lives_until_test_dir_drops() {
         let port = free_port();
+        let port_reservation = port_reservation_id(port).unwrap();
         let first_bind = TcpListener::bind(("127.0.0.1", port)).unwrap_err();
         assert_eq!(first_bind.kind(), std::io::ErrorKind::AddrInUse);
 
         let dir = TestDir::new("port-reservation");
         let state = dir.state(port);
         let supervisor_port = state.supervisor_port;
+        let supervisor_reservation = port_reservation_id(supervisor_port).unwrap();
         let state_bind = TcpListener::bind(("127.0.0.1", port)).unwrap_err();
         assert_eq!(state_bind.kind(), std::io::ErrorKind::AddrInUse);
         let supervisor_bind = TcpListener::bind(("127.0.0.1", supervisor_port)).unwrap_err();
         assert_eq!(supervisor_bind.kind(), std::io::ErrorKind::AddrInUse);
         drop(state);
+        assert_eq!(port_reservation_id(port), Some(port_reservation));
+        assert_eq!(
+            port_reservation_id(supervisor_port),
+            Some(supervisor_reservation)
+        );
         drop(dir);
 
-        let _kernel_port = TcpListener::bind(("127.0.0.1", port)).unwrap();
-        let _supervisor_port = TcpListener::bind(("127.0.0.1", supervisor_port)).unwrap();
+        assert_ne!(port_reservation_id(port), Some(port_reservation));
+        assert_ne!(
+            port_reservation_id(supervisor_port),
+            Some(supervisor_reservation)
+        );
+    }
+
+    #[test]
+    fn test_dir_does_not_release_replaced_port_reservation() {
+        let dir = TestDir::new("replaced-port-reservation");
+        let port = free_port();
+        dir.track_reserved_port(port);
+        let replacement_id = next_port_reservation_id();
+        {
+            let mut reservations = port_reservations()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let previous = reservations.remove(&port).unwrap();
+            reservations.insert(
+                port,
+                PortReservation {
+                    id: replacement_id,
+                    listener: previous.listener,
+                },
+            );
+        }
+        drop(dir);
+
+        assert_eq!(port_reservation_id(port), Some(replacement_id));
+        release_port_reservation(port);
     }
 
     #[test]
@@ -218,7 +289,7 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) struct TestDir(pub(crate) std::path::PathBuf, Mutex<Vec<u16>>);
+    pub(crate) struct TestDir(pub(crate) std::path::PathBuf, Mutex<Vec<(u16, u64)>>);
 
     impl TestDir {
         pub(crate) fn new(label: &str) -> Self {
@@ -233,9 +304,14 @@ pub(crate) mod test_support {
         }
 
         fn track_reserved_port(&self, port: u16) {
-            let mut ports = self.1.lock().unwrap_or_else(|error| error.into_inner());
-            if !ports.contains(&port) {
-                ports.push(port);
+            if let Some(reservation_id) = port_reservation_id(port) {
+                let mut ports = self.1.lock().unwrap_or_else(|error| error.into_inner());
+                if !ports
+                    .iter()
+                    .any(|(reserved_port, _)| *reserved_port == port)
+                {
+                    ports.push((port, reservation_id));
+                }
             }
         }
 
@@ -274,6 +350,7 @@ pub(crate) mod test_support {
                 },
                 token: "test-token".into(),
                 auth_cache: Arc::new(std::sync::Mutex::new(AuthCache::default())),
+                web_proxy: None,
             }
         }
     }
@@ -281,8 +358,14 @@ pub(crate) mod test_support {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let ports = self.1.get_mut().unwrap_or_else(|error| error.into_inner());
-            for port in ports.drain(..) {
-                release_port_reservation(port);
+            let mut reservations = port_reservations()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            for (port, reservation_id) in ports.drain(..) {
+                if matches!(reservations.get(&port), Some(reservation) if reservation.id == reservation_id)
+                {
+                    reservations.remove(&port);
+                }
             }
             let _ = std::fs::remove_dir_all(&self.0);
         }

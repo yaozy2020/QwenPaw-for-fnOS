@@ -74,7 +74,7 @@ fn auth_status(state: &AppState, running: bool, port: u16) -> String {
 }
 
 /// 全量快照由 HTTP 处理器放入 spawn_blocking;/proc 和探测不占用 Tokio 工作线程。
-/// 形状与旧 api.cgi 兼容:控制台零改动。
+/// 快照形状供桌面控制台和 Gateway API 使用。
 pub fn render_snapshot(state: &AppState) -> String {
     let st = state.kernel.status_now();
     let version = state.kernel.kernel_version();

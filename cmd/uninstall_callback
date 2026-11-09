@@ -1,22 +1,8 @@
 #!/bin/sh
-candidate=""
-if [ -n "${TRIM_APPDEST:-}" ]; then
-    for candidate_path in "$TRIM_APPDEST/app/bin/qwenpaw-supervisor" "$TRIM_APPDEST/bin/qwenpaw-supervisor"; do
-        if [ -x "$candidate_path" ]; then
-            candidate=$candidate_path
-            break
-        fi
-    done
+if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then
+    exec "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" platform uninstall
 fi
-if [ -z "$candidate" ]; then
-    for candidate_path in "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor" "/var/apps/qwenpaw/app/bin/qwenpaw-supervisor"; do
-        if [ -x "$candidate_path" ]; then
-            candidate=$candidate_path
-            break
-        fi
-    done
+if [ -x "${0%/*}/qwenpaw-supervisor" ]; then
+    exec "${0%/*}/qwenpaw-supervisor" platform uninstall
 fi
-if [ -z "$candidate" ]; then
-    exit 127
-fi
-exec "$candidate" platform uninstall
+exit 127

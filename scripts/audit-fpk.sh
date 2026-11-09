@@ -13,6 +13,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 - "$FPK" "$ROOT" <<'PY'
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -42,11 +43,12 @@ outer_files = {
     "cmd/main", "cmd/install_init", "cmd/install_callback",
     "cmd/upgrade_init", "cmd/upgrade_callback", "cmd/uninstall_init",
     "cmd/uninstall_callback", "cmd/config_init", "cmd/config_callback",
+    "cmd/qwenpaw-supervisor",
 }
 outer_dirs = {"config", "wizard", "cmd"}
 app_files = {
     "bin/qwenpaw-supervisor", "config/privilege", "config/resource",
-    "ui/api.cgi", "ui/config", "ui/index.cgi",
+    "ui/config",
     "ui/images/console_64.png", "ui/images/console_256.png",
     "ui/images/icon_64.png", "ui/images/icon_256.png",
     "www/index.html", "www/index.html.gz", "www/index.html.br",
@@ -169,8 +171,65 @@ def test_safe_members_modes():
     print(f"audit: SELF-TEST PASSED ({len(cases)} mode cases)")
 
 
+def desktop_entry_checks(contents):
+    try:
+        desktop = json.loads(contents.decode("utf-8"))
+        urls = desktop[".url"]
+        console = urls["qwenpaw.console"]
+        main_entry = urls["qwenpaw.main"]
+        gateway_config_valid = (
+            console.get("url") == "/app/qwenpaw/"
+            and console.get("gatewayPrefix") == "/app/qwenpaw"
+            and console.get("gatewaySocket") == "app.sock"
+            and console.get("type") == "iframe"
+            and console.get("allUsers") is False
+            and console.get("control") == {"accessPerm": "editable"}
+        )
+        main_entry_valid = main_entry == {
+            "title": "QwenPaw",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "url": "/app/qwenpaw/web/",
+            "gatewayPrefix": "/app/qwenpaw",
+            "gatewaySocket": "app.sock",
+            "allUsers": False,
+            "noDisplay": False,
+            "control": {"accessPerm": "editable"},
+        }
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, AttributeError, TypeError):
+        return False, False
+    return gateway_config_valid, main_entry_valid
+
+
+def test_desktop_entries():
+    with open(os.path.join(root, "app/ui/config"), "rb") as source:
+        contents = source.read()
+    assert desktop_entry_checks(contents) == (True, True), "source desktop gateway configuration must pass"
+    cases = (
+        ("url", "/cgi/ThirdParty/qwenpaw/index.cgi/"),
+        ("gatewayPrefix", "/app/other"),
+        ("gatewaySocket", "supervisor-control.sock"),
+        ("type", "url"),
+        ("allUsers", True),
+        ("control", {"accessPerm": "readonly"}),
+    )
+    for field, value in cases:
+        config = json.loads(contents)
+        config[".url"]["qwenpaw.console"][field] = value
+        assert desktop_entry_checks(json.dumps(config).encode()) == (False, True), field
+        print(f"    [ OK ] desktop self-test: rejects console {field} drift")
+    config = json.loads(contents)
+    config[".url"]["qwenpaw.main"]["port"] = "18089"
+    assert desktop_entry_checks(json.dumps(config).encode()) == (True, False), "main entry drift"
+    for malformed in (b"not-json", b"null", b'[]', b'{".url": []}'):
+        assert desktop_entry_checks(malformed) == (False, False), "malformed desktop configuration"
+    print("audit: desktop SELF-TEST PASSED (source positive, 7 drift negatives, 4 malformed negatives)")
+
+
 if fpk_path == "--self-test":
     test_safe_members_modes()
+    test_desktop_entries()
     raise SystemExit(0)
 
 
@@ -211,8 +270,27 @@ def located_wrapper(action):
     ]
 
 
-def platform_callback(action):
+def upgrade_init_wrapper():
     return [
+        'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
+        'exec "${0%/*}/qwenpaw-supervisor" platform upgrade-init',
+        "fi",
+        *located_wrapper("platform upgrade-init"),
+    ]
+
+
+def platform_callback(action):
+    if action in {"upgrade", "uninstall"}:
+        return [
+            'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then',
+            f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {action}',
+            "fi",
+            f'if [ -x "${{0%/*}}/qwenpaw-supervisor" ]; then',
+            f'exec "${{0%/*}}/qwenpaw-supervisor" platform {action}',
+            "fi",
+            "exit 127",
+        ]
+    lines = [
         'candidate=""',
         'if [ -n "${TRIM_APPDEST:-}" ]; then',
         'for candidate_path in "$TRIM_APPDEST/app/bin/qwenpaw-supervisor" "$TRIM_APPDEST/bin/qwenpaw-supervisor"; do',
@@ -233,8 +311,9 @@ def platform_callback(action):
         'if [ -z "$candidate" ]; then',
         "exit 127",
         "fi",
-        f'exec "$candidate" platform {action}',
+        'exec "$candidate" platform install',
     ]
+    return lines
 
 
 def bounded_gzip_decompress(data, label):
@@ -282,6 +361,7 @@ try:
                 "cmd/main", "cmd/install_init", "cmd/install_callback",
                 "cmd/upgrade_init", "cmd/upgrade_callback", "cmd/uninstall_init",
                 "cmd/uninstall_callback", "cmd/config_init", "cmd/config_callback",
+                "cmd/qwenpaw-supervisor",
             },
         )
         outer_payloads = {
@@ -291,9 +371,7 @@ try:
     with tarfile.open(fileobj=io.BytesIO(app_data), mode="r:gz") as app:
         app_members = safe_members(
             app, app_files, app_dirs, "app.tgz",
-            executable_files={
-                "bin/qwenpaw-supervisor", "ui/api.cgi", "ui/index.cgi",
-            },
+            executable_files={"bin/qwenpaw-supervisor"},
         )
         app_payloads = {name: payload(app, app_members, name) for name in app_files}
 except Exception as error:
@@ -330,31 +408,40 @@ report(bool(checksum and checksum.lower() == actual_checksum),
 cmd_paths = (
     "cmd/main", "cmd/install_init", "cmd/install_callback", "cmd/upgrade_init",
     "cmd/upgrade_callback", "cmd/uninstall_init", "cmd/uninstall_callback",
-    "cmd/config_init", "cmd/config_callback",
+    "cmd/config_init", "cmd/config_callback", "cmd/qwenpaw-supervisor",
 )
-print("audit: lifecycle entries and native CGI thinness")
+print("audit: lifecycle entries, Gateway static resources, and retired CGI absence")
 for name in cmd_paths:
     report(bool(outer_members[name].mode & 0o111), f"{name} 执行位存在", f"{name} 缺少执行位")
+for name in ("app/ui/api.cgi", "app/ui/index.cgi"):
+    report(not os.path.lexists(os.path.join(root, name)), f"源码旧入口 {name} 已移除",
+           f"源码仍存在已退役入口 {name}")
 for name in ("ui/api.cgi", "ui/index.cgi"):
-    report(bool(app_members[name].mode & 0o111), f"app/{name} 执行位存在", f"app/{name} 缺少执行位")
+    report(name not in app_members, f"FPK 未打包 app/{name}", f"FPK 不得包含已退役 app/{name}")
+
+gateway_config_valid, main_entry_valid = desktop_entry_checks(app_payloads["ui/config"])
+report(gateway_config_valid, "qwenpaw.console 使用固定网关 URL/Prefix/Socket 并保留 iframe 权限属性",
+       "qwenpaw.console 网关配置或保留属性不符合契约")
+report(main_entry_valid, "qwenpaw.main 保持既有 URL 桌面入口配置",
+       "qwenpaw.main 桌面入口配置发生漂移")
 
 expected_wrappers = {
     "cmd/main": "service \"$@\"",
     "cmd/config_callback": "platform configure",
     "cmd/config_init": "platform config-init",
     "cmd/upgrade_init": "platform upgrade-init",
-    "ui/api.cgi": "web api-cgi",
-    "ui/index.cgi": "web index-cgi",
 }
 for name, command in expected_wrappers.items():
-    label = name if name.startswith("cmd/") else f"app/{name}"
     try:
-        actual = active_lines(outer_payloads[name] if name.startswith("cmd/") else app_payloads[name], label)
-        matches = actual == located_wrapper(command)
+        actual = active_lines(outer_payloads[name], name)
+        expected = upgrade_init_wrapper() if name == "cmd/upgrade_init" else located_wrapper(command)
+        if name == "cmd/main":
+            expected.insert(1, 'export QWENPAW_GATEWAY_SOCKET="${APPDEST}/app.sock"')
+        matches = actual == expected
     except ValueError:
         matches = False
-    report(matches, f"{label} 仅定位 supervisor 并固定 exec {command}",
-           f"{label} 不符合薄入口白名单")
+    report(matches, f"{name} 仅定位 supervisor 并固定 exec {command}",
+           f"{name} 不符合薄入口白名单")
 
 for name, action in (("cmd/install_callback", "install"),
                      ("cmd/upgrade_callback", "upgrade"),
@@ -375,27 +462,35 @@ for name in ("cmd/install_init", "cmd/uninstall_init"):
     report(matches, f"{name} 是显式 no-op", f"{name} 不是显式 no-op")
 
 print("audit: executable architecture and binary identity")
-supervisor = app_payloads["bin/qwenpaw-supervisor"]
-is_x86_64 = (
-    len(supervisor) >= 20
-    and supervisor[:4] == b"\x7fELF"
-    and supervisor[4] == 2
-    and supervisor[5] == 1
-    and struct.unpack_from("<H", supervisor, 18)[0] == 62
-)
-report(is_x86_64, "包内 supervisor 是 ELF64 little-endian x86_64", "包内 supervisor 不是 ELF64 little-endian x86_64")
-report(bool(app_members["bin/qwenpaw-supervisor"].mode & 0o111),
-       "包内 supervisor 执行位存在", "包内 supervisor 缺少执行位")
+packaged_binaries = {
+    "app/bin/qwenpaw-supervisor": (app_payloads["bin/qwenpaw-supervisor"], app_members["bin/qwenpaw-supervisor"].mode),
+    "cmd/qwenpaw-supervisor": (outer_payloads["cmd/qwenpaw-supervisor"], outer_members["cmd/qwenpaw-supervisor"].mode),
+}
 source_binary = os.path.join(root, "supervisor", "target", "release", "qwenpaw-supervisor")
+source_sha256 = None
 if os.path.isfile(source_binary):
     with open(source_binary, "rb") as source:
         source_sha256 = hashlib.sha256(source.read()).hexdigest()
-    packaged_sha256 = hashlib.sha256(supervisor).hexdigest()
-    report(packaged_sha256 == source_sha256,
-           f"包内 supervisor SHA256 与 release 源一致 ({packaged_sha256})",
-           f"包内 supervisor SHA256 与 release 源不一致 (包内={packaged_sha256}, 源={source_sha256})")
 else:
-    report(False, "包内 supervisor SHA256 与 release 源一致", f"release supervisor 不存在: {source_binary}")
+    report(False, "release supervisor exists", f"release supervisor 不存在: {source_binary}")
+packaged_hashes = {}
+for name, (binary, mode) in packaged_binaries.items():
+    is_x86_64 = (
+        len(binary) >= 20
+        and binary[:4] == b"\x7fELF"
+        and binary[4] == 2
+        and binary[5] == 1
+        and struct.unpack_from("<H", binary, 18)[0] == 62
+    )
+    report(is_x86_64, f"{name} 是 ELF64 little-endian x86_64", f"{name} 不是 ELF64 little-endian x86_64")
+    report(mode == 0o755, f"{name} 模式为 0755", f"{name} 模式不是 0755: {mode:04o}")
+    packaged_hashes[name] = hashlib.sha256(binary).hexdigest()
+    if source_sha256 is not None:
+        report(packaged_hashes[name] == source_sha256,
+               f"{name} SHA256 与 release 源一致 ({source_sha256})",
+               f"{name} SHA256 与 release 源不一致 (包内={packaged_hashes[name]}, 源={source_sha256})")
+report(len(set(packaged_hashes.values())) == 1,
+       "外层 helper 与 target supervisor SHA256 一致", "外层 helper 与 target supervisor SHA256 不一致")
 report("bin/qwenpaw-test-runtime" not in app_files,
        "包内白名单未包含测试辅助 runtime", "包内不应包含测试辅助 runtime")
 

@@ -25,14 +25,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify git exec bits (CGI/生命周期脚本必须 100755)
+      - name: Verify lifecycle and build exec bits
         run: |
           fail=0
-          for f in app/ui/api.cgi app/ui/index.cgi cmd/main cmd/install_init \
-                   cmd/install_callback cmd/upgrade_init cmd/upgrade_callback \
-                   cmd/uninstall_init cmd/uninstall_callback cmd/config_init \
-                   cmd/config_callback build.sh scripts/lint.sh scripts/preflight.sh \
-                   scripts/audit-fpk.sh tools/fnpack; do
+          for f in cmd/main cmd/install_init cmd/install_callback cmd/upgrade_init \
+                   cmd/upgrade_callback cmd/uninstall_init cmd/uninstall_callback \
+                   cmd/config_init cmd/config_callback build.sh scripts/lint.sh \
+                   scripts/preflight.sh scripts/audit-fpk.sh tools/fnpack; do
             mode=$(git ls-files -s "$f" | awk '{print $1}')
             if [ "$mode" != "100755" ]; then
               echo "::error::$f 的 git 模式是 ${mode:-缺失},应为 100755"
@@ -72,24 +71,25 @@ jobs:
         working-directory: web
         run: npx playwright install --with-deps chromium
 
-      - name: Chromium E2E delivery gate
-        run: npm run test:e2e --prefix web
+      - name: Chromium Gateway UDS E2E delivery gate
+        run: npm run test:e2e:gateway --prefix web
 
-      - name: Build release binaries for native CGI regressions
+      - name: Build release binaries for runtime regressions
         run: cargo build --locked --release --manifest-path supervisor/Cargo.toml
 
-      - name: Lint (bash -n + shellcheck + native CGI regressions + esbuild 编译)
+      - name: Lint (bash -n + shellcheck + management boundary + esbuild 编译)
         run: STRICT_CI=1 bash scripts/lint.sh
 
-      - name: Console build + artifact sanity (web/src 经 esbuild 出单文件)
+      - name: Console build + Gateway artifact sanity (web/src 经 esbuild 出单文件)
         run: |
           (cd web && BUILD_ID=ci node build.mjs)
           test -f web/dist/index.html
           grep -q "QwenPaw 控制台" web/dist/index.html
-          grep -q "api.cgi" web/dist/index.html
+          grep -q "/app/qwenpaw/api" web/dist/index.html
           grep -q "statusCardMount" web/dist/index.html
-          test -x app/ui/index.cgi
-          test -x app/ui/api.cgi
+          ! grep -q "api.cgi\|index.cgi" web/dist/index.html
+          test ! -e app/ui/api.cgi
+          test ! -e app/ui/index.cgi
 
   rust:
     runs-on: ubuntu-24.04
@@ -116,14 +116,6 @@ jobs:
 
       - name: cargo build --locked --release
         run: cargo build --locked --release
-
-      - name: Native API CGI regression
-        working-directory: .
-        run: python3 scripts/test-native-api-cgi.py
-
-      - name: Native index CGI regression
-        working-directory: .
-        run: python3 scripts/test-native-index-cgi.py
 
       # 这两项需要刚构建的 release supervisor/test-runtime 与真实 venv；
       # 故与 lint 分开在产物就绪后显式执行，不提供静默 skip。

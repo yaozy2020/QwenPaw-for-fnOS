@@ -144,7 +144,7 @@ def wait_for(predicate, timeout=15):
 class Fixture:
     def __init__(self, root, name, binary_sha256, runtime_sha256):
         self.root = root / name
-        for directory in ("home/venv/bin", "var", "share", "etc", "app/ui", "app/app/bin"):
+        for directory in ("home/venv/bin", "var", "share", "etc", "app/ui", "app/bin"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         self.port = free_port()
         self.sup_port = free_port()
@@ -158,12 +158,18 @@ class Fixture:
         (self.root / "var/qwenpaw-log-level").write_text("info\n")
         (self.root / "var/supervisor-token").write_text(TOKEN)
         self.ui = self.root / "app/ui/config"
-        self.ui.write_text(json.dumps({".url": {"qwenpaw.main": {"port": str(self.port), "noDisplay": False}, "qwenpaw.console": {"port": "15666", "type": "iframe"}}}))
-        shutil.copy2(BIN, self.root / "app/app/bin/qwenpaw-supervisor")
-        self.binary = self.root / "app/app/bin/qwenpaw-supervisor"
+        self.ui.write_text(json.dumps({".url": {
+            "qwenpaw.main": {"port": str(self.port), "noDisplay": False},
+            "qwenpaw.console": {
+                "url": "/app/qwenpaw/", "gatewayPrefix": "/app/qwenpaw",
+                "gatewaySocket": "app.sock", "type": "iframe",
+            },
+        }}))
+        shutil.copy2(BIN, self.root / "app/bin/qwenpaw-supervisor")
+        self.binary = self.root / "app/bin/qwenpaw-supervisor"
         copied_sha256 = hashlib.sha256(self.binary.read_bytes()).hexdigest()
         assert copied_sha256 == binary_sha256, f"release binary changed during copy: {copied_sha256} != {binary_sha256}"
-        self.env = dict(os.environ, TRIM_PKGHOME=str(self.root / "home"), TRIM_PKGVAR=str(self.root / "var"), TRIM_PKGETC=str(self.root / "etc"), TRIM_DATA_SHARE_PATHS=str(self.root / "share"), TRIM_APPDEST=str(self.root / "app"), TRIM_SERVICE_PORT=str(self.port), SUPERVISOR_PORT=str(self.sup_port), SUPERVISOR_AUTOSTART="0", QWENPAW_PYTHON_BIN=str(self.python), QWENPAW_TEST_CONTROL=str(self.root), QWENPAW_SUP_URL=f"http://127.0.0.1:{self.sup_port}")
+        self.env = dict(os.environ, TRIM_PKGHOME=str(self.root / "home"), TRIM_PKGVAR=str(self.root / "var"), TRIM_PKGETC=str(self.root / "etc"), TRIM_DATA_SHARE_PATHS=str(self.root / "share"), TRIM_APPDEST=str(self.root / "app"), TRIM_SERVICE_PORT=str(self.port), SUPERVISOR_PORT=str(self.sup_port), SUPERVISOR_AUTOSTART="0", QWENPAW_WEB_PROXY_PORT="off", QWENPAW_PYTHON_BIN=str(self.python), QWENPAW_TEST_CONTROL=str(self.root), QWENPAW_SUP_URL=f"http://127.0.0.1:{self.sup_port}")
         self.env.pop("QWENPAW_CRASH_POINT", None)
         self.env.pop("QWENPAW_ENABLE_CRASH_POINT", None)
         self.process = None
@@ -350,7 +356,10 @@ def test_settings(fixture):
     assert code == 200 and result["success"], result
     assert fixture.request("/status")[1]["port"] == target
     assert (fixture.root / "var/qwenpaw-log-level").read_text().strip() == "debug"
-    assert json.loads(fixture.ui.read_text())[".url"]["qwenpaw.console"]["port"] == "15666"
+    assert json.loads(fixture.ui.read_text())[".url"]["qwenpaw.console"] == {
+        "url": "/app/qwenpaw/", "gatewayPrefix": "/app/qwenpaw",
+        "gatewaySocket": "app.sock", "type": "iframe",
+    }
     fail_port = free_port()
     (fixture.root / "fail-port").write_text(str(fail_port))
     files = [fixture.root / "var/service_port", fixture.root / "var/qwenpaw-log-level", fixture.ui]
@@ -365,10 +374,10 @@ def test_settings(fixture):
     assert fixture.process.poll() is None
     assert fixture.request("/status")[1]["port"] == callback_port
     assert (fixture.root / "var/qwenpaw-log-level").read_text().strip() == "warning"
-    bridge = subprocess.run(["bash", str(ROOT / "app/ui/api.cgi")], env=dict(fixture.env, QUERY_STRING="action=status", REQUEST_METHOD="GET"), capture_output=True, text=True, timeout=35)
-    bridge_body = bridge.stdout.replace("\r\n", "\n").split("\n\n", 1)[1]
-    assert json.loads(bridge_body)["port"] == callback_port
-    print("PASS: real HTTP configuration, exact rollback, callback → supervisor → kernel, CGI bridge, read-only status")
+    gateway = json.loads(fixture.ui.read_text())[".url"]["qwenpaw.console"]
+    assert gateway["url"] == "/app/qwenpaw/" and gateway["gatewaySocket"] == "app.sock"
+    assert fixture.request("/status")[1]["port"] == callback_port
+    print("PASS: real HTTP configuration, exact rollback, callback → supervisor → kernel, Gateway console config, read-only status")
 
 
 def test_recovery_gate(fixture):

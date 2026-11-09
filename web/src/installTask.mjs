@@ -16,6 +16,7 @@
  */
 
 const TERMINAL_PHASES = new Set(["done", "failed"]);
+export const INSTALL_TASK_STORAGE_KEY = "qwenpaw.install-task.v1";
 
 // seq 与 instance 共同构成身份;instance 每次 supervisor 启动不同,跨重启 seq 复用也不会匹配。
 /** @param {unknown} value */
@@ -66,6 +67,55 @@ export function acceptInstallTask(state, seq, instance) {
     taskInstance: acceptedInstance,
     claimedBy: "accepted",
   };
+}
+
+/**
+ * @param {{ getItem(key: string): string|null, setItem(key: string, value: string): void, removeItem(key: string): void }|null|undefined} storage
+ * @param {InstallTask} state
+ */
+export function persistInstallTask(storage, state) {
+  if (!storage || state.taskSeq === null || state.taskInstance === null) return false;
+  try {
+    storage.setItem(INSTALL_TASK_STORAGE_KEY, JSON.stringify({
+      seq: state.taskSeq,
+      instance: state.taskInstance,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {{ getItem(key: string): string|null }|null|undefined} storage
+ * @returns {InstallTask|null}
+ */
+export function restoreInstallTask(storage) {
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(INSTALL_TASK_STORAGE_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== "object") return null;
+    const task = createInstallTask({
+      attach: true,
+      attachSeq: saved.seq,
+      attachInstance: saved.instance,
+    });
+    return task.taskSeq !== null && task.taskInstance !== null ? task : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {{ removeItem(key: string): void }|null|undefined} storage
+ */
+export function clearStoredInstallTask(storage) {
+  if (!storage) return;
+  try {
+    storage.removeItem(INSTALL_TASK_STORAGE_KEY);
+  } catch {}
 }
 
 /**

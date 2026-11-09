@@ -5,7 +5,9 @@
             "icon": "images/console_{0}.png",
             "type": "iframe",
             "protocol": "http",
-            "url": "/cgi/ThirdParty/qwenpaw/index.cgi/",
+            "url": "/app/qwenpaw/",
+            "gatewayPrefix": "/app/qwenpaw",
+            "gatewaySocket": "app.sock",
             "allUsers": false,
             "control": {
                 "accessPerm": "editable"
@@ -14,10 +16,11 @@
         "qwenpaw.main": {
             "title": "QwenPaw",
             "icon": "images/icon_{0}.png",
-            "type": "url",
-            "protocol": "http",
-            "port": "18088",
-            "url": "/",
+            "type": "iframe",
+            "protocol": "",
+            "url": "/app/qwenpaw/web/",
+            "gatewayPrefix": "/app/qwenpaw",
+            "gatewaySocket": "app.sock",
             "allUsers": false,
             "noDisplay": false,
             "control": {

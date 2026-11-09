@@ -2,7 +2,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream},
-    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        io::AsRawFd,
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -244,8 +247,61 @@ fn read_shutdown_generation(
     Ok(Some(generation.state))
 }
 
+#[derive(serde::Serialize)]
+struct GatewayStatus {
+    state: &'static str,
+    error: Option<String>,
+}
+
+impl GatewayStatus {
+    fn ready(&self) -> bool {
+        matches!(self.state, "ready" | "disabled")
+    }
+}
+
+fn gateway_status(cfg: &Config, pid: Option<i32>) -> GatewayStatus {
+    let result = match crate::gateway::socket_path_from_config(cfg) {
+        Ok(None) => {
+            return GatewayStatus {
+                state: "disabled",
+                error: None,
+            }
+        }
+        Ok(Some(path)) => match pid {
+            Some(pid) => crate::gateway::readiness(&path, &cfg.token_file, pid),
+            None => Ok(false),
+        },
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(true) => GatewayStatus {
+            state: "ready",
+            error: None,
+        },
+        Ok(false) => GatewayStatus {
+            state: "not_ready",
+            error: Some("gateway did not return a verified HTTP 200".into()),
+        },
+        Err(error) => GatewayStatus {
+            state: "abnormal",
+            error: Some(error),
+        },
+    }
+}
+
 fn inspect(cfg: &Config, expected_exe: &Path) -> ManagerStatus {
-    inspect_with_probe(cfg, expected_exe, http_status_ready)
+    let manager = inspect_with_probe(cfg, expected_exe, http_status_ready);
+    if let ManagerStatus::Ready { pid, .. } = &manager {
+        let gateway = gateway_status(cfg, Some(*pid));
+        if !gateway.ready() {
+            return ManagerStatus::Abnormal(format!(
+                "gateway {}: {}",
+                gateway.state,
+                gateway.error.unwrap_or_default()
+            ));
+        }
+    }
+    manager
 }
 
 fn inspect_readonly(cfg: &Config, expected_exe: &Path) -> ManagerStatus {
@@ -373,11 +429,7 @@ fn http_status_ready(cfg: &Config) -> Result<bool, String> {
 fn lifecycle_lock(cfg: &Config) -> Result<LifecycleLock, String> {
     fs::create_dir_all(&cfg.var_dir)
         .map_err(|error| format!("create supervisor var directory: {error}"))?;
-    let var_dir = Path::new(&cfg.var_dir);
-    let parent = var_dir
-        .parent()
-        .ok_or_else(|| "supervisor var directory has no parent for lifecycle lock".to_string())?;
-    let path = parent.join(".qwenpaw-lifecycle.lock");
+    let path = Path::new(&cfg.var_dir).join(".qwenpaw-lifecycle.lock");
     acquire_lifecycle_lock(&path, LOCK_WAIT)
         .map_err(|error| format!("acquire lifecycle lock: {error}"))
 }
@@ -387,9 +439,7 @@ pub(crate) fn with_lifecycle_lock<T>(
     operation: impl FnOnce(&Path) -> T,
 ) -> Result<T, String> {
     let _lock = lifecycle_lock(cfg)?;
-    let expected_exe = std::env::current_exe()
-        .map_err(|error| format!("cannot determine supervisor executable: {error}"))?;
-    Ok(operation(&expected_exe))
+    Ok(operation(&cfg.supervisor_binary))
 }
 
 pub(crate) fn stop_for_uninstall(cfg: &Config, expected_exe: &Path) -> Result<(), String> {
@@ -406,20 +456,31 @@ pub fn run(action: ServiceAction, cfg: &Config) -> i32 {
 }
 
 fn run_status(cfg: &Config) -> i32 {
-    let expected_exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("cannot determine supervisor executable: {error}");
-            return 1;
-        }
-    };
-    let status = inspect_readonly(cfg, &expected_exe);
+    let status = inspect_readonly(cfg, &cfg.supervisor_binary);
     match &status {
         ManagerStatus::Ready { pid, .. } => println!("management service ready (pid {pid})"),
         ManagerStatus::NotRunning(reason) => println!("management service not running: {reason}"),
         ManagerStatus::Abnormal(reason) => eprintln!("management service abnormal: {reason}"),
     }
-    status.exit_code()
+    let pid = match &status {
+        ManagerStatus::Ready { pid, .. } => Some(*pid),
+        _ => None,
+    };
+    let gateway = gateway_status(cfg, pid);
+    println!(
+        "gateway {}{}",
+        gateway.state,
+        gateway
+            .error
+            .as_ref()
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default()
+    );
+    if !gateway.ready() && status.exit_code() == 0 {
+        1
+    } else {
+        status.exit_code()
+    }
 }
 
 fn run_mutation(cfg: &Config, operation: fn(&Config, &Path) -> Result<(), String>) -> i32 {
@@ -430,14 +491,7 @@ fn run_mutation(cfg: &Config, operation: fn(&Config, &Path) -> Result<(), String
             return 1;
         }
     };
-    let expected_exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("cannot determine supervisor executable: {error}");
-            return 1;
-        }
-    };
-    match operation(cfg, &expected_exe) {
+    match operation(cfg, &cfg.supervisor_binary) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("{error}");
@@ -446,14 +500,51 @@ fn run_mutation(cfg: &Config, operation: fn(&Config, &Path) -> Result<(), String
     }
 }
 
+fn clear_stale_registration(cfg: &Config, expected_exe: &Path) -> Result<(), String> {
+    let Some((pid, starttime)) = read_markers(cfg)? else {
+        return Ok(());
+    };
+    match check_identity(pid, starttime, expected_exe) {
+        IdentityState::Gone => remove_matching_markers(cfg, pid, starttime),
+        IdentityState::Mismatch => {
+            Err("stale supervisor identity mismatches; preserving registration".into())
+        }
+        IdentityState::Match => {
+            Err("supervisor became active before stale registration cleanup".into())
+        }
+        IdentityState::Unverifiable(error) => Err(error),
+    }
+}
+
+fn ensure_target_executable(path: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "target supervisor binary is unavailable {}: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "target supervisor binary is not executable: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn start_locked(cfg: &Config, expected_exe: &Path) -> Result<(), String> {
+    ensure_target_executable(expected_exe)?;
     match inspect(cfg, expected_exe) {
         ManagerStatus::Ready { pid, .. } => {
             println!("management service already ready (pid {pid})");
             return Ok(());
         }
         ManagerStatus::Abnormal(error) => return Err(format!("refusing to start: {error}")),
-        ManagerStatus::NotRunning(_) => {}
+        ManagerStatus::NotRunning(_) => {
+            if crate::gateway::socket_path_from_config(cfg)?.is_some() {
+                clear_stale_registration(cfg, expected_exe)?;
+            }
+        }
     }
 
     let log = OpenOptions::new()
@@ -503,7 +594,9 @@ fn start_locked(cfg: &Config, expected_exe: &Path) -> Result<(), String> {
             {
                 match check_identity(pid, starttime, expected_exe) {
                     IdentityState::Match => {
-                        if http_status_ready(cfg).unwrap_or(false) {
+                        if http_status_ready(cfg).unwrap_or(false)
+                            && gateway_status(cfg, Some(pid)).ready()
+                        {
                             println!("management service started (pid {pid})");
                             return Ok(());
                         }
@@ -733,12 +826,7 @@ fn remove_file_if_exists(path: impl AsRef<Path>) -> Result<(), String> {
 }
 
 pub fn doctor_json(cfg: &Config) -> String {
-    let manager = match std::env::current_exe() {
-        Ok(exe) => inspect_readonly(cfg, &exe),
-        Err(error) => {
-            ManagerStatus::Abnormal(format!("cannot determine supervisor executable: {error}"))
-        }
-    };
+    let manager = inspect_readonly(cfg, &cfg.supervisor_binary);
     let (pid, starttime, error) = match &manager {
         ManagerStatus::Ready { pid, starttime } => (Some(*pid), Some(*starttime), None),
         ManagerStatus::NotRunning(reason) | ManagerStatus::Abnormal(reason) => {
@@ -747,6 +835,7 @@ pub fn doctor_json(cfg: &Config) -> String {
     };
     serde_json::json!({
         "schema": 1,
+        "gateway": gateway_status(cfg, pid),
         "manager": {
             "state": manager.state_name(),
             "pid": pid,
@@ -785,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_cleans_matching_registration_for_crashed_supervisor() {
+    fn start_and_stop_clean_matching_registration_for_crashed_supervisor() {
         let root = test_path("crashed-supervisor");
         let var = root.join("var");
         fs::create_dir_all(&var).unwrap();
@@ -801,20 +890,32 @@ mod tests {
             home_dir: root.join("home").to_string_lossy().into_owned(),
             share_dir: root.join("share").to_string_lossy().into_owned(),
             ui_config_file: root.join("ui/config").to_string_lossy().into_owned(),
+            supervisor_binary: std::env::current_exe().unwrap(),
             kernel_venv: root.join("home/venv").to_string_lossy().into_owned(),
             kernel_pid_file: var.join("kernel.pid").to_string_lossy().into_owned(),
             kernel_log: var.join("qwenpaw.log").to_string_lossy().into_owned(),
             kernel_port: crate::api::test_support::free_port(),
+            web_proxy_port: None,
             kernel_log_level: "info".into(),
             token_file: var.join("supervisor-token").to_string_lossy().into_owned(),
             supervisor_pid_file: pid_path.to_string_lossy().into_owned(),
             supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
             listen_port: crate::api::test_support::free_port(),
             auto_start: false,
+            gateway_socket: None,
         };
         mark_shutdown_generation(&cfg, pid, starttime, false).unwrap();
+        let expected_exe = std::env::current_exe().unwrap();
+        clear_stale_registration(&cfg, &expected_exe).unwrap();
+        assert!(
+            !pid_path.exists(),
+            "start should clear a confirmed gone registration"
+        );
+        assert!(!starttime_path.exists());
+        fs::write(&pid_path, format!("{pid}\n")).unwrap();
+        fs::write(&starttime_path, format!("{starttime}\n")).unwrap();
 
-        let result = stop_locked(&cfg, &std::env::current_exe().unwrap());
+        let result = stop_locked(&cfg, &expected_exe);
 
         assert!(
             result.is_ok(),
@@ -918,16 +1019,19 @@ mod tests {
             home_dir: root.join("home").to_string_lossy().into_owned(),
             share_dir: root.join("share").to_string_lossy().into_owned(),
             ui_config_file: root.join("ui/config").to_string_lossy().into_owned(),
+            supervisor_binary: std::env::current_exe().unwrap(),
             kernel_venv: root.join("home/venv").to_string_lossy().into_owned(),
             kernel_pid_file: kernel_pid.to_string_lossy().into_owned(),
             kernel_log: var.join("qwenpaw.log").to_string_lossy().into_owned(),
             kernel_port: crate::api::test_support::free_port(),
+            web_proxy_port: None,
             kernel_log_level: "info".into(),
             token_file: token_file.to_string_lossy().into_owned(),
             supervisor_pid_file: pid_path.to_string_lossy().into_owned(),
             supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
             listen_port: port,
             auto_start: false,
+            gateway_socket: None,
         };
         let report: serde_json::Value = serde_json::from_str(&doctor_json(&cfg)).unwrap();
         assert!(!server.join().unwrap());
@@ -955,16 +1059,19 @@ mod tests {
             home_dir: root.join("home").to_string_lossy().into_owned(),
             share_dir: root.join("share").to_string_lossy().into_owned(),
             ui_config_file: root.join("ui/config").to_string_lossy().into_owned(),
+            supervisor_binary: std::env::current_exe().unwrap(),
             kernel_venv: root.join("home/venv").to_string_lossy().into_owned(),
             kernel_pid_file: var.join("kernel.pid").to_string_lossy().into_owned(),
             kernel_log: var.join("qwenpaw.log").to_string_lossy().into_owned(),
             kernel_port: crate::api::test_support::free_port(),
+            web_proxy_port: None,
             kernel_log_level: "info".into(),
             token_file: var.join("supervisor-token").to_string_lossy().into_owned(),
             supervisor_pid_file: var.join("supervisor.pid").to_string_lossy().into_owned(),
             supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
             listen_port: crate::api::test_support::free_port(),
             auto_start: false,
+            gateway_socket: None,
         };
         let report: serde_json::Value = serde_json::from_str(&doctor_json(&cfg)).unwrap();
         assert_eq!(report["manager"]["state"], "not_running");

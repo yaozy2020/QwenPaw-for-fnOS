@@ -5,6 +5,10 @@ import {
   createInstallTask,
   acceptInstallTask,
   observeInstallStatus,
+  INSTALL_TASK_STORAGE_KEY,
+  persistInstallTask,
+  restoreInstallTask,
+  clearStoredInstallTask,
 } from "../src/installTask.mjs";
 
 const INSTANCE = "sup-instance-a";
@@ -230,4 +234,52 @@ test("观察不修改传入状态(便于只在确认后提交)", () => {
   const snapshot = JSON.stringify(task);
   observeInstallStatus(task, running(60));
   assert.equal(JSON.stringify(task), snapshot);
+});
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: key => values.delete(key),
+  };
+}
+
+test("受理身份写入 sessionStorage 后重建仍恢复同一 seq + instance", () => {
+  const storage = memoryStorage();
+  const task = accepted(42, INSTANCE);
+
+  assert.equal(persistInstallTask(storage, task), true);
+  assert.deepEqual(JSON.parse(storage.getItem(INSTALL_TASK_STORAGE_KEY)), { seq: 42, instance: INSTANCE });
+
+  const restored = restoreInstallTask(storage);
+  assert.equal(restored.taskSeq, 42);
+  assert.equal(restored.taskInstance, INSTANCE);
+  assert.equal(observeInstallStatus(restored, running(42, INSTANCE)).owned, true);
+  assert.equal(observeInstallStatus(restored, done(42, INSTANCE)).outcome, "done");
+});
+
+test("恢复只认已保存身份:无任务、其他 seq 或 instance 都不被认领", () => {
+  const storage = memoryStorage();
+  assert.equal(restoreInstallTask(storage), null);
+  assert.equal(observeInstallStatus(newTask(), running(42, INSTANCE)).owned, false);
+
+  persistInstallTask(storage, accepted(42, INSTANCE));
+  const restored = restoreInstallTask(storage);
+  assert.equal(observeInstallStatus(restored, running(43, INSTANCE)).owned, false);
+  assert.equal(observeInstallStatus(restored, running(42, OTHER_INSTANCE)).owned, false);
+});
+
+test("sessionStorage 不可用时安全降级到本页内存身份", () => {
+  const unavailable = {
+    getItem() { throw new Error("SecurityError"); },
+    setItem() { throw new Error("QuotaExceededError"); },
+    removeItem() { throw new Error("SecurityError"); },
+  };
+  const task = accepted(42, INSTANCE);
+
+  assert.equal(restoreInstallTask(unavailable), null);
+  assert.equal(persistInstallTask(unavailable, task), false);
+  assert.doesNotThrow(() => clearStoredInstallTask(unavailable));
+  assert.equal(observeInstallStatus(task, running(42, INSTANCE)).owned, true);
 });

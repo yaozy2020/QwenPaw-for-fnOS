@@ -585,6 +585,7 @@ run_crash_test() (
     export TRIM_SERVICE_PORT="$PORT_KERNEL"
     export TRIM_APPDEST="$test_dir/appdest"
     export SUPERVISOR_AUTOSTART=0
+    export QWENPAW_WEB_PROXY_PORT=off
 
     (cd "$test_dir" && exec "$BIN") > "$test_dir/supervisor.log" 2>&1 &
     sup_pid=$!

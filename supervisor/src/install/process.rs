@@ -191,9 +191,15 @@ fn capture_process_identity(pid: u32, pgid: i32) -> std::io::Result<ProcessIdent
     }
     let first_alive = process_is_alive(first)?;
     let executable = first_alive.then(|| executable_identity(pid).ok()).flatten();
-    let second = current_process_identity(pid)?.ok_or_else(|| {
-        identity_error(format!("process {pid} exited during identity registration"))
-    })?;
+    let Some(second) = current_process_identity(pid)? else {
+        return Ok(ProcessIdentity {
+            pid,
+            starttime: first.starttime,
+            pgid,
+            session: first.session,
+            executable,
+        });
+    };
     if second.starttime != first.starttime || second.pgrp != pgid || second.session != first.session
     {
         return Err(identity_error(
@@ -327,9 +333,26 @@ impl InstallState {
         let record = format!("{pid}\n{}\n{pgid}\n", identity.starttime);
         atomic_write_0600(&pid_file.to_string_lossy(), &record)?;
         if identity.executable.is_none() {
-            return Err(identity_error(
-                "spawned process executable identity could not be verified",
-            ));
+            let still_alive = match current_process_identity(pid)? {
+                Some(current)
+                    if current.starttime == identity.starttime
+                        && current.pgrp == identity.pgid
+                        && current.session == identity.session =>
+                {
+                    process_is_alive(current)?
+                }
+                Some(_) => {
+                    return Err(identity_error(
+                        "spawned process identity changed during registration",
+                    ))
+                }
+                None => false,
+            };
+            if still_alive {
+                return Err(identity_error(
+                    "spawned process executable identity could not be verified",
+                ));
+            }
         }
         Ok(cancelled)
     }
@@ -640,4 +663,60 @@ pub(super) fn metadata_version(python: &Path) -> String {
 pub(super) fn version_matches(actual: &str, want: &str) -> bool {
     let norm = |s: &str| s.trim().trim_start_matches(['v', 'V']).to_ascii_lowercase();
     norm(actual) == norm(want)
+}
+
+#[cfg(test)]
+mod identity_registration_tests {
+    use super::*;
+    use std::{
+        os::unix::process::CommandExt,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    #[test]
+    fn short_lived_child_gone_before_executable_check_is_registered() {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let pid_file = std::env::temp_dir().join(format!(
+            "qwenpaw-short-lived-process-{}-{}.pid",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut child = Command::new("/bin/true").process_group(0).spawn().unwrap();
+        let pid = child.id();
+        let pgid = pid as i32;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let current = current_process_identity(pid).unwrap();
+            if current.is_some_and(|identity| !process_is_alive(identity).unwrap()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "short-lived child did not exit before identity registration"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(current_process_identity(pid).unwrap().is_some());
+        assert!(
+            executable_identity(pid).is_err(),
+            "exited child's /proc executable must be unavailable during registration"
+        );
+
+        let state = InstallState::new(std::sync::Arc::new(|_| {}), std::sync::Arc::new(|| Ok(0)));
+        let registration = state.register_process(pid, pgid, &pid_file);
+        let identity = state.registered_identity(pid);
+        let record = std::fs::read_to_string(&pid_file).ok();
+        child.wait().unwrap();
+        let _ = std::fs::remove_file(&pid_file);
+
+        assert!(
+            registration.is_ok(),
+            "a child that exited before identity registration must not block registration: {registration:?}"
+        );
+        let identity = identity.expect("the exited child identity must remain registered");
+        assert_eq!(identity.executable, None);
+        assert!(!verify_process_identity(identity).unwrap());
+        assert!(process_group_empty(identity.pgid, identity.session).unwrap());
+        assert!(record.is_some_and(|record| record.starts_with(&format!("{pid}\n"))));
+    }
 }

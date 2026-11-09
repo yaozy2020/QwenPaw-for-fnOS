@@ -64,10 +64,10 @@
       </button>
 
       <!-- 进入对话主按钮 -->
-      <a id="btnWebConsole" class="btn btn-primary" href="#" target="_blank">
+      <a id="btnWebConsole" class="btn btn-primary" href="/app/qwenpaw/web/">
         进入 Web 对话
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/>
+          <path d="M5 12h14m-7-7 7 7-7 7"/>
         </svg>
       </a>
     </div>
@@ -106,6 +106,13 @@
           <div class="row-inline">
             <span class="info-val" id="valPort">18088</span>
             <button class="btn-outline btn-xs" onclick="changeServicePort()">修改端口</button>
+          </div>
+        </div>
+        <div class="info-row">
+          <span class="info-label">独立 Web 反代端口</span>
+          <div class="row-inline">
+            <span class="info-val" id="valWebProxyPort">自动分配</span>
+            <button class="btn-outline btn-xs" onclick="changeWebProxyPort()">修改反代端口</button>
           </div>
         </div>
       </div>

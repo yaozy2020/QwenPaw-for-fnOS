@@ -1,5 +1,5 @@
 // 控制台编译:src/main.ts + src/style.css → 单文件 dist/index.html。
-// 运行时契约不变(index.cgi 服务 target/www/index.html + .gz/.br 预压缩),
+// 运行时由统一 Gateway 服务 target/www/index.html 与预压缩兄弟文件,
 // 变化的只是"源码可编译":语法错误在此处即失败,不再静默上线(r7 教训)。
 import { build } from "esbuild";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
