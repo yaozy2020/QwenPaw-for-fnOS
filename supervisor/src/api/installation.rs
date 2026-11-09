@@ -357,7 +357,8 @@ if sys.argv[1:3] == ['-m', 'pip']:
     }
 
     async fn wait_for_path(path: &std::path::Path) -> bool {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        // 受理返回后 worker 仍需调度并创建子进程；高负载 CI 中 3 秒不足以覆盖该窗口。
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while !path.exists() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
