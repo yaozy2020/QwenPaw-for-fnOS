@@ -109,7 +109,7 @@ jobs:
 
       # 监督者是安全修复的主战场:测试与 lint 必须真实执行,不允许静默 skip
       - name: cargo test --locked
-        run: sudo -E env "PATH=$PATH" cargo test --locked
+        run: sudo -E env "PATH=$PATH" "CARGO_TARGET_DIR=${RUNNER_TEMP}/qwenpaw-root-target" cargo test --locked
 
       - name: cargo clippy --locked (warnings = errors)
         run: cargo clippy --locked --all-targets -- -D warnings
