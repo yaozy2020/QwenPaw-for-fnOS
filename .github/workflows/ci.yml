@@ -72,7 +72,9 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Chromium Gateway UDS E2E delivery gate
-        run: npm run test:e2e:gateway --prefix web
+        run: |
+          sudo -E env "PATH=$PATH" npm run test:e2e:gateway --prefix web
+          sudo chown -R "$(id -u):$(id -g)" supervisor/target
 
       - name: Build release binaries for runtime regressions
         run: cargo build --locked --release --manifest-path supervisor/Cargo.toml
