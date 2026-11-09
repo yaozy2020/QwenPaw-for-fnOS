@@ -134,7 +134,7 @@ jobs:
         run: |
           bash scripts/preflight.sh
           python3 scripts/gen-audit.py --check
-          (cd supervisor && unshare --user --map-root-user cargo test --locked)
+          (cd supervisor && sudo -E cargo test --locked)
           (cd supervisor && cargo clippy --locked --all-targets -- -D warnings)
 
       # [4b] 构建环境(必须在 lint 之前:STRICT_CI 下 esbuild 层真正执行,
