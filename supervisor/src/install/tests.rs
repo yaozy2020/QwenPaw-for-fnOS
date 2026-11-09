@@ -323,13 +323,19 @@ mod tests {
             path.starts_with(&format!("{}/.venv.staging.", dir.display()))
         }));
         let install_pid = dir.join("install.pid");
-        let pid = std::fs::read_to_string(&install_pid)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap()
-            .parse::<i32>()
-            .unwrap();
+        let registration_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            if let Ok(contents) = std::fs::read_to_string(&install_pid) {
+                if let Some(Ok(pid)) = contents.lines().next().map(str::parse::<i32>) {
+                    break pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < registration_deadline,
+                "install process was not registered"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
 
         let started = std::time::Instant::now();
         assert!(
