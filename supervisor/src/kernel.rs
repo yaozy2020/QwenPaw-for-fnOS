@@ -1210,11 +1210,24 @@ mod lifecycle_tests {
         sorted_helper_pids.sort_unstable();
         sorted_spawned_pids.sort_unstable();
         assert_eq!(sorted_helper_pids, sorted_spawned_pids);
-        let live_helpers: Vec<i32> = all_helper_pids
-            .iter()
-            .copied()
-            .filter(|pid| is_test_helper(*pid, &helper_script, &helper_token))
-            .collect();
+        let consistency_deadline = Instant::now() + Duration::from_secs(2);
+        let live_helpers: Vec<i32> = loop {
+            let live: Vec<i32> = all_helper_pids
+                .iter()
+                .copied()
+                .filter(|pid| is_test_helper(*pid, &helper_script, &helper_token))
+                .collect();
+            let tracked = km.state.lock().unwrap_or_else(|e| e.into_inner()).tracked;
+            let consistent = match live.as_slice() {
+                [] => tracked == 0,
+                [pid] => tracked == *pid,
+                _ => true,
+            };
+            if consistent || Instant::now() >= consistency_deadline {
+                break live;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert!(
             live_helpers.len() <= 1,
             "at most one helper process may be alive after concurrent lifecycle operations: {live_helpers:?}"
