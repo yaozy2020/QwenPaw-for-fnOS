@@ -364,6 +364,7 @@ struct GatewayState {
     test_exe: Option<PathBuf>,
     supervisor_executables: Vec<PathBuf>,
     sse_connections: Arc<Semaphore>,
+    public_access: bool,
     web_client: hyper_util::client::legacy::Client<
         hyper_util::client::legacy::connect::HttpConnector,
         Body,
@@ -398,12 +399,18 @@ fn build_router_with_supervisors(
         test_exe,
         supervisor_executables,
         sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        public_access: false,
         web_client,
     };
     Router::new().fallback(dispatch).with_state(state)
 }
 
+#[cfg(test)]
 pub fn web_tcp_router(app: AppState) -> Router {
+    web_tcp_router_with_access(app, false)
+}
+
+pub fn web_tcp_router_with_access(app: AppState, public: bool) -> Router {
     let mut web_connector = hyper_util::client::legacy::connect::HttpConnector::new();
     web_connector.set_connect_timeout(Some(Duration::from_secs(3)));
     let web_client =
@@ -416,6 +423,7 @@ pub fn web_tcp_router(app: AppState) -> Router {
         test_exe: None,
         supervisor_executables: Vec::new(),
         sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        public_access: public,
         web_client,
     };
     Router::new()
@@ -504,14 +512,27 @@ async fn dispatch(
         Err(status) => return status.into_response(),
     };
     if let Some(web_path) = web_path {
-        if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
+        if !matches!(
+            method,
+            Method::GET
+                | Method::HEAD
+                | Method::POST
+                | Method::PUT
+                | Method::PATCH
+                | Method::DELETE
+                | Method::OPTIONS
+        ) {
             let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
-            response
-                .headers_mut()
-                .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD, POST"));
+            response.headers_mut().insert(
+                header::ALLOW,
+                HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
+            );
             return response;
         }
-        if method == Method::POST {
+        if matches!(
+            method,
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+        ) {
             match unique_header(request.headers(), "sec-fetch-site") {
                 Ok(Some(site)) if site.eq_ignore_ascii_case("cross-site") => {
                     return forbidden("cross-site");

@@ -1390,6 +1390,19 @@ async fn capture_web_upstream(
             "text/css; charset=utf-8",
         );
     }
+    if uri == "/sse-hold" {
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Result<&'static str, io::Error>>(1);
+        tokio::spawn(async move {
+            sender.closed().await;
+        });
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(
+                tokio_stream::wrappers::ReceiverStream::new(receiver),
+            ))
+            .unwrap();
+    }
     if uri.starts_with("/sse") {
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         tokio::spawn(async move {
@@ -1544,6 +1557,7 @@ fn root_proxy_state(app: AppState) -> GatewayState {
         test_exe: None,
         supervisor_executables: Vec::new(),
         sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        public_access: false,
         web_client,
     }
 }
@@ -1775,6 +1789,169 @@ async fn tcp_config_denies_before_reading_or_forwarding_a_pending_body() {
     assert!(captured.try_recv().is_err(), "denied body reached config");
     drop(sender);
     server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_options_preflight_is_forwarded_without_management_csrf() {
+    let (_dir, state, _) = fixture("tcp-options-preflight");
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let mut headers = root_auth_headers();
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://nas.example"),
+    );
+    headers.insert(
+        "access-control-request-method",
+        HeaderValue::from_static("POST"),
+    );
+    headers.insert(
+        "access-control-request-headers",
+        HeaderValue::from_static("authorization,content-type"),
+    );
+    let response = tcp_web_request(
+        addr,
+        Method::OPTIONS,
+        "/api/models/active",
+        headers,
+        Body::empty(),
+    )
+    .await;
+    assert!(response.status().is_success());
+    let request = captured.recv().await.unwrap();
+    assert_eq!(request.method, Method::OPTIONS);
+    assert_eq!(request.uri, "/api/models/active");
+    assert_eq!(request.headers[header::ORIGIN], "https://nas.example");
+    assert_eq!(request.headers["access-control-request-method"], "POST");
+    assert_eq!(
+        request.headers["access-control-request-headers"],
+        "authorization,content-type"
+    );
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_model_mutation_methods_reach_upstream_with_original_bodies() {
+    let (_dir, state, _) = fixture("tcp-model-mutation-methods");
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    for (method, path, body) in [
+        (
+            Method::PUT,
+            "/api/models/libwrt/config",
+            "{\\\"provider\\\":true}",
+        ),
+        (Method::PATCH, "/api/models/active", "{\\\"model\\\":true}"),
+        (Method::DELETE, "/api/models/libwrt/config", ""),
+    ] {
+        let response = tcp_web_request(
+            addr,
+            method.clone(),
+            path,
+            root_auth_headers(),
+            Body::from(body),
+        )
+        .await;
+        assert!(response.status().is_success(), "{method} {path}");
+        let request = captured.recv().await.unwrap();
+        assert_eq!(request.method, method);
+        assert_eq!(request.uri, path);
+        assert_eq!(request.body, body.as_bytes());
+    }
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
+    let (_dir, state, _) = fixture("tcp-public-upstream-auth");
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    let manager = WebProxyManager::start(state, 0, true).await.unwrap();
+    let (port, public) = manager.state().await;
+    assert!(public);
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+
+    let denied = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/files/preview/etc/passwd",
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        captured.try_recv().is_err(),
+        "unauthenticated preview reached upstream"
+    );
+
+    let login = tcp_web_request(
+        addr,
+        Method::POST,
+        "/api/auth/login",
+        HeaderMap::new(),
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/login");
+
+    let accepted = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/models/active",
+        root_auth_headers(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let verify = captured.recv().await.unwrap();
+    assert_eq!(verify.uri, "/api/auth/verify");
+    assert_eq!(
+        verify.headers[header::AUTHORIZATION],
+        "Bearer upstream-token"
+    );
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/models/active");
+    drop(manager);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn same_port_public_switch_survives_an_idle_sse_connection() {
+    let (_dir, state, _) = fixture("tcp-public-switch-sse");
+    let (_captured, upstream) = start_web_upstream(&state).await;
+    let manager = WebProxyManager::start(state, 0, false).await.unwrap();
+    let (port, _) = manager.state().await;
+    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    let response = tcp_web_request(
+        addr,
+        Method::GET,
+        "/sse-hold",
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let switched = tokio::time::timeout(Duration::from_secs(3), manager.reconfigure(port, true))
+        .await
+        .expect("same-port switch hung behind an idle SSE connection");
+    assert!(switched.is_ok(), "same-port switch failed: {switched:?}");
+    assert_eq!(manager.state().await, (port, true));
+    let mut probe = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_millis(100),
+        tokio::io::AsyncReadExt::read_to_end(&mut probe, &mut Vec::new()),
+    )
+    .await;
+    assert!(
+        error.is_err(),
+        "old listener did not accept a new connection"
+    );
+    drop(response);
+    drop(manager);
     upstream.abort();
 }
 
@@ -2855,11 +3032,12 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
         addr,
         Method::GET,
         "/api/status",
-        HeaderMap::new(),
+        root_auth_headers(),
         Body::empty(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
     assert_eq!(captured.recv().await.unwrap().uri, "/api/status");
     upstream.abort();
 }
@@ -4074,4 +4252,123 @@ async fn web_proxy_streams_sse_and_rejects_websocket_upgrade_explicitly() {
         "Upgrade was forwarded to the HTTP upstream"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn web_proxy_mutation_methods_forward_and_reject_cross_origin() {
+    let (_dir, state, router) = fixture("gateway-web-proxy-mutation-methods");
+    let (mut captured, server) = start_web_upstream(&state).await;
+
+    for (method, body) in [
+        (Method::PUT, r#"{"model":"same"}"#),
+        (Method::PATCH, r#"{"enabled":true}"#),
+        (Method::DELETE, ""),
+        (Method::OPTIONS, ""),
+    ] {
+        let mut headers = admin_headers();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://nas.example.test"),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("nas.example.test"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        let response = router
+            .clone()
+            .oneshot(request(
+                method.as_str(),
+                "/app/qwenpaw/web/api/models/active?scope=default",
+                headers,
+                Body::from(body),
+                Some(peer()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{method}");
+        let received = captured.recv().await.unwrap();
+        assert_eq!(received.method, method);
+        assert_eq!(received.uri, "/api/models/active?scope=default");
+        assert_eq!(received.body, body.as_bytes());
+    }
+
+    for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+        for (label, origin, fetch_site) in [
+            (
+                "invalid origin",
+                "http://attacker.example.test",
+                "same-origin",
+            ),
+            ("cross-site", "http://nas.example.test", "cross-site"),
+        ] {
+            let mut headers = admin_headers();
+            headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            headers.insert("sec-fetch-site", HeaderValue::from_static(fetch_site));
+            headers.insert(
+                "x-forwarded-host",
+                HeaderValue::from_static("nas.example.test"),
+            );
+            let response = router
+                .clone()
+                .oneshot(request(
+                    method.as_str(),
+                    "/app/qwenpaw/web/api/models/active",
+                    headers,
+                    Body::from("must-not-reach-kernel"),
+                    Some(peer()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {label}");
+            assert!(
+                captured.try_recv().is_err(),
+                "{method} {label} reached upstream"
+            );
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn web_proxy_releases_sse_permit_when_downstream_disconnects() {
+    let (_dir, app, _) = fixture("gateway-web-proxy-sse-disconnect");
+    let (_captured, upstream) = start_web_upstream(&app).await;
+    let state = root_proxy_state(app);
+    let response = web_proxy::forward(
+        &state,
+        request("GET", "/sse", HeaderMap::new(), Body::empty(), None),
+        "/sse",
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(
+        Duration::from_millis(500),
+        tokio_stream::StreamExt::next(&mut stream),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(&first[..], b"data: first\n\n");
+    assert_eq!(
+        state.sse_connections.available_permits(),
+        MAX_SSE_CONNECTIONS - 1
+    );
+    drop(stream);
+
+    let released = tokio::time::timeout(Duration::from_millis(500), async {
+        while state.sse_connections.available_permits() != MAX_SSE_CONNECTIONS {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "SSE permit leaked after downstream disconnect"
+    );
+    upstream.abort();
 }

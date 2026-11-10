@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.1.2-9-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.1.2-14-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
@@ -46,7 +46,7 @@
 
 反代端口支持自动分配和手动修改。启动时若目标端口已被占用，会自动选择空闲端口；修改时先绑定新端口，成功后再切换，失败保留原端口。当前实际端口以控制台显示为准。
 
-上游 WebSocket 目前不由此外壳代理，相关请求返回 501；主 Console 的 HTTP、鉴权和 SSE 流程走 Gateway 或独立反代。首次进入上游鉴权页默认使用中文，已有浏览器语言选择不会被覆盖。
+上游 WebSocket 目前不由此外壳代理，相关请求返回 501；主 Console 的 HTTP、鉴权和 SSE 流程走 Gateway 或独立反代。独立反代默认仅监听回环地址；开启外部访问时，受保护 API 仍需有效的 QwenPaw 登录会话。首次进入上游鉴权页默认使用中文，已有浏览器语言选择不会被覆盖。
 
 ## 端口与下载源
 

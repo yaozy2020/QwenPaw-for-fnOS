@@ -1049,6 +1049,35 @@ def case_healthy_upgrade(parent, hashes):
         require(not (fixture.control / "init-count").exists(), "healthy upgrade invoked init")
 
 
+def case_probe_failure_allows_pin_repair_without_data_loss(parent, hashes):
+    with Fixture(parent, "probe-failure-pin-repair", hashes) as fixture:
+        fixture.create_runtime("2.4.1")
+        fixture.venv.joinpath("bin/python3").write_text("#!/bin/sh\nexit 1\n")
+        fixture.venv.joinpath("bin/python3").chmod(0o755)
+        fixture.pin.write_text("2.4.1\n")
+        fixture.user_data.joinpath("config.json").write_text("existing config\n")
+        fixture.env["SUPERVISOR_AUTOSTART"] = "0"
+        fixture.stage_installed_helper()
+        fixture.start_manager(expect_kernel=False)
+        runtime = fixture.runtime_health()
+        require(runtime["installed"] is True and runtime["version"] == ""
+                and runtime["metadata_repairable"] is False,
+                f"probe failure precondition not met: {runtime}")
+        prior = fixture.control_status()
+
+        code, output = fixture.callback("install", TRIM_APP_STATUS="UPGRADE")
+        require(code == 0, f"probe failure repair failed: {output}")
+        task = fixture.wait_task(prior["seq"])
+        require(task["phase"] == "done", f"probe failure repair failed: {task}")
+        require((fixture.venv / "installed").read_text() == "2.4.1\n",
+                "probe failure did not restore the exact pin")
+        require((fixture.control / "pip-started").exists(),
+                "probe failure did not invoke the installer")
+        require(fixture.user_data.joinpath("config.json").read_text() == "existing config\n",
+                "probe failure repair changed user configuration")
+        fixture.wait_kernel()
+
+
 def case_upgrade_preserves_runtime(parent, hashes):
     with Fixture(parent, "upgrade-preserves-runtime", hashes) as fixture:
         fixture.create_runtime("2.4.1")
@@ -1417,6 +1446,8 @@ def main():
                  lambda: case_stop_running_target_without_execute_bit(parent, hashes), failures)
         run_case("healthy upgrade preserves version, init count and pip count",
                  lambda: case_healthy_upgrade(parent, hashes), failures)
+        run_case("probe failure repairs the exact pin without changing user data",
+                 lambda: case_probe_failure_allows_pin_repair_without_data_loss(parent, hashes), failures)
         run_case("upgrade keep preserves the exact runtime without installing",
                  lambda: case_upgrade_preserves_runtime(parent, hashes), failures)
         run_case("running bad-import runtime matching the pin survives install callback",

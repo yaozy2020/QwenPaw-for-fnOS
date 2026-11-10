@@ -178,11 +178,15 @@ fn upgrade_callback(cfg: &Config) -> Result<(), String> {
 fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), String> {
     let socket = control::socket_path(&cfg.var_dir);
     let health = control::runtime_health(&socket)?;
-    let installed = runtime_is_installed(&health)?;
+    let active_venv = Path::new(&cfg.kernel_venv).exists();
+    let installed = match runtime_is_installed(&health) {
+        Ok(installed) => installed,
+        Err(_) if active_venv && health["runtime"]["installed"].as_bool() == Some(true) => false,
+        Err(error) => return Err(error),
+    };
     let plan = if installed {
         RuntimePlan::Keep
     } else {
-        let active_venv = Path::new(&cfg.kernel_venv).exists();
         let plan = runtime_plan(false, active_venv, read_pin_state(&cfg.var_dir)?)?;
         if let RuntimePlan::Repair(version) = &plan {
             if running_import_failure_matches_pin(&health, version) {

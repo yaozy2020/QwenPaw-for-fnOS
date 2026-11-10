@@ -5,7 +5,7 @@ use tokio::{
     sync::{watch, Mutex},
 };
 
-use super::{web_tcp_router, AppState};
+use super::{web_tcp_router_with_access, AppState};
 use crate::install::atomic_write_0600;
 
 #[derive(Clone)]
@@ -25,7 +25,7 @@ impl WebProxyManager {
         let (listener, port) = Self::bind_with_fallback(requested_port, public).await?;
         persist_state(&app, port, public)?;
         let (shutdown, stopped) = watch::channel(false);
-        spawn(app.clone(), listener, stopped);
+        spawn(app.clone(), listener, stopped, public);
         Ok(Self {
             app,
             inner: Arc::new(Mutex::new(Inner {
@@ -68,7 +68,7 @@ impl WebProxyManager {
             return Err(error);
         }
         let (shutdown, stopped) = watch::channel(false);
-        spawn(app, listener, stopped);
+        spawn(app, listener, stopped, public);
         let previous = std::mem::replace(
             &mut *inner,
             Inner {
@@ -130,7 +130,7 @@ async fn restore_previous(
 ) -> io::Result<()> {
     let (listener, _) = bind_after_close(port, public).await?;
     let (shutdown, stopped) = watch::channel(false);
-    spawn(app.clone(), listener, stopped);
+    spawn(app.clone(), listener, stopped, public);
     inner.shutdown = shutdown;
     Ok(())
 }
@@ -146,9 +146,9 @@ fn persist_state(app: &AppState, port: u16, public: bool) -> io::Result<()> {
     )
 }
 
-fn spawn(app: AppState, listener: TcpListener, mut stopped: watch::Receiver<bool>) {
+fn spawn(app: AppState, listener: TcpListener, mut stopped: watch::Receiver<bool>, public: bool) {
     tokio::spawn(async move {
-        let result = axum::serve(listener, web_tcp_router(app))
+        let result = axum::serve(listener, web_tcp_router_with_access(app, public))
             .with_graceful_shutdown(async move {
                 let _ = stopped.changed().await;
             })

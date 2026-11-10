@@ -61,11 +61,21 @@ async fn forward_impl(
 ) -> Response {
     let method = request.method().clone();
     let head_request = method == Method::HEAD;
-    if !matches!(method, Method::GET | Method::HEAD | Method::POST) {
+    if !matches!(
+        method,
+        Method::GET
+            | Method::HEAD
+            | Method::POST
+            | Method::PUT
+            | Method::PATCH
+            | Method::DELETE
+            | Method::OPTIONS
+    ) {
         let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
-        response
-            .headers_mut()
-            .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD, POST"));
+        response.headers_mut().insert(
+            header::ALLOW,
+            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
         return response;
     }
 
@@ -98,8 +108,10 @@ async fn forward_impl(
     }
 
     let port = state.app.core.kernel.port();
-    if !rewrite_paths && is_config_path(path) {
-        if let Err(status) = verify_config_session(state, port, &headers).await {
+    if !rewrite_paths
+        && (is_config_path(path) || (state.public_access && requires_upstream_auth(path, &method)))
+    {
+        if let Err(status) = verify_upstream_session(state, port, &headers).await {
             return status.into_response();
         }
     }
@@ -151,9 +163,15 @@ async fn forward_impl(
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut stream = upstream_body.into_data_stream();
-                while let Some(chunk) = stream.next().await {
-                    if sender.send(chunk).await.is_err() {
-                        break;
+                loop {
+                    tokio::select! {
+                        _ = sender.closed() => break,
+                        chunk = stream.next() => {
+                            let Some(chunk) = chunk else { break; };
+                            if sender.send(chunk).await.is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
             });
@@ -226,7 +244,36 @@ fn is_config_path(path: &str) -> bool {
     matched
 }
 
-async fn verify_config_session(
+fn requires_upstream_auth(path: &str, method: &Method) -> bool {
+    if method == Method::OPTIONS {
+        return false;
+    }
+    let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+    let decoded_twice = percent_encoding::percent_decode_str(&decoded).decode_utf8_lossy();
+    let required = [path, decoded.as_ref(), decoded_twice.as_ref()]
+        .into_iter()
+        .any(|path| {
+            if !path.starts_with("/api/") {
+                return false;
+            }
+            if matches!(
+                path,
+                "/api/auth/login" | "/api/auth/status" | "/api/auth/register" | "/api/version"
+            ) {
+                return false;
+            }
+            let read_only = method == Method::GET || method == Method::HEAD;
+            !(read_only
+                && (path == "/api/config/theme"
+                    || path == "/api/settings/language"
+                    || path == "/api/settings/upload-limit"
+                    || path == "/api/frontend_plugin"
+                    || path.starts_with("/api/frontend_plugin/")))
+        });
+    required
+}
+
+async fn verify_upstream_session(
     state: &GatewayState,
     port: u16,
     headers: &HeaderMap,
@@ -551,6 +598,12 @@ fn rewrite_javascript(text: &str) -> String {
         .replace(r#""/api""#, &format!(r#""{WEB_PREFIX}/api""#))
         .replace(r#"'/api'"#, &format!(r#"'{WEB_PREFIX}/api'"#));
     rewritten = rewrite_quoted_asset_prefix(&rewritten, "/api/", &format!("{WEB_PREFIX}/api/"));
+    for quote in ["\"", "'"] {
+        rewritten = rewritten.replace(
+            &format!("startsWith({quote}{WEB_PREFIX}/api/frontend_plugin/{quote})"),
+            &format!("startsWith({quote}/api/frontend_plugin/{quote})"),
+        );
+    }
     rewritten =
         rewrite_quoted_asset_prefix(&rewritten, "/assets/", &format!("{WEB_PREFIX}/assets/"));
     rewrite_vite_dependency_assets(&rewritten)
@@ -745,11 +798,32 @@ fn response_headers(source: &HeaderMap, rewrite_paths: bool) -> HeaderMap {
             if let Some(value) = rewrite_set_cookie(value, rewrite_paths) {
                 headers.append(name.clone(), value);
             }
+        } else if name == header::LOCATION {
+            headers.append(name.clone(), rewrite_location(value, rewrite_paths));
         } else {
             headers.append(name.clone(), value.clone());
         }
     }
     headers
+}
+
+fn rewrite_location(value: &HeaderValue, rewrite_path: bool) -> HeaderValue {
+    let Ok(location) = value.to_str() else {
+        return value.clone();
+    };
+    if !rewrite_path
+        || !location.starts_with('/')
+        || location.starts_with("//")
+        || location.strip_prefix(WEB_PREFIX).is_some_and(|tail| {
+            tail.is_empty()
+                || tail.starts_with('/')
+                || tail.starts_with('?')
+                || tail.starts_with('#')
+        })
+    {
+        return value.clone();
+    }
+    HeaderValue::from_str(&format!("{WEB_PREFIX}{location}")).unwrap_or_else(|_| value.clone())
 }
 
 fn rewrite_set_cookie(value: &HeaderValue, rewrite_path: bool) -> Option<HeaderValue> {
@@ -877,6 +951,39 @@ mod tests {
         }
         assert!(!rewritten.contains("/app/qwenpaw/web/app/qwenpaw/web/assets/"));
         assert_eq!(rewrite_javascript(&rewritten), rewritten);
+    }
+
+    #[test]
+    fn javascript_preserves_frontend_plugin_icon_url_comparison() {
+        let source = r#"const local=t==null?void 0:t.startsWith("/api/frontend_plugin/");"#;
+        let rewritten = rewrite_javascript(source);
+
+        assert!(rewritten.contains(r#"t.startsWith("/api/frontend_plugin/")"#));
+        assert!(!rewritten.contains(r#"t.startsWith("/app/qwenpaw/web/api/frontend_plugin/")"#));
+        assert_eq!(rewrite_javascript(&rewritten), rewritten);
+    }
+
+    #[test]
+    fn mounted_responses_rewrite_only_upstream_root_locations() {
+        for (input, expected) in [
+            (
+                "/login?next=%2Fconsole#form",
+                "/app/qwenpaw/web/login?next=%2Fconsole#form",
+            ),
+            ("/api/models/", "/app/qwenpaw/web/api/models/"),
+            ("/app/qwenpaw/web/login", "/app/qwenpaw/web/login"),
+            ("/app/qwenpaw/web?x=1#top", "/app/qwenpaw/web?x=1#top"),
+            ("//cdn.example/login", "//cdn.example/login"),
+            ("https://example.com/login", "https://example.com/login"),
+            ("login", "login"),
+        ] {
+            let mut source = HeaderMap::new();
+            source.insert(header::LOCATION, HeaderValue::from_str(input).unwrap());
+            let mounted = response_headers(&source, true);
+            assert_eq!(mounted[header::LOCATION], expected, "{input}");
+            let root = response_headers(&source, false);
+            assert_eq!(root[header::LOCATION], input, "{input}");
+        }
     }
 
     #[test]
