@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use axum::{
     body::Body,
@@ -98,6 +98,11 @@ async fn forward_impl(
     }
 
     let port = state.app.core.kernel.port();
+    if !rewrite_paths && is_config_path(path) {
+        if let Err(status) = verify_config_session(state, port, &headers).await {
+            return status.into_response();
+        }
+    }
     let mut target = format!("http://127.0.0.1:{port}{path}");
     if let Some(query) = request.uri().query() {
         target.push('?');
@@ -208,7 +213,78 @@ async fn forward_impl(
 }
 
 const MAX_REWRITE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_VERIFY_BYTES: usize = 8 * 1024;
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
 const LANGUAGE_INIT: &str = "<script>try{if(localStorage.getItem('language')===null)localStorage.setItem('language','zh')}catch{}</script>";
+
+fn is_config_path(path: &str) -> bool {
+    let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+    let decoded_twice = percent_encoding::percent_decode_str(&decoded).decode_utf8_lossy();
+    let matched = [path, decoded.as_ref(), decoded_twice.as_ref()]
+        .into_iter()
+        .any(|path| path == "/api/config" || path.starts_with("/api/config/"));
+    matched
+}
+
+async fn verify_config_session(
+    state: &GatewayState,
+    port: u16,
+    headers: &HeaderMap,
+) -> Result<(), StatusCode> {
+    let mut request = Request::get(format!("http://127.0.0.1:{port}/api/auth/verify"))
+        .body(Body::empty())
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let cookie = headers.get(header::COOKIE);
+    let has_cookie = cookie
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').any(|cookie| {
+                cookie.split_once('=').is_some_and(|(name, value)| {
+                    !name.trim().is_empty() && !value.trim().is_empty()
+                })
+            })
+        });
+    let authorization = match super::unique_header(headers, header::AUTHORIZATION.as_str()) {
+        Ok(Some(value))
+            if value
+                .strip_prefix("Bearer ")
+                .is_some_and(|token| !token.trim().is_empty()) =>
+        {
+            Some(value)
+        }
+        Ok(None) => None,
+        _ => return Err(StatusCode::UNAUTHORIZED),
+    };
+    if !has_cookie && authorization.is_none() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if let Some(cookie) = cookie {
+        request.headers_mut().insert(header::COOKIE, cookie.clone());
+    }
+    if let Some(authorization) = authorization {
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(authorization).map_err(|_| StatusCode::UNAUTHORIZED)?,
+        );
+    }
+    tokio::time::timeout(VERIFY_TIMEOUT, async {
+        let response = state
+            .web_client
+            .request(request)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        if !response.status().is_success() {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Limited::new(response.into_body(), MAX_VERIFY_BYTES)
+            .collect()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+}
 
 #[derive(Clone, Copy)]
 enum RewriteKind {
@@ -442,6 +518,10 @@ fn rewrite_javascript(text: &str) -> String {
             r#"function Wa(e){return/^\/app\/qwenpaw\/web\/console(?:\/|$)/.test(e)?"/app/qwenpaw/web/console":/^\/app\/qwenpaw\/web(?:\/|$)/.test(e)?"/app/qwenpaw/web":/^\/console(?:\/|$)/.test(e)?AA:void 0}"#,
         )
         .replace(
+            r#"function Qa(e){return Ai&&(e===Ai||e.startsWith(`${Ai}/`))?Ai:void 0}"#,
+            r#"function Qa(e){return /^\/app\/qwenpaw\/web(?:\/|$)/.test(e)?"/app/qwenpaw/web":Ai&&(e===Ai||e.startsWith(`${Ai}/`))?Ai:void 0}"#,
+        )
+        .replace(
             r#"window.location.assign("/login")"#,
             &format!(r#"window.location.assign("{WEB_PREFIX}/login")"#),
         )
@@ -459,6 +539,12 @@ fn rewrite_javascript(text: &str) -> String {
         rewritten = rewritten.replace(
             &format!("\"/{asset}\""),
             &format!("\"{WEB_PREFIX}/{asset}\""),
+        );
+    }
+    for variable in ["i", "w"] {
+        rewritten = rewritten.replace(
+            &format!("`/${{{variable}?\"logo-dark.svg\":\"logo-light.svg\"}}`"),
+            &format!("`{WEB_PREFIX}/${{{variable}?\"logo-dark.svg\":\"logo-light.svg\"}}`"),
         );
     }
     rewritten = rewritten
@@ -704,7 +790,7 @@ fn rewrite_set_cookie(value: &HeaderValue, rewrite_path: bool) -> Option<HeaderV
 fn is_internal_cookie(name: &str) -> bool {
     matches!(
         name,
-        "qwenpaw_csrf" | "__Host-qwenpaw_csrf" | "supervisor-token" | "supervisor_token"
+        "qwenpaw_csrf" | "__Host-qwenpaw_csrf" | "supervisor-token" | "supervisor_token" | "ost"
     )
 }
 
@@ -775,7 +861,7 @@ mod tests {
 
     #[test]
     fn javascript_rewrites_root_assets_for_all_quote_forms_without_touching_other_paths() {
-        let source = r#"const a="/assets/entry.js",b='/assets/login.js',c=`/assets/ui.css`,d="/app/qwenpaw/web/assets/prefixed.js",e="/login";"#;
+        let source = r#"const a="/assets/entry.js",b='/assets/login.js',c=`/assets/ui.css`,d="/app/qwenpaw/web/assets/prefixed.js",e="/login",f=`/${w?"logo-dark.svg":"logo-light.svg"}`,g=`/${i?"logo-dark.svg":"logo-light.svg"}`;"#;
         let rewritten = rewrite_javascript(source);
 
         for expected in [
@@ -784,6 +870,8 @@ mod tests {
             "`/app/qwenpaw/web/assets/ui.css`",
             r#""/app/qwenpaw/web/assets/prefixed.js""#,
             r#""/login""#,
+            r#"`/app/qwenpaw/web/${w?"logo-dark.svg":"logo-light.svg"}`"#,
+            r#"`/app/qwenpaw/web/${i?"logo-dark.svg":"logo-light.svg"}`"#,
         ] {
             assert!(rewritten.contains(expected), "missing {expected}");
         }
@@ -800,6 +888,15 @@ mod tests {
             rewritten,
             r#"const endpoint = "/app/qwenpaw/web/api" + "/auth/status";"#
         );
+        assert_eq!(rewrite_javascript(&rewritten), rewritten);
+    }
+
+    #[test]
+    fn javascript_preserves_gateway_basename_for_upstream_router() {
+        let source = r#"function Qa(e){return Ai&&(e===Ai||e.startsWith(`${Ai}/`))?Ai:void 0}"#;
+        let rewritten = rewrite_javascript(source);
+        assert!(rewritten
+            .contains(r#"return /^\/app\/qwenpaw\/web(?:\/|$)/.test(e)?"/app/qwenpaw/web":Ai&&"#));
         assert_eq!(rewrite_javascript(&rewritten), rewritten);
     }
 

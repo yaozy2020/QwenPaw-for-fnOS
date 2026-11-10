@@ -26,7 +26,17 @@ pub(super) fn wait_for_version(port: u16, target_version: &str, attempts: usize)
     wait_for_version_cancellable(port, target_version, attempts, &|| false)
 }
 
-pub(super) fn wait_for_version_cancellable(
+pub(crate) fn wait_for_version_deadline(
+    port: u16,
+    target_version: &str,
+    deadline: std::time::Instant,
+) -> bool {
+    wait_for_version_cancellable(port, target_version, usize::MAX, &move || {
+        std::time::Instant::now() >= deadline
+    })
+}
+
+pub(crate) fn wait_for_version_cancellable(
     port: u16,
     target_version: &str,
     attempts: usize,

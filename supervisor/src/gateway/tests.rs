@@ -629,11 +629,10 @@ async fn csrf_rejections_cover_every_mutation_and_preserve_logs() {
 }
 
 #[tokio::test]
-async fn csrf_accepts_header_json_form_and_query_with_host_rewriting_and_overwrites_internal_token()
-{
+async fn csrf_accepts_header_json_and_form_with_host_rewriting_and_overwrites_internal_token() {
     let (_dir, state, router) = fixture("gateway-csrf-positive");
     for secure in [false, true] {
-        for source in 0..4 {
+        for source in 0..3 {
             fs::write(&state.kernel_log, b"clear me").unwrap();
             let (mut headers, token) = csrf_headers(&state, secure);
             headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1"));
@@ -649,23 +648,19 @@ async fn csrf_accepts_header_json_form_and_query_with_host_rewriting_and_overwri
                 "x-supervisor-token",
                 HeaderValue::from_static("attacker-value"),
             );
-            let mut path = format!("{PREFIX}/api/logs/clear");
+            let path = format!("{PREFIX}/api/logs/clear");
             let body = match source {
                 0 => {
                     headers.insert("x-csrf-token", HeaderValue::from_str(&token).unwrap());
                     "{}".into()
                 }
                 1 => format!(r#"{{"_csrf":"{token}"}}"#),
-                2 => {
+                _ => {
                     headers.insert(
                         header::CONTENT_TYPE,
                         HeaderValue::from_static("application/x-www-form-urlencoded"),
                     );
                     format!("_csrf={token}")
-                }
-                _ => {
-                    path.push_str(&format!("?_csrf={token}"));
-                    "{}".into()
                 }
             };
             let response = router
@@ -683,6 +678,23 @@ async fn csrf_accepts_header_json_form_and_query_with_host_rewriting_and_overwri
             assert!(!String::from_utf8_lossy(&bytes).contains(&state.token));
             assert_eq!(fs::read(&state.kernel_log).unwrap(), b"");
         }
+    }
+}
+
+#[tokio::test]
+async fn csrf_query_parameter_alone_cannot_authorize_mutation() {
+    let (_dir, state, router) = fixture("gateway-csrf-query");
+    for secure in [false, true] {
+        fs::write(&state.kernel_log, b"keep logs").unwrap();
+        let (headers, token) = csrf_headers(&state, secure);
+        let path = format!("{PREFIX}/api/logs/clear?_csrf={token}");
+        let response = router
+            .clone()
+            .oneshot(request("POST", &path, headers, "{}", Some(peer())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "secure {secure}");
+        assert_eq!(fs::read(&state.kernel_log).unwrap(), b"keep logs");
     }
 }
 
@@ -885,18 +897,12 @@ fn bind_reuses_control_safety_and_only_cleans_its_own_inode() {
 
 #[test]
 fn bind_reclaims_an_independently_stale_owned_gateway_socket() {
-    use std::os::unix::fs::OpenOptionsExt;
-
     let dir = TestDir::new("gateway-independent-stale-socket");
     let path = dir.0.join("gateway.sock");
     let stale = StdUnixListener::bind(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let old = fs::symlink_metadata(&path).unwrap();
-    let old_inode = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)
-        .unwrap();
+    let old_inode = SocketIdentity::from_path(&path).unwrap();
     drop(stale);
 
     let bound = bind(&path).unwrap();
@@ -1089,19 +1095,29 @@ fn csrf_duplicates_and_scheme_fallback_are_rejected() {
         HeaderValue::from_static("__Host-qwenpaw_csrf=secure"),
     );
     assert_eq!(selected_cookie(&headers, false), Ok(None));
-    for (query, json) in [
-        ("_csrf=a&_csrf=b", "{}"),
-        ("%5fcsrf=a&_csrf=b", "{}"),
-        ("_csrf=a", r#"{"_csrf":"b"}"#),
-        ("", r#"{"_csrf":"a","\u005fcsrf":"b"}"#),
-    ] {
-        assert!(csrf_input(
-            &HeaderMap::new(),
-            Some(query),
-            &mut json.as_bytes().to_vec()
-        )
-        .is_err());
+    for query in ["_csrf=a&_csrf=b", "%5fcsrf=a&_csrf=b"] {
+        assert_eq!(
+            csrf_input(&HeaderMap::new(), Some(query), &mut b"{}".to_vec()),
+            Ok(None)
+        );
     }
+    assert_eq!(
+        csrf_input(
+            &HeaderMap::new(),
+            Some("_csrf=a"),
+            &mut br#"{"_csrf":"b"}"#.to_vec()
+        ),
+        Ok(Some("b".into()))
+    );
+    assert!(csrf_input(
+        &HeaderMap::new(),
+        None,
+        &mut br#"{"_csrf":"a","\u005fcsrf":"b"}"#.to_vec()
+    )
+    .is_err());
+    let mut headers = HeaderMap::new();
+    headers.insert("x-csrf-token", HeaderValue::from_static("a"));
+    assert!(csrf_input(&headers, None, &mut br#"{"_csrf":"b"}"#.to_vec()).is_err());
 }
 
 #[test]
@@ -1549,6 +1565,509 @@ fn root_auth_headers() -> HeaderMap {
     headers
 }
 
+async fn start_config_auth_upstream(
+    state: &AppState,
+) -> (
+    tokio::sync::mpsc::UnboundedReceiver<CapturedWebRequest>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    state
+        .core
+        .kernel
+        .set_port(listener.local_addr().unwrap().port());
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().fallback(move |request: Request<Body>| {
+        let sender = sender.clone();
+        async move {
+            let (parts, body) = request.into_parts();
+            let body = to_bytes(body, 2 * 1024 * 1024).await.unwrap();
+            let uri = parts.uri.to_string();
+            let cookie = parts
+                .headers
+                .get(header::COOKIE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let has_bearer = parts.headers.get(header::AUTHORIZATION)
+                == Some(&HeaderValue::from_static("Bearer upstream-token"));
+            sender
+                .send(CapturedWebRequest {
+                    method: parts.method,
+                    uri: uri.clone(),
+                    headers: parts.headers,
+                    body: body.to_vec(),
+                })
+                .unwrap();
+            if uri != "/api/auth/verify" {
+                return (StatusCode::OK, r#"{"channels":"private configuration"}"#).into_response();
+            }
+            let has_session = |value: &str| {
+                cookie
+                    .split(';')
+                    .any(|cookie| cookie.trim() == format!("qwenpaw_session={value}"))
+            };
+            if has_session("slow-both") {
+                tokio::time::sleep(Duration::from_millis(1300)).await;
+                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(1300)).await;
+                    let _ = sender.send(Ok::<_, io::Error>("verified")).await;
+                });
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from_stream(
+                        tokio_stream::wrappers::ReceiverStream::new(receiver),
+                    ))
+                    .unwrap();
+            }
+            if has_session("large-response") {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(vec![b'x'; 32 * 1024]))
+                    .unwrap();
+            }
+            if has_session("broken-response") {
+                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                sender
+                    .send(Err::<&'static str, _>(io::Error::other("broken body")))
+                    .await
+                    .unwrap();
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from_stream(
+                        tokio_stream::wrappers::ReceiverStream::new(receiver),
+                    ))
+                    .unwrap();
+            }
+            let status = if has_session("valid") || (has_bearer && cookie.is_empty()) {
+                StatusCode::OK
+            } else if has_session("valid-201") {
+                StatusCode::CREATED
+            } else if has_session("valid-204") {
+                StatusCode::NO_CONTENT
+            } else if has_session("redirect") {
+                StatusCode::FOUND
+            } else if has_session("unavailable") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNAUTHORIZED
+            };
+            status.into_response()
+        }
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (receiver, server)
+}
+
+fn config_cookie(value: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!("qwenpaw_session={value}")).unwrap(),
+    );
+    headers
+}
+
+#[tokio::test]
+async fn tcp_config_anonymous_and_forged_sessions_never_reach_config() {
+    let (_dir, state, _) = fixture("tcp-config-auth-denied");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let mut forged = root_auth_headers();
+    forged.insert(
+        header::COOKIE,
+        HeaderValue::from_static(
+            "qwenpaw_session=forged; ost=fnos; supervisor_token=secret; qwenpaw_csrf=internal",
+        ),
+    );
+    let mut internal_only = HeaderMap::new();
+    internal_only.insert(
+        header::COOKIE,
+        HeaderValue::from_static("ost=fnos; supervisor-token=secret; __Host-qwenpaw_csrf=internal"),
+    );
+    for (label, headers, expected_cookie, expect_verify, expect_bearer) in [
+        ("anonymous", HeaderMap::new(), None, false, false),
+        (
+            "wrong",
+            config_cookie("wrong"),
+            Some("qwenpaw_session=wrong"),
+            true,
+            false,
+        ),
+        ("forged", forged, Some("qwenpaw_session=forged"), true, true),
+        ("internal only", internal_only, None, false, false),
+    ] {
+        let response = tcp_web_request(
+            addr,
+            Method::GET,
+            "/api/config/channels",
+            headers,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{label}");
+        if !expect_verify {
+            assert!(captured.try_recv().is_err(), "{label} reached upstream");
+            continue;
+        }
+        let verify = captured.recv().await.unwrap();
+        assert_eq!(verify.uri, "/api/auth/verify", "{label}");
+        assert_eq!(verify.method, Method::GET, "{label}");
+        assert_eq!(
+            verify
+                .headers
+                .get(header::COOKIE)
+                .and_then(|v| v.to_str().ok()),
+            expected_cookie,
+            "{label}"
+        );
+        assert_eq!(
+            verify.headers.contains_key(header::AUTHORIZATION),
+            expect_bearer,
+            "{label}"
+        );
+        assert!(
+            !verify.headers.contains_key("x-supervisor-token"),
+            "{label}"
+        );
+        assert!(!verify.headers.contains_key("x-csrf-token"), "{label}");
+        assert!(
+            !verify
+                .headers
+                .keys()
+                .any(|name| name.as_str().starts_with("x-trim-")),
+            "{label}"
+        );
+        assert!(verify.body.is_empty(), "{label}");
+        assert!(captured.try_recv().is_err(), "{label} reached config");
+    }
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_denies_before_reading_or_forwarding_a_pending_body() {
+    let (_dir, state, _) = fixture("tcp-config-auth-pending-body");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<&'static str, io::Error>>(1);
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        tcp_web_request(
+            addr,
+            Method::POST,
+            "/api/config/channels",
+            config_cookie("wrong"),
+            Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver)),
+        ),
+    )
+    .await
+    .expect("authentication must not wait for the original request body");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let verify = captured.recv().await.unwrap();
+    assert_eq!(verify.uri, "/api/auth/verify");
+    assert!(verify.body.is_empty());
+    assert!(captured.try_recv().is_err(), "denied body reached config");
+    drop(sender);
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_rejects_missing_session_without_calling_upstream() {
+    let (_dir, state, _) = fixture("tcp-config-auth-no-session");
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let response = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/config/channels",
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        captured.try_recv().is_err(),
+        "missing session reached upstream"
+    );
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_failed_verify_connection_never_reaches_config() {
+    use tokio::io::AsyncReadExt;
+
+    let (_dir, state, _) = fixture("tcp-config-auth-connection-failure");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    state
+        .core
+        .kernel
+        .set_port(listener.local_addr().unwrap().port());
+    let (observed, request) = tokio::sync::oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut bytes = [0; 4096];
+        let len = stream.read(&mut bytes).await.unwrap();
+        observed.send(bytes[..len].to_vec()).unwrap();
+        drop(stream);
+        tokio::time::timeout(Duration::from_millis(250), listener.accept())
+            .await
+            .is_err()
+    });
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let response = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/config/channels",
+        config_cookie("valid"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let request = request.await.unwrap();
+    assert!(request.starts_with(b"GET /api/auth/verify HTTP/1.1\r\n"));
+    assert!(
+        upstream.await.unwrap(),
+        "another request reached the upstream"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_valid_session_is_verified_before_forwarding_original_request() {
+    let (_dir, state, _) = fixture("tcp-config-auth-valid");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    for (method, session, path, body) in [
+        (
+            Method::GET,
+            "valid",
+            "/api/config/channels?format=json",
+            Vec::new(),
+        ),
+        (
+            Method::HEAD,
+            "valid-201",
+            "/api/config/channels",
+            Vec::new(),
+        ),
+        (
+            Method::POST,
+            "valid-204",
+            "/api/config/channels?update=1",
+            vec![b'x'; 128 * 1024],
+        ),
+    ] {
+        let mut headers = root_auth_headers();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("ost=fnos; qwenpaw_session={session}; qwenpaw_csrf=internal; supervisor-token=secret; supervisor_token=secret2")).unwrap(),
+        );
+        let response = tcp_web_request(
+            addr,
+            method.clone(),
+            path,
+            headers,
+            Body::from(body.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+        let verify = captured.recv().await.unwrap();
+        assert_eq!(verify.uri, "/api/auth/verify");
+        assert_eq!(verify.method, Method::GET);
+        assert_eq!(
+            verify.headers[header::COOKIE],
+            format!("qwenpaw_session={session}")
+        );
+        assert_eq!(
+            verify.headers[header::AUTHORIZATION],
+            "Bearer upstream-token"
+        );
+        assert!(!verify.headers.contains_key("x-supervisor-token"));
+        assert!(!verify.headers.contains_key("x-csrf-token"));
+        assert!(!verify
+            .headers
+            .keys()
+            .any(|name| name.as_str().starts_with("x-trim-")));
+        assert!(verify.body.is_empty());
+        let config = captured.recv().await.unwrap();
+        assert_eq!(config.uri, path);
+        assert_eq!(config.method, method);
+        assert_eq!(
+            config.headers[header::COOKIE],
+            format!("qwenpaw_session={session}")
+        );
+        assert_eq!(
+            config.headers[header::AUTHORIZATION],
+            "Bearer upstream-token"
+        );
+        assert!(!config.headers.contains_key("x-supervisor-token"));
+        assert!(!config.headers.contains_key("x-csrf-token"));
+        assert!(!config
+            .headers
+            .keys()
+            .any(|name| name.as_str().starts_with("x-trim-")));
+        assert_eq!(config.body, body);
+        assert!(captured.try_recv().is_err(), "unexpected repeated request");
+    }
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_bearer_session_is_verified_without_requiring_a_cookie() {
+    let (_dir, state, _) = fixture("tcp-config-auth-bearer");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let mut headers = root_auth_headers();
+    headers.remove(header::COOKIE);
+    let response = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/config/channels",
+        headers,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let verify = captured.recv().await.unwrap();
+    assert_eq!(verify.uri, "/api/auth/verify");
+    assert_eq!(
+        verify.headers[header::AUTHORIZATION],
+        "Bearer upstream-token"
+    );
+    assert!(!verify.headers.contains_key(header::COOKIE));
+    let config = captured.recv().await.unwrap();
+    assert_eq!(config.uri, "/api/config/channels");
+    assert_eq!(
+        config.headers[header::AUTHORIZATION],
+        "Bearer upstream-token"
+    );
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_rejects_non_success_and_broken_or_oversized_verify_responses() {
+    let (_dir, state, _) = fixture("tcp-config-auth-upstream-errors");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    for (session, expected) in [
+        ("redirect", StatusCode::UNAUTHORIZED),
+        ("unavailable", StatusCode::UNAUTHORIZED),
+        ("large-response", StatusCode::BAD_GATEWAY),
+        ("broken-response", StatusCode::BAD_GATEWAY),
+    ] {
+        let response = tcp_web_request(
+            addr,
+            Method::GET,
+            "/api/config/channels",
+            config_cookie(session),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(response.status(), expected, "{session}");
+        assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
+        assert!(captured.try_recv().is_err(), "{session} reached config");
+    }
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_verify_timeout_covers_response_headers_and_body_together() {
+    let (_dir, state, _) = fixture("tcp-config-auth-timeout");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    let start = tokio::time::Instant::now();
+    let response = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/config/channels",
+        config_cookie("slow-both"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        start.elapsed() < Duration::from_millis(2500),
+        "verify did not enforce one total deadline"
+    );
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
+    assert!(captured.try_recv().is_err(), "timeout reached config");
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn tcp_config_encoded_paths_cannot_bypass_verify() {
+    let (_dir, state, _) = fixture("tcp-config-encoded");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let (addr, server) = start_tcp_web_proxy(state).await;
+    for path in [
+        "/api/%63onfig/channels",
+        "/%61pi/config/channels",
+        "/api%2Fconfig/channels",
+        "/api/config%2Fchannels",
+        "/api/%2563onfig/channels",
+    ] {
+        let response =
+            tcp_web_request(addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        assert!(captured.try_recv().is_err(), "{path} reached upstream");
+    }
+    let other = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/configuration",
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(other.status(), StatusCode::OK);
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/configuration");
+    server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn gateway_config_keeps_platform_admin_gate_without_app_auth_preflight() {
+    let (dir, state, _) = fixture("gateway-config-platform-auth");
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let path = dir.0.join("gateway-config.sock");
+    let BoundGateway { listener, cleanup } = bind(&path).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let router = build_router(state, dir.0.join("www"), std::env::current_exe().ok());
+    let (tx, rx) = watch::channel(false);
+    let worker = tokio::spawn(serve(listener, cleanup, router, rx));
+    let denied = uds_request(path.clone(), "GET /app/qwenpaw/web/api/config/channels HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".into()).await;
+    assert!(denied.starts_with("HTTP/1.1 403"), "{denied}");
+    assert!(captured.try_recv().is_err(), "non-admin reached upstream");
+    let allowed = uds_request(path.clone(), "GET /app/qwenpaw/web/api/config/channels HTTP/1.1\r\nHost: localhost\r\nX-Trim-Userid: 1000\r\nX-Trim-Username: test-admin\r\nX-Trim-Isadmin: true\r\nCookie: ost=fnos; supervisor-token=secret; qwenpaw_csrf=internal\r\nConnection: close\r\n\r\n".into()).await;
+    assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+    assert!(allowed.contains("private configuration"));
+    let config = captured.recv().await.unwrap();
+    assert_eq!(config.uri, "/api/config/channels");
+    assert!(!config.headers.contains_key(header::COOKIE));
+    assert!(!config
+        .headers
+        .keys()
+        .any(|name| name.as_str().starts_with("x-trim-")));
+    assert!(captured.try_recv().is_err(), "unexpected auth preflight");
+    tx.send(true).unwrap();
+    worker.await.unwrap();
+    upstream.abort();
+}
+
 #[tokio::test]
 async fn tcp_root_serves_html_at_root_with_guarded_chinese_default() {
     let (_dir, state, _) = fixture("tcp-web-root-html");
@@ -1890,14 +2409,373 @@ async fn tcp_root_javascript_preserves_the_client_accept_encoding_header() {
     upstream.abort();
 }
 
+#[test]
+fn kernel_health_requires_a_successful_version_response_for_the_installed_version() {
+    use crate::api::test_support::{install_python, KernelGuard};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let (dir, state, _) = fixture("kernel-health-version");
+    install_python(&dir, &state, "import time\ntime.sleep(120)\n");
+    let _kernel = KernelGuard(Arc::clone(&state.kernel));
+    state.kernel.spawn().unwrap();
+
+    for (label, response, expected) in [
+        (
+            "matching",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"version\":\"2.3.0\"}",
+            true,
+        ),
+        (
+            "wrong version",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"version\":\"2.3.1\"}",
+            false,
+        ),
+        (
+            "unrelated listener",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"enabled\":true}",
+            false,
+        ),
+        (
+            "error status",
+            "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n{\"version\":\"2.3.0\"}",
+            false,
+        ),
+        ("not HTTP", "unrelated service", false),
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        state.kernel.set_port(listener.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("health probe did not connect: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request[..length]).into_owned()
+        });
+        let healthy = if expected {
+            state.kernel.wait_healthy(Duration::from_secs(2))
+        } else {
+            crate::install::wait_for_version_cancellable(state.kernel.port(), "2.3.0", 1, &|| false)
+        };
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("GET /api/version HTTP/1.1\r\n"),
+            "{label}: {request:?}"
+        );
+        assert_eq!(healthy, expected, "{label}");
+    }
+}
+
+#[test]
+fn kernel_health_rejects_a_version_response_after_its_deadline() {
+    use crate::api::test_support::{install_python, KernelGuard};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    let (dir, state, _) = fixture("kernel-health-deadline");
+    install_python(&dir, &state, "import time\ntime.sleep(120)\n");
+    let _kernel = KernelGuard(Arc::clone(&state.kernel));
+    state.kernel.spawn().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    state.kernel.set_port(listener.local_addr().unwrap().port());
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let wrong_responses = Arc::new(AtomicUsize::new(0));
+    let server_stop = Arc::clone(&stop);
+    let observed_wrong = Arc::clone(&wrong_responses);
+    let started = Instant::now();
+    let server = std::thread::spawn(move || {
+        while !server_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+                    let mut request = [0; 1024];
+                    if stream.read(&mut request).is_err() {
+                        continue;
+                    }
+                    let version = if started.elapsed() < Duration::from_secs(3) {
+                        observed_wrong.fetch_add(1, Ordering::AcqRel);
+                        "9.9.9"
+                    } else {
+                        "2.3.0"
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{{\"version\":\"{version}\"}}"
+                    );
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("health listener: {error}"),
+            }
+        }
+    });
+    let healthy = state.kernel.wait_healthy(Duration::from_secs(2));
+    stop.store(true, Ordering::Release);
+    server.join().unwrap();
+    assert!(
+        wrong_responses.load(Ordering::Acquire) > 0,
+        "unrelated listener was not probed"
+    );
+    assert!(
+        !healthy,
+        "a matching version after the deadline must not report healthy"
+    );
+}
+
+#[test]
+fn kernel_health_rejects_a_probe_that_finishes_after_the_deadline() {
+    use crate::api::test_support::{install_python, KernelGuard, TestServer};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let (dir, state, _) = fixture("kernel-health-probe-after-deadline");
+    install_python(&dir, &state, "import time\ntime.sleep(120)\n");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    state.kernel.set_port(listener.local_addr().unwrap().port());
+    let _server = TestServer::from_listener(listener);
+    let _kernel = KernelGuard(Arc::clone(&state.kernel));
+    state.kernel.spawn().unwrap();
+    let started = Instant::now();
+    let healthy = state.kernel.wait_healthy(Duration::from_millis(250));
+    assert!(
+        !healthy,
+        "a version probe after the deadline returned healthy after {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn kernel_health_rejects_success_after_slow_metadata_exceeds_timeout() {
+    use crate::api::test_support::{install_python, KernelGuard, TestServer};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let (dir, state, _) = fixture("kernel-health-slow-metadata");
+    let python = install_python(&dir, &state, "");
+    fs::write(
+        python,
+        "#!/usr/bin/python3\nimport sys, time\nif '-c' in sys.argv:\n    time.sleep(3)\n    print('2.3.0')\n    sys.exit(0)\ntime.sleep(120)\n",
+    )
+    .unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    state.kernel.set_port(listener.local_addr().unwrap().port());
+    let _server = TestServer::from_listener(listener);
+    let _kernel = KernelGuard(Arc::clone(&state.kernel));
+    state.kernel.spawn().unwrap();
+    let started = Instant::now();
+    let healthy = state.kernel.wait_healthy(Duration::from_secs(2));
+    assert!(
+        !healthy,
+        "metadata exceeded the timeout but health succeeded after {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn kernel_health_does_not_wait_for_metadata_long_after_the_deadline() {
+    use crate::api::test_support::{install_python, KernelGuard};
+    use std::time::Instant;
+
+    let (dir, state, _) = fixture("kernel-health-metadata-deadline");
+    let python = install_python(&dir, &state, "");
+    fs::write(
+        python,
+        "#!/usr/bin/python3\nimport sys, time\nif '-c' in sys.argv:\n    time.sleep(4)\n    print('2.3.0')\n    sys.exit(0)\ntime.sleep(120)\n",
+    )
+    .unwrap();
+    let _kernel = KernelGuard(Arc::clone(&state.kernel));
+    state.kernel.spawn().unwrap();
+    let started = Instant::now();
+    let healthy = state.kernel.wait_healthy(Duration::from_millis(250));
+    let elapsed = started.elapsed();
+    assert!(!healthy, "slow metadata must not report healthy");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "250ms health deadline took {elapsed:?} while reading metadata"
+    );
+}
+
+#[test]
+fn kernel_health_accepts_service_ready_within_the_supplied_timeout() {
+    use crate::api::test_support::{install_python, KernelGuard};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let (dir, state, _) = fixture("kernel-health-ready-before-timeout");
+    install_python(&dir, &state, "import time\ntime.sleep(120)\n");
+    let _kernel = KernelGuard(Arc::clone(&state.kernel));
+    state.kernel.spawn().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    state.kernel.set_port(listener.local_addr().unwrap().port());
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let started = Instant::now();
+    let ready_after = Duration::from_secs(7);
+    let server = std::thread::spawn(move || {
+        while !server_stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+                    let mut request = [0; 1024];
+                    if stream.read(&mut request).is_err() {
+                        continue;
+                    }
+                    let response = if started.elapsed() < ready_after {
+                        "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n{}"
+                    } else {
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"version\":\"2.3.0\"}"
+                    };
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("health listener: {error}"),
+            }
+        }
+    });
+    let healthy = state.kernel.wait_healthy(Duration::from_secs(10));
+    let health_elapsed = started.elapsed();
+    std::thread::sleep(ready_after.saturating_sub(started.elapsed()));
+    let eventually_ready =
+        crate::install::wait_for_version_cancellable(state.kernel.port(), "2.3.0", 1, &|| false);
+    stop.store(true, Ordering::Release);
+    server.join().unwrap();
+    assert!(eventually_ready, "the fixture never became healthy");
+    assert!(
+        healthy,
+        "health returned after {health_elapsed:?}, before the service became ready within the 10 second timeout"
+    );
+}
+
+#[tokio::test]
+async fn installed_status_remains_true_when_python_metadata_times_out() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, state, router) = fixture("installed-metadata-timeout");
+    let bin = dir.0.join("home/venv/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let python = bin.join("python3");
+    fs::write(&python, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(state.kernel.installed());
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(25),
+        router.oneshot(request(
+            "GET",
+            "/app/qwenpaw/api/status",
+            admin_headers(),
+            Body::empty(),
+            Some(peer()),
+        )),
+    )
+    .await
+    .expect("metadata timeout must leave status responsive")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(payload["installed"], true);
+    assert_eq!(payload["version"], "");
+}
+
+#[tokio::test]
+async fn install_log_requires_matching_seq_and_instance() {
+    let (_dir, state, router) = fixture("install-log-identity");
+    let log = Path::new(&state.core.var_dir).join("qwenpaw-upgrade.log.pip");
+    fs::write(log, "private task log\n").unwrap();
+    let status = router
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/app/qwenpaw/api/kernel/install-status",
+            admin_headers(),
+            Body::empty(),
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let status: Value =
+        serde_json::from_slice(&to_bytes(status.into_body(), 4096).await.unwrap()).unwrap();
+    let seq = status["seq"].as_u64().unwrap();
+    let instance = status["instance"].as_str().unwrap();
+    assert!(!instance.is_empty());
+
+    for query in [
+        "tail=40".to_string(),
+        format!("tail=40&seq={seq}"),
+        format!("tail=40&instance={instance}"),
+        format!("tail=40&seq={}&instance={instance}", seq + 1),
+        format!("tail=40&seq={seq}&instance=wrong-instance"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/app/qwenpaw/api/kernel/install-log?{query}"),
+                admin_headers(),
+                Body::empty(),
+                Some(peer()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{query}");
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(
+            !String::from_utf8_lossy(&body).contains("private task log"),
+            "{query}"
+        );
+    }
+    let response = router
+        .oneshot(request(
+            "GET",
+            &format!("/app/qwenpaw/api/kernel/install-log?tail=40&seq={seq}&instance={instance}"),
+            admin_headers(),
+            Body::empty(),
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(payload["logs"], serde_json::json!(["private task log"]));
+}
+
 #[tokio::test]
 async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listener() {
     let (dir, mut state, _) = fixture("gateway-web-proxy-port-api");
     let (mut captured, upstream) = start_web_upstream(&state).await;
-    let manager = crate::gateway::WebProxyManager::start(state.clone(), 0)
+    let manager = crate::gateway::WebProxyManager::start(state.clone(), 0, false)
         .await
         .unwrap();
-    let initial_port = manager.port().await;
+    let (initial_port, _) = manager.state().await;
     state.web_proxy = Some(Arc::new(manager.clone()));
     let router = build_router(state.clone(), dir.0.join("www"), None);
     let path = "/app/qwenpaw/api/web-proxy/port";
@@ -1926,7 +2804,7 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(manager.port().await, initial_port);
+    assert_eq!(manager.state().await, (initial_port, false));
 
     let response = router
         .clone()
@@ -1943,6 +2821,7 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
     let payload: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(payload["port"], initial_port);
+    assert_eq!(payload["public"], false);
 
     let (mut headers, token) = csrf_headers(&state, false);
     headers.insert("x-csrf-token", HeaderValue::from_str(&token).unwrap());
@@ -1951,7 +2830,7 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
             "POST",
             path,
             headers,
-            r#"{"port":0}"#,
+            r#"{"port":0,"public":true}"#,
             Some(peer()),
         ))
         .await
@@ -1961,10 +2840,14 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     let new_port = payload["port"].as_u64().unwrap() as u16;
     assert_ne!(new_port, initial_port);
-    assert_eq!(manager.port().await, new_port);
+    assert_eq!(manager.state().await, (new_port, true));
     assert_eq!(
-        fs::read_to_string(Path::new(&state.var_dir).join("web_proxy_port")).unwrap(),
+        fs::read_to_string(Path::new(&state.core.var_dir).join("web_proxy_port")).unwrap(),
         format!("{new_port}\n")
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(&state.core.var_dir).join("web_proxy_public")).unwrap(),
+        "1\n"
     );
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], new_port));
@@ -1982,14 +2865,274 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
 }
 
 #[test]
+fn shutdown_timeout_stops_kernel_even_while_an_operation_is_unsettled() {
+    use crate::procfs::{identity_status, process_identity, IdentityStatus, ProcessIdentity};
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::{Child, Command, Stdio};
+    use std::time::Instant;
+
+    if std::env::var_os("QWENPAW_TEST_SHUTDOWN_TIMEOUT_CHILD").is_some() {
+        crate::serve();
+        return;
+    }
+
+    struct SupervisorGuard {
+        child: Child,
+        identity: ProcessIdentity,
+        script: PathBuf,
+        root: PathBuf,
+    }
+    impl SupervisorGuard {
+        fn is_script(&self, identity: ProcessIdentity) -> bool {
+            identity.pgrp == identity.pid
+                && matches!(identity_status(identity), IdentityStatus::Alive)
+                && fs::read(format!("/proc/{}/cmdline", identity.pid)).is_ok_and(|cmd| {
+                    cmd.split(|byte| *byte == 0)
+                        .any(|arg| arg == self.script.as_os_str().as_bytes())
+                })
+                && matches!(identity_status(identity), IdentityStatus::Alive)
+        }
+        fn marker(&self, name: &str) -> Option<ProcessIdentity> {
+            let contents = fs::read_to_string(self.root.join(name)).ok()?;
+            let (pid, starttime) = contents.trim().split_once(' ')?;
+            let identity = process_identity(pid.parse().ok()?).ok()??;
+            (identity.starttime == starttime.parse::<u64>().ok()? && self.is_script(identity))
+                .then_some(identity)
+        }
+    }
+    impl Drop for SupervisorGuard {
+        fn drop(&mut self) {
+            let mut candidates = Vec::new();
+            if let Ok(descendants) = crate::procfs::descendants_of_checked(self.identity) {
+                candidates.extend(descendants);
+            }
+            if let Some(identity) = self.marker("kernel-process") {
+                candidates.push(identity);
+            }
+            for identity in candidates {
+                if self.is_script(identity) {
+                    unsafe { libc::kill(identity.pid, libc::SIGKILL) };
+                }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    let dir = TestDir::new("shutdown-timeout-stop-kernel");
+    let var = dir.0.join("var");
+    let home = dir.0.join("home");
+    let etc = dir.0.join("etc");
+    let share = dir.0.join("share");
+    let target = dir.0.join("target");
+    for path in [&var, &home, &etc, &share, &target] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let secret = share.join(".qwenpaw.secret");
+    fs::create_dir_all(&secret).unwrap();
+    fs::write(secret.join("auth.json"), "test-auth\n").unwrap();
+    let bin = home.join("venv/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("python3");
+    let root = serde_json::to_string(&dir.0.to_string_lossy()).unwrap();
+    fs::write(
+        &script,
+        format!("#!/usr/bin/python3\nimport os, pathlib, sys, time\nroot = pathlib.Path({root})\nif '-c' in sys.argv:\n    print('2.3.0')\nelse:\n    start = open('/proc/self/stat').read().rsplit(')', 1)[1].split()[19]\n    (root / 'kernel-process').write_text(f'{{os.getpid()}} {{start}}')\n    time.sleep(120)\n"),
+    ).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let token = "shutdown-test-token-at-least-32-characters";
+    fs::write(var.join("supervisor-token"), token).unwrap();
+    fs::set_permissions(
+        var.join("supervisor-token"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+
+    let kernel_reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let kernel_port = kernel_reservation.local_addr().unwrap().port();
+    let supervisor_reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let supervisor_port = supervisor_reservation.local_addr().unwrap().port();
+    let binary = std::env::current_exe().unwrap();
+    drop(supervisor_reservation);
+    let child = Command::new(&binary)
+        .args([
+            "--exact",
+            "gateway::tests::shutdown_timeout_stops_kernel_even_while_an_operation_is_unsettled",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("TRIM_PKGVAR", &var)
+        .env("TRIM_PKGHOME", &home)
+        .env("TRIM_PKGETC", &etc)
+        .env("TRIM_DATA_SHARE_PATHS", &share)
+        .env("TRIM_APPDEST", &target)
+        .env("TRIM_SERVICE_PORT", kernel_port.to_string())
+        .env("SUPERVISOR_PORT", supervisor_port.to_string())
+        .env("SUPERVISOR_AUTOSTART", "0")
+        .env("QWENPAW_WEB_PROXY_PORT", "off")
+        .env("QWENPAW_TEST_SHUTDOWN_TIMEOUT_CHILD", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let identity = process_identity(child.id() as i32).unwrap().unwrap();
+    let mut supervisor = SupervisorGuard {
+        child,
+        identity,
+        script,
+        root: dir.0.clone(),
+    };
+    let mut sentinel =
+        crate::api::test_support::ChildGuard(Command::new("sleep").arg("120").spawn().unwrap());
+    let address = ("127.0.0.1", supervisor_port);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(address).is_err() {
+        assert!(
+            supervisor.child.try_wait().unwrap().is_none(),
+            "supervisor exited before readiness"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "supervisor listener did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut start = TcpStream::connect(address).unwrap();
+    start
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(start, "POST /start HTTP/1.1\r\nHost: localhost\r\nX-Supervisor-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+    let mut response = String::new();
+    start.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "start failed: {response}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let kernel = loop {
+        if let Some(kernel) = supervisor.marker("kernel-process") {
+            break kernel;
+        }
+        assert!(
+            supervisor.child.try_wait().unwrap().is_none(),
+            "supervisor exited during start"
+        );
+        assert!(Instant::now() < deadline, "start did not launch kernel");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let operation_pending = |operation: &TcpStream| {
+        let mut response = [0; 1024];
+        match operation.peek(&mut response) {
+            Ok(size) => {
+                let response = String::from_utf8_lossy(&response[..size]);
+                assert!(
+                    response.starts_with("HTTP/1.1 409"),
+                    "settings failed: {response}"
+                );
+                false
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
+            Err(error) => panic!("settings connection failed: {error}"),
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let operation = loop {
+        assert!(Instant::now() < deadline, "operation did not hold lock");
+        let mut operation = TcpStream::connect(address).unwrap();
+        write!(operation, "POST /settings HTTP/1.1\r\nHost: localhost\r\nX-Supervisor-Token: {token}\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{{").unwrap();
+        operation.set_nonblocking(true).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        if !operation_pending(&operation) {
+            continue;
+        }
+        let mut conflict = TcpStream::connect(address).unwrap();
+        conflict
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(conflict, "POST /start HTTP/1.1\r\nHost: localhost\r\nX-Supervisor-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        conflict.read_to_string(&mut response).unwrap();
+        if response.starts_with("HTTP/1.1 409") && operation_pending(&operation) {
+            assert!(
+                response.contains("另一个运维操作正在进行中"),
+                "conflict was not caused by the operation lock: {response}"
+            );
+            break operation;
+        }
+        assert!(
+            response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.1 409"),
+            "unexpected response: {response}"
+        );
+    };
+    assert!(matches!(identity_status(kernel), IdentityStatus::Alive));
+    assert!(matches!(
+        identity_status(supervisor.identity),
+        IdentityStatus::Alive
+    ));
+    assert_eq!(
+        unsafe { libc::kill(supervisor.identity.pid, libc::SIGTERM) },
+        0
+    );
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let status = loop {
+        if let Some(status) = supervisor.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not exit after shutdown timeout"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success(), "unsettled shutdown must fail closed");
+    assert!(
+        matches!(identity_status(kernel), IdentityStatus::Gone),
+        "kernel survived unsettled shutdown"
+    );
+    assert!(
+        sentinel.0.try_wait().unwrap().is_none(),
+        "unrelated sentinel was stopped"
+    );
+    let log = fs::read_to_string(var.join("supervisor.log")).unwrap();
+    assert!(
+        log.contains("shutdown timeout"),
+        "timeout path not reached: {log}"
+    );
+    let generation: Value =
+        serde_json::from_slice(&fs::read(var.join("shutdown-generation.json")).unwrap()).unwrap();
+    assert_eq!(generation["state"], "running");
+    assert_eq!(generation["pid"], supervisor.identity.pid);
+    assert_eq!(generation["starttime"], supervisor.identity.starttime);
+    drop(operation);
+}
+
+#[test]
 fn gateway_api_exposes_web_proxy_port_after_supervisor_startup() {
     if std::env::var_os("QWENPAW_TEST_WEB_PROXY_STARTUP_CHILD").is_some() {
         crate::serve();
         return;
     }
 
+    for (persisted, override_public, expected_public) in [
+        (None, None, false),
+        (Some("1\n"), None, true),
+        (Some("0\n"), None, false),
+        (Some("1\n"), Some("0"), false),
+        (Some("0\n"), Some("1"), true),
+    ] {
+        assert_web_proxy_startup(persisted, override_public, expected_public);
+    }
+}
+
+fn assert_web_proxy_startup(
+    persisted: Option<&str>,
+    override_public: Option<&str>,
+    expected_public: bool,
+) {
     use std::io::Read;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
@@ -2002,6 +3145,9 @@ fn gateway_api_exposes_web_proxy_port_after_supervisor_startup() {
     let gateway = dir.0.join("gateway.sock");
     for path in [&var, &home, &etc, &share, &target] {
         fs::create_dir_all(path).unwrap();
+    }
+    if let Some(value) = persisted {
+        fs::write(var.join("web_proxy_public"), value).unwrap();
     }
     let kernel_reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let kernel_port = kernel_reservation.local_addr().unwrap().port();
@@ -2032,6 +3178,9 @@ fn gateway_api_exposes_web_proxy_port_after_supervisor_startup() {
         .env("QWENPAW_TEST_GATEWAY_PEER_EXE", &binary)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(value) = override_public {
+        command.env("QWENPAW_WEB_PROXY_PUBLIC", value);
+    }
     drop(supervisor_reservation);
     let mut child = crate::api::test_support::ChildGuard(command.spawn().unwrap());
     let get = |path: &str| -> io::Result<String> {
@@ -2070,10 +3219,20 @@ fn gateway_api_exposes_web_proxy_port_after_supervisor_startup() {
         .parse::<u16>()
         .unwrap();
     assert_ne!(port, 0);
+    assert_eq!(
+        fs::read_to_string(var.join("web_proxy_public")).unwrap(),
+        if expected_public { "1\n" } else { "0\n" }
+    );
     let response = get("/app/qwenpaw/api/web-proxy/port").unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     let payload: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(payload["port"], port);
+    assert_eq!(payload["public"], expected_public);
+    let alternate = std::net::SocketAddr::from(([127, 0, 0, 2], port));
+    assert_eq!(
+        TcpStream::connect_timeout(&alternate, Duration::from_secs(2)).is_ok(),
+        expected_public
+    );
 }
 
 #[tokio::test]
@@ -2571,6 +3730,32 @@ async fn qwenpaw_chat_post_streams_sse_with_origin_and_admin_but_without_gateway
     assert_eq!(
         &to_bytes(response.into_body(), 4096).await.unwrap()[..],
         b"data: {\"type\":\"message\",\"text\":\"hello\"}\n\n"
+    );
+
+    let mut missing_origin = admin_headers();
+    missing_origin.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    missing_origin.insert(
+        "x-forwarded-host",
+        HeaderValue::from_static("nas.example.test"),
+    );
+    missing_origin.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+    let denied = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/app/qwenpaw/web/api/console/chat",
+            missing_origin,
+            r#"{"message":"denied"}"#,
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), captured.recv())
+            .await
+            .is_err(),
+        "chat without Origin reached app upstream"
     );
 
     let mut cross_site = admin_headers();

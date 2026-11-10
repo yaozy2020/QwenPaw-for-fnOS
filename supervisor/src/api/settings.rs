@@ -128,6 +128,7 @@ async fn wait_healthy_blocking(state: &AppState) -> bool {
 #[derive(serde::Deserialize)]
 struct PortReq {
     port: u16,
+    public: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -194,7 +195,8 @@ pub(super) async fn web_proxy_port_get(
     let Some(manager) = state.web_proxy.clone() else {
         return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
     };
-    Json(json!({"success": true, "port": manager.port().await})).into_response()
+    let (port, public) = manager.state().await;
+    Json(json!({"success": true, "port": port, "public": public})).into_response()
 }
 
 pub(super) async fn web_proxy_port_set(
@@ -230,7 +232,11 @@ pub(super) async fn web_proxy_port_set(
     let Some(manager) = state.web_proxy.clone() else {
         return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
     };
-    match manager.reconfigure(request.port).await {
+    let public = match request.public {
+        Some(public) => public,
+        None => manager.state().await.1,
+    };
+    match manager.reconfigure(request.port, public).await {
         Ok(port) => {
             let snap_state = state.clone();
             tokio::task::spawn_blocking(move || {

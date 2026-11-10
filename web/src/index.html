@@ -115,6 +115,10 @@
             <button class="btn-outline btn-xs" onclick="changeWebProxyPort()">修改反代端口</button>
           </div>
         </div>
+        <label class="toggle-row">
+          <input id="webProxyPublic" type="checkbox" onchange="setWebProxyPublic()" />
+          允许从其他设备访问独立 Web 反代（默认仅本机）
+        </label>
       </div>
       <!-- 按钮随运行状态切换:停止态必须给出"启动"入口,
            否则用户只能借"重启"间接启动(视觉上是重启,语义错位) -->

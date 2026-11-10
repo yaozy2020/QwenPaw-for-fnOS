@@ -67,11 +67,7 @@ test("upgrade uses the Gateway REST route, encoded JSON body, CSRF and keepalive
   assert.equal(new Headers(captured.init.headers).get("X-CSRF-Token"), "csrf-token");
   assert.equal(new Headers(captured.init.headers).get("Content-Type"), "application/json");
 
-  const beacon = client.upgradeBeaconRequest("2.2 + rc", "https://mirror.example/simple/?a=1&b=2");
-  assert.equal(beacon.url, "/app/qwenpaw/api/kernel/install?_csrf=csrf-token");
-  assert.ok(beacon.body instanceof Blob);
-  assert.equal(beacon.body.type, "application/json");
-  assert.equal(await beacon.body.text(), JSON.stringify({ version: "2.2 + rc", mirror: "https://mirror.example/simple/?a=1&b=2" }));
+  assert.equal("upgradeBeaconRequest" in client, false);
 });
 
 test("Gateway pages call native REST routes with exact request shapes", async () => {
@@ -106,7 +102,7 @@ test("Gateway pages call native REST routes with exact request shapes", async ()
   await client.versionList();
   await client.upgradeStatus();
   const accepted = await client.upgrade("2.2 + rc", "https://mirror.example/simple/?a=1&b=2");
-  await client.upgradeLogs();
+  await client.upgradeLogs(18, "worker-a/+ &");
   await client.logs(9);
   await client.clearLogs();
 
@@ -125,13 +121,13 @@ test("Gateway pages call native REST routes with exact request shapes", async ()
     { url: "/app/qwenpaw/api/kernel/versions?_t=123", method: "GET", body: null, csrf: null, contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/kernel/install-status?_t=123", method: "GET", body: null, csrf: null, contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/kernel/install", method: "POST", body: "{\"version\":\"2.2 + rc\",\"mirror\":\"https://mirror.example/simple/?a=1&b=2\"}", csrf: "csrf-token", contentType: "application/json", keepalive: true },
-    { url: "/app/qwenpaw/api/kernel/install-log?tail=40&_t=123", method: "GET", body: null, csrf: null, contentType: null, keepalive: false },
+    { url: "/app/qwenpaw/api/kernel/install-log?tail=40&seq=18&instance=worker-a%2F%2B%20%26&_t=123", method: "GET", body: null, csrf: null, contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/logs?tail=9&_t=123", method: "GET", body: null, csrf: null, contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/logs/clear", method: "POST", body: null, csrf: "csrf-token", contentType: null, keepalive: false },
   ]);
 });
 
-test("Web proxy port API reads the active port and submits changes with CSRF", async () => {
+test("Web proxy port API reads the active access and submits public or loopback changes with CSRF", async () => {
   const captured = [];
   const client = createApiClient({
     pathname: "/app/qwenpaw/",
@@ -146,18 +142,20 @@ test("Web proxy port API reads the active port and submits changes with CSRF", a
       });
       return init.method === "POST"
         ? jsonResponse({ success: true, port: 43127, message: "changed" })
-        : jsonResponse({ success: true, port: 43126 });
+        : jsonResponse({ success: true, port: 43126, public: false });
     },
   });
 
   const current = await client.webProxyPort();
-  const changed = await client.changeWebProxyPort(0);
+  const changed = await client.changeWebProxyPort(0, true);
+  await client.changeWebProxyPort(43128, false);
 
-  assert.deepEqual(current.data, { success: true, port: 43126 });
+  assert.deepEqual(current.data, { success: true, port: 43126, public: false });
   assert.deepEqual(changed.data, { success: true, port: 43127, message: "changed" });
   assert.deepEqual(captured, [
     { url: "/app/qwenpaw/api/web-proxy/port?_t=321", method: "GET", body: null, csrf: null },
-    { url: "/app/qwenpaw/api/web-proxy/port", method: "POST", body: JSON.stringify({ port: 0 }), csrf: "csrf-token" },
+    { url: "/app/qwenpaw/api/web-proxy/port", method: "POST", body: JSON.stringify({ port: 0, public: true }), csrf: "csrf-token" },
+    { url: "/app/qwenpaw/api/web-proxy/port", method: "POST", body: JSON.stringify({ port: 43128, public: false }), csrf: "csrf-token" },
   ]);
 });
 

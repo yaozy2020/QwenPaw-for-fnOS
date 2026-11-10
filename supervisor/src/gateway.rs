@@ -192,11 +192,22 @@ struct SocketIdentity {
 
 impl SocketIdentity {
     fn from_path(path: &Path) -> io::Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let inode = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
+        use std::{
+            ffi::CString,
+            os::unix::{ffi::OsStrExt, io::FromRawFd},
+        };
+        let path_c = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains NUL"))?;
+        let fd = unsafe {
+            libc::open(
+                path_c.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let inode = unsafe { fs::File::from_raw_fd(fd) };
         let metadata = inode.metadata()?;
         if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(io::Error::new(
@@ -508,7 +519,8 @@ async fn dispatch(
                 Err(()) => return forbidden("invalid fetch metadata"),
                 _ => {}
             }
-            if !origin_allowed(request.headers()) {
+            if !origin_allowed(request.headers()) || !request.headers().contains_key(header::ORIGIN)
+            {
                 return forbidden("invalid origin");
             }
         }
@@ -1048,7 +1060,7 @@ fn form_fields(input: &str) -> Result<Vec<(String, String)>, ()> {
 
 fn csrf_input(
     headers: &HeaderMap,
-    query: Option<&str>,
+    _query: Option<&str>,
     body: &mut Vec<u8>,
 ) -> Result<Option<String>, ()> {
     let mut supplied = unique_header(headers, "x-csrf-token")?.map(str::to_owned);
@@ -1059,11 +1071,6 @@ fn csrf_input(
         supplied = Some(value);
         Ok(())
     };
-    for (name, value) in form_fields(query.unwrap_or_default())? {
-        if name == "_csrf" {
-            take(value)?;
-        }
-    }
     if !body.is_empty() {
         let media_type = unique_header(headers, "content-type")?
             .unwrap_or("application/json")

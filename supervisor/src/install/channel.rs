@@ -25,7 +25,7 @@ pub fn phase_wire(p: &Phase) -> &'static str {
 
 /// 安装渠道:latest / beta / 精确版本。精确版本经 PEP 440 字符白名单校验后
 /// 以 `qwenpaw=={v}` 单个 argv 传给 pip;latest/beta 是枚举而非字符串拼装。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstallChannel {
     Latest,
     Beta,
@@ -57,24 +57,26 @@ pub(super) fn is_safe_exact_version(v: &str) -> bool {
         && !v.starts_with('-')
 }
 
-/// pip 参数构造(纯函数,单测覆盖):始终 argv,镜像为独立 --index-url 参数。
-pub fn pip_args(channel: &InstallChannel, mirror: &str) -> Vec<String> {
-    let mut args: Vec<String> = ["install", "--upgrade"]
+pub fn uv_bootstrap_args() -> Vec<String> {
+    ["install", "--upgrade", "--disable-pip-version-check", "uv"]
         .iter()
-        .map(|s| s.to_string())
+        .map(|value| (*value).to_string())
+        .collect()
+}
+
+/// uv 只向当前暂存 venv 安装；镜像经 UV_DEFAULT_INDEX 传递。
+pub fn uv_args(channel: &InstallChannel) -> Vec<String> {
+    let mut args: Vec<String> = ["pip", "install", "--upgrade"]
+        .iter()
+        .map(|value| (*value).to_string())
         .collect();
-    match channel {
-        InstallChannel::Latest => args.push("qwenpaw".into()),
-        InstallChannel::Beta => {
-            args.push("--pre".into());
-            args.push("qwenpaw".into());
-        }
-        InstallChannel::Exact(v) => args.push(format!("qwenpaw=={v}")),
+    if channel == &InstallChannel::Beta {
+        args.push("--pre".into());
     }
-    if !mirror.is_empty() {
-        args.push("--index-url".into());
-        args.push(mirror.into());
-    }
+    args.push(match channel {
+        InstallChannel::Exact(version) => format!("qwenpaw=={version}"),
+        _ => "qwenpaw".into(),
+    });
     args
 }
 

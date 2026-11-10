@@ -9,10 +9,8 @@ pub use channel::*;
 pub(crate) use io::{atomic_write_0600, sweep_stale_tmp_files};
 use pip::{PipSpawner, RealSpawner};
 pub(crate) use process::run_with_timeout;
-use process::{
-    signal_process_group, version_matches, wait_for_version_cancellable, ExecutableIdentity,
-    ProcessIdentity,
-};
+use process::{signal_process_group, version_matches, ExecutableIdentity, ProcessIdentity};
+pub(crate) use process::{wait_for_version_cancellable, wait_for_version_deadline};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -483,6 +481,7 @@ impl InstallState {
                                 std::path::PathBuf::from("/var/apps/python312/target/bin/python3")
                             })
                     });
+                    crate::runtime::RuntimeAdapter::ensure_supported_python(&python)?;
                     let transaction = VenvTransaction::prepare_with_python_cancellable(
                         Path::new(&venv_dir),
                         task_seq,
@@ -496,7 +495,7 @@ impl InstallState {
                     pending_transaction = Some(transaction);
                     let transaction = pending_transaction.as_mut().unwrap();
                     let python = transaction.python();
-                    this.run_pip(&python, &channel, &mirror, &pip_log)?;
+                    this.run_uv(&python, &channel, &mirror, &pip_log)?;
                     let mut metadata = std::process::Command::new(&python);
                     metadata.args([
                         "-c",
@@ -602,7 +601,8 @@ mod initializer_regression_tests {
         std::fs::write(
             &python,
             r##"#!/bin/bash
-if [ "$1" = "-m" ]; then printf new > "$(dirname "$0")/../installed"; exit 0; fi
+if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then cp "$0" "$(dirname "$0")/uv"; exit 0; fi
+if [ "$(basename "$0")" = "uv" ] && [ "$1" = "pip" ] && [ "$2" = "install" ]; then printf new > "$(dirname "$0")/../installed"; exit 0; fi
 printf '2.0.0\n'
 "##,
         )

@@ -16,57 +16,134 @@ pub struct WebProxyManager {
 
 struct Inner {
     port: u16,
+    public: bool,
     shutdown: watch::Sender<bool>,
 }
 
 impl WebProxyManager {
-    pub async fn start(app: AppState, requested_port: u16) -> io::Result<Self> {
-        let (listener, port) = Self::bind_with_fallback(requested_port).await?;
-        persist_port(&app, port)?;
+    pub async fn start(app: AppState, requested_port: u16, public: bool) -> io::Result<Self> {
+        let (listener, port) = Self::bind_with_fallback(requested_port, public).await?;
+        persist_state(&app, port, public)?;
         let (shutdown, stopped) = watch::channel(false);
         spawn(app.clone(), listener, stopped);
         Ok(Self {
             app,
-            inner: Arc::new(Mutex::new(Inner { port, shutdown })),
+            inner: Arc::new(Mutex::new(Inner {
+                port,
+                public,
+                shutdown,
+            })),
         })
     }
 
-    pub async fn reconfigure(&self, requested_port: u16) -> io::Result<u16> {
+    pub async fn reconfigure(&self, requested_port: u16, public: bool) -> io::Result<u16> {
         let mut inner = self.inner.lock().await;
+        let previous_port = inner.port;
+        let previous_public = inner.public;
         let app = self.app.clone();
-        let (listener, port) = bind(requested_port).await?;
-        persist_port(&app, port)?;
+        let same_port_access_change = requested_port == previous_port && public != previous_public;
+        if same_port_access_change {
+            let _ = inner.shutdown.send(true);
+        }
+        let bound = if same_port_access_change {
+            bind_after_close(requested_port, public).await
+        } else {
+            bind(requested_port, public).await
+        };
+        let (listener, port) = match bound {
+            Ok(bound) => bound,
+            Err(error) => {
+                if same_port_access_change {
+                    restore_previous(&app, &mut inner, previous_port, previous_public).await?;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = persist_state(&app, port, public) {
+            drop(listener);
+            let _ = persist_state(&app, previous_port, previous_public);
+            if same_port_access_change {
+                restore_previous(&app, &mut inner, previous_port, previous_public).await?;
+            }
+            return Err(error);
+        }
         let (shutdown, stopped) = watch::channel(false);
         spawn(app, listener, stopped);
-        let previous = std::mem::replace(&mut *inner, Inner { port, shutdown });
+        let previous = std::mem::replace(
+            &mut *inner,
+            Inner {
+                port,
+                public,
+                shutdown,
+            },
+        );
         let _ = previous.shutdown.send(true);
         Ok(port)
     }
 
-    pub async fn port(&self) -> u16 {
-        self.inner.lock().await.port
+    pub async fn state(&self) -> (u16, bool) {
+        let inner = self.inner.lock().await;
+        (inner.port, inner.public)
     }
 
-    async fn bind_with_fallback(requested_port: u16) -> io::Result<(TcpListener, u16)> {
-        match bind(requested_port).await {
+    async fn bind_with_fallback(
+        requested_port: u16,
+        public: bool,
+    ) -> io::Result<(TcpListener, u16)> {
+        match bind(requested_port, public).await {
             Ok(bound) => Ok(bound),
             Err(error) if requested_port != 0 && error.kind() == io::ErrorKind::AddrInUse => {
-                bind(0).await
+                bind(0, public).await
             }
             Err(error) => Err(error),
         }
     }
 }
 
-async fn bind(port: u16) -> io::Result<(TcpListener, u16)> {
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+async fn bind(port: u16, public: bool) -> io::Result<(TcpListener, u16)> {
+    let host = if public { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = TcpListener::bind((host, port)).await?;
     let port = listener.local_addr()?.port();
     Ok((listener, port))
 }
 
-fn persist_port(app: &AppState, port: u16) -> io::Result<()> {
-    let path = format!("{}/web_proxy_port", app.var_dir);
-    atomic_write_0600(&path, &format!("{port}\n"))
+async fn bind_after_close(port: u16, public: bool) -> io::Result<(TcpListener, u16)> {
+    let mut last_error = None;
+    for _ in 0..100 {
+        match bind(port, public).await {
+            Ok(bound) => return Ok(bound),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("previous web proxy listener did not close")))
+}
+
+async fn restore_previous(
+    app: &AppState,
+    inner: &mut Inner,
+    port: u16,
+    public: bool,
+) -> io::Result<()> {
+    let (listener, _) = bind_after_close(port, public).await?;
+    let (shutdown, stopped) = watch::channel(false);
+    spawn(app.clone(), listener, stopped);
+    inner.shutdown = shutdown;
+    Ok(())
+}
+
+fn persist_state(app: &AppState, port: u16, public: bool) -> io::Result<()> {
+    atomic_write_0600(
+        &format!("{}/web_proxy_port", app.var_dir),
+        &format!("{port}\n"),
+    )?;
+    atomic_write_0600(
+        &format!("{}/web_proxy_public", app.var_dir),
+        if public { "1\n" } else { "0\n" },
+    )
 }
 
 fn spawn(app: AppState, listener: TcpListener, mut stopped: watch::Receiver<bool>) {

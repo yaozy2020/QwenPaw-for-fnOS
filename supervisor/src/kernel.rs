@@ -220,6 +220,10 @@ impl KernelManager {
     }
 
     pub fn kernel_version(&self) -> String {
+        self.kernel_version_with_timeout(Duration::from_secs(15))
+    }
+
+    fn kernel_version_with_timeout(&self, timeout: Duration) -> String {
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state
@@ -231,19 +235,17 @@ impl KernelManager {
             }
         }
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
-        // 解释器启动可能卡在 NFS/坏 venv 上:与 install.rs 的 metadata_version 一样
-        // 走带超时执行,否则 spawn_blocking 线程泄漏、/start 持锁期间全部操作 409。
         let mut cmd = process::Command::new(&bin);
         cmd.arg("-c")
             .arg("import importlib.metadata as m; print(m.version('qwenpaw'))");
-        let version = match crate::install::run_with_timeout(
-            cmd,
-            std::time::Duration::from_secs(15),
-            "读取内核版本(缓存失效路径)",
-        ) {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => String::new(),
-        };
+        let version =
+            match crate::install::run_with_timeout(cmd, timeout, "读取内核版本(缓存失效路径)")
+            {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                _ => String::new(),
+            };
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.version_cache = version.clone();
         state.version_cache_at = Some(Instant::now());
@@ -257,7 +259,8 @@ impl KernelManager {
     }
 
     pub fn installed(&self) -> bool {
-        !self.kernel_version().is_empty()
+        Path::new(&self.cfg.venv_dir).join("bin/python3").exists()
+            || !self.kernel_version().is_empty()
     }
 
     pub fn prevent_start(&self) {
@@ -320,6 +323,10 @@ impl KernelManager {
             return Err("kernel not installed".into());
         }
         let port = self.port();
+        let playwright_host = std::env::var("QWENPAW_PLAYWRIGHT_DOWNLOAD_HOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://npmmirror.com/mirrors/playwright".into());
         // std::process::Command:spawn 可从任意线程调用(安装线程的失败自愈/
         // on_success 都在裸线程上,tokio Command 在无 runtime 上下文会 panic ——
         // 审计 B2 实测:panic + 日志锁毒化,一次 pip 失败砖死安装子系统)
@@ -330,7 +337,7 @@ impl KernelManager {
             "qwenpaw",
             "app",
             "--host",
-            "0.0.0.0",
+            "127.0.0.1",
             "--port",
             &port.to_string(),
             "--log-level",
@@ -345,6 +352,7 @@ impl KernelManager {
             "QWENPAW_DEPENDENCY_STATE_DIR",
             format!("{}/dependency-environments", self.cfg.share_dir),
         )
+        .env("PLAYWRIGHT_DOWNLOAD_HOST", playwright_host)
         .env(
             "PATH",
             "/var/apps/nodejs_v24/target/bin:/usr/local/bin:/usr/bin:/bin",
@@ -390,23 +398,24 @@ impl KernelManager {
         Ok(pid)
     }
 
-    /// 启动后健康检查:进程存活且内核端口可建立 TCP 连接才算"服务已就绪"。
+    /// 启动后健康检查:进程存活且 /api/version 在总期限内返回当前版本。
     /// "进程已创建"不等于"服务成功" —— 改端口/重置认证的成功判定以此为准,
     /// 失败路径据此回滚(超时视为失败,由调用方处理)。
     /// 阻塞式:调用方(axum 处理器)须经 spawn_blocking 包裹。
     pub fn wait_healthy(&self, timeout: Duration) -> bool {
-        let pid = self.state.lock().unwrap_or_else(|e| e.into_inner()).tracked;
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if pid <= 0 || !procfs::process_alive(pid) {
-                return false; // 进程已死,等下去只会假超时
-            }
-            if std::net::TcpStream::connect(("127.0.0.1", self.port())).is_ok() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(300));
+        let pid = self.state.lock().unwrap_or_else(|e| e.into_inner()).tracked;
+        let expected_version =
+            self.kernel_version_with_timeout(deadline.saturating_duration_since(Instant::now()));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if pid <= 0
+            || !procfs::process_alive(pid)
+            || expected_version.is_empty()
+            || remaining.is_zero()
+        {
+            return false;
         }
-        false
+        crate::install::wait_for_version_deadline(self.port(), &expected_version, deadline)
     }
 
     /// 三段式停止:组 TERM(宽限 10s)→ 单 KILL → 组 KILL 清扫。
@@ -1037,9 +1046,9 @@ mod lifecycle_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(std::fs::read_to_string(dir.join("level")).unwrap(), "debug");
-        assert!(std::fs::read_to_string(dir.join("argv"))
-            .unwrap()
-            .ends_with("--log-level\ndebug\n"));
+        let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
+        assert!(argv.contains("--host\n127.0.0.1\n"));
+        assert!(argv.ends_with("--log-level\ndebug\n"));
         kernel.stop_sync();
         std::fs::remove_dir_all(&dir).unwrap();
     }

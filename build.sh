@@ -51,16 +51,18 @@ else
   echo "[1/4] preflight 跳过（SKIP_GATES=1，已在宿主侧完成）"
 fi
 
-# [1b/4] 构建监督者(release 单二进制; Release 必须干净编译)
-SUP_BIN_SRC="$PROJ_DIR/supervisor/target/release/qwenpaw-supervisor"
+# [1b/4] 构建监督者(musl 静态链接; 不依赖 fnOS 的 glibc 版本)
+SUP_TARGET="x86_64-unknown-linux-musl"
+SUP_BIN_SRC="$PROJ_DIR/supervisor/target/$SUP_TARGET/release/qwenpaw-supervisor"
 # 探测与调用必须用同一路径:探测接受 ~/.cargo/bin 而调用裸 cargo,
 # PATH 不含它的场景下会"有 cargo"却 command not found,错误归因失真
 CARGO_BIN="$(command -v cargo 2>/dev/null || true)"
 [ -z "$CARGO_BIN" ] && [ -x "$HOME/.cargo/bin/cargo" ] && CARGO_BIN="$HOME/.cargo/bin/cargo"
 if [ -n "$CARGO_BIN" ]; then
-  echo "[1b/4] 构建监督者 (cargo release --locked) ..."
+  echo "[1b/4] 构建监督者 (cargo release --locked, musl static) ..."
   rm -f "$SUP_BIN_SRC"
-  (cd "$PROJ_DIR/supervisor" && "$CARGO_BIN" build --locked --release) || {
+  (cd "$PROJ_DIR/supervisor" && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static -C relocation-model=static" \
+    "$CARGO_BIN" build --locked --release --target "$SUP_TARGET") || {
     echo -e "${RED}ERROR: 监督者 cargo 构建失败,终止出包${NC}"
     exit 1
   }

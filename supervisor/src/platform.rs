@@ -43,7 +43,20 @@ pub fn run(action: PlatformAction, cfg: &Config) -> i32 {
             }
         }
         PlatformAction::Install => finish_operation(cfg, "安装", install_callback),
-        PlatformAction::Upgrade => finish_operation(cfg, "升级", upgrade_callback),
+        PlatformAction::Upgrade => {
+            let status = finish_operation(cfg, "升级", upgrade_callback);
+            if status != 0 {
+                if let Err(error) = helper::restore_installed(&cfg.var_dir, &cfg.supervisor_binary)
+                {
+                    log_message(
+                        cfg,
+                        &format!("ERROR: 升级失败后恢复 helper 失败: {error}"),
+                        true,
+                    );
+                }
+            }
+            status
+        }
         PlatformAction::Uninstall => crate::uninstall::run(cfg),
         PlatformAction::MirrorGet => {
             let (status, response) = crate::mirror::get_json(&cfg.var_dir);
@@ -170,7 +183,13 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
         RuntimePlan::Keep
     } else {
         let active_venv = Path::new(&cfg.kernel_venv).exists();
-        runtime_plan(false, active_venv, read_pin_state(&cfg.var_dir)?)?
+        let plan = runtime_plan(false, active_venv, read_pin_state(&cfg.var_dir)?)?;
+        if let RuntimePlan::Repair(version) = &plan {
+            if running_import_failure_matches_pin(&health, version) {
+                return Ok(());
+            }
+        }
+        plan
     };
     match plan {
         RuntimePlan::Keep => {
@@ -215,9 +234,82 @@ fn runtime_is_installed(response: &serde_json::Value) -> Result<bool, String> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "监督者 runtime-health 响应缺少 version".to_string())?;
     if installed && version.trim().is_empty() {
-        return Err("监督者报告内核已安装，但版本为空".into());
+        if runtime
+            .get("metadata_repairable")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return Ok(false);
+        }
+        return Err("监督者报告内核已安装，但版本为空或无法可靠探测".into());
     }
     Ok(installed)
+}
+
+fn running_import_failure_matches_pin(response: &serde_json::Value, pin: &str) -> bool {
+    use std::io::Read;
+    use std::time::Duration;
+
+    let runtime = &response["runtime"];
+    if runtime
+        .get("installed")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || !runtime
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|version| version.trim().is_empty())
+        || runtime
+            .get("metadata_repairable")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || runtime.get("running").and_then(serde_json::Value::as_bool) != Some(true)
+        || runtime
+            .get("reachable")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return false;
+    }
+    let Some(port) = runtime
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+    else {
+        return false;
+    };
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(1))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(response) = client
+        .get(format!("http://127.0.0.1:{port}/api/version"))
+        .send()
+    else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    let mut body = Vec::new();
+    if response.take(64 * 1024 + 1).read_to_end(&mut body).is_err() || body.len() > 64 * 1024 {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("version")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(pin)
 }
 
 fn runtime_plan(installed: bool, active_venv: bool, pin: PinState) -> Result<RuntimePlan, String> {
@@ -893,6 +985,169 @@ mod tests {
     #[test]
     fn broken_runtime_without_pin_fails_closed() {
         assert!(runtime_plan(false, true, PinState::Missing).is_err());
+    }
+
+    #[test]
+    fn metadata_failure_with_existing_runtime_never_triggers_automatic_repair() {
+        use crate::api::test_support::{free_port, install_python, TestDir};
+
+        let dir = TestDir::new("platform-runtime-metadata-failure");
+        let state = dir.state(free_port());
+        let python = install_python(&dir, &state, "");
+        fs::write(python, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(state.kernel.installed());
+        let runtime = state.core.runtime_health();
+        assert_eq!(runtime["version"], "");
+        assert!(!runtime["error"].is_null());
+        let response = serde_json::json!({"runtime": runtime});
+        let decision = runtime_is_installed(&response)
+            .and_then(|installed| runtime_plan(installed, true, PinState::Exact("2.3.0".into())));
+        assert!(
+            !matches!(decision, Ok(RuntimePlan::Repair(_))),
+            "metadata failure must not trigger automatic repair: {decision:?}"
+        );
+    }
+
+    fn live_version_probe(
+        mut runtime: serde_json::Value,
+        status: &str,
+        body: &[u8],
+        delay: std::time::Duration,
+    ) -> (bool, Option<String>, std::time::Duration) {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{atomic::AtomicBool, Arc},
+            time::{Duration, Instant},
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        runtime["port"] = listener.local_addr().unwrap().port().into();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let body = body.to_vec();
+        let status = status.to_string();
+        let server = std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 1024];
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let count = stream.read(&mut buffer).unwrap();
+                        if count == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    std::thread::sleep(delay);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                    break Some(String::from_utf8(request).unwrap());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if server_stop.load(std::sync::atomic::Ordering::Acquire) {
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("version fixture accept failed: {error}"),
+            }
+        });
+        let started = Instant::now();
+        let kept =
+            running_import_failure_matches_pin(&serde_json::json!({"runtime": runtime}), "2.4.1");
+        let elapsed = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        (kept, server.join().unwrap(), elapsed)
+    }
+
+    fn repairable_running_runtime() -> serde_json::Value {
+        serde_json::json!({
+            "installed": true,
+            "version": "",
+            "metadata_repairable": true,
+            "running": true,
+            "reachable": true,
+        })
+    }
+
+    #[test]
+    fn live_import_probe_requires_success_and_exact_version_with_a_short_deadline() {
+        use std::time::Duration;
+
+        for (status, body, expected) in [
+            ("200 OK", r#"{"version":"2.4.1"}"#, true),
+            ("201 Created", r#"{"version":"2.4.1"}"#, true),
+            ("500 Internal Server Error", r#"{"version":"2.4.1"}"#, false),
+            ("302 Found", r#"{"version":"2.4.1"}"#, false),
+            ("200 OK", r#"{"version":"2.4.0"}"#, false),
+            ("200 OK", r#"{"version":"2.4.1 "}"#, false),
+            ("200 OK", "not json", false),
+        ] {
+            let (kept, request, _) = live_version_probe(
+                repairable_running_runtime(),
+                status,
+                body.as_bytes(),
+                Duration::ZERO,
+            );
+            assert_eq!(kept, expected, "status={status}, body={body}");
+            assert!(request
+                .unwrap()
+                .starts_with("GET /api/version HTTP/1.1\r\n"));
+        }
+
+        let oversized = format!("{{\"version\":\"2.4.1\"}}{}", " ".repeat(64 * 1024));
+        let (kept, request, _) = live_version_probe(
+            repairable_running_runtime(),
+            "200 OK",
+            oversized.as_bytes(),
+            Duration::ZERO,
+        );
+        assert!(!kept);
+        assert!(request.is_some());
+
+        let (kept, request, elapsed) = live_version_probe(
+            repairable_running_runtime(),
+            "200 OK",
+            br#"{"version":"2.4.1"}"#,
+            Duration::from_millis(1300),
+        );
+        assert!(!kept);
+        assert!(request.is_some());
+        assert!(elapsed < Duration::from_secs(2), "probe took {elapsed:?}");
+    }
+
+    #[test]
+    fn live_import_probe_does_not_generalize_to_other_runtime_states() {
+        use std::time::Duration;
+
+        for (field, value) in [
+            ("installed", serde_json::json!(false)),
+            ("version", serde_json::json!("2.4.1")),
+            ("metadata_repairable", serde_json::json!(false)),
+            ("running", serde_json::json!(false)),
+            ("reachable", serde_json::json!(false)),
+            ("running", serde_json::Value::Null),
+        ] {
+            let mut runtime = repairable_running_runtime();
+            runtime[field] = value;
+            let (kept, request, _) =
+                live_version_probe(runtime, "200 OK", br#"{"version":"2.4.1"}"#, Duration::ZERO);
+            assert!(!kept, "field={field}");
+            assert!(request.is_none(), "unexpected HTTP request for {field}");
+        }
+        assert!(runtime_is_installed(&serde_json::json!({
+            "runtime": {"installed": true, "version": "", "metadata_repairable": false}
+        }))
+        .is_err());
     }
 
     #[test]

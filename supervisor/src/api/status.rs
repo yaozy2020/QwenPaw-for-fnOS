@@ -95,7 +95,7 @@ pub fn render_snapshot(state: &AppState) -> String {
         "pid": st.pid.to_string(),
         "startAt": start_epoch,
         "version": version,
-        "installed": !version.is_empty(),
+        "installed": state.kernel.installed(),
         // 内核由 /proc 重新收养(监督者曾被 SIGKILL)时为 true,排障用
         "adopted": st.adopted,
         "authEnabled": auth,

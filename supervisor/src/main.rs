@@ -213,8 +213,9 @@ fn serve() {
         let kernel = Arc::clone(&kernel);
         let venv_dir = cfg.kernel_venv.clone();
         let share_dir = cfg.share_dir.clone();
+        let etc_dir = cfg.etc_dir.clone();
         Arc::new(move |state, pid_file| {
-            runtime::RuntimeAdapter::new(&venv_dir, &share_dir, kernel.log_level())
+            runtime::RuntimeAdapter::new(&venv_dir, &share_dir, &etc_dir, kernel.log_level())
                 .ensure_initialized_with_state(state, pid_file)
         })
     });
@@ -421,6 +422,7 @@ fn serve() {
         var_dir: cfg.var_dir.clone(),
         home_dir: cfg.home_dir.clone(),
         share_dir: cfg.share_dir.clone(),
+        etc_dir: cfg.etc_dir.clone(),
         ui_config_file: cfg.ui_config_file.clone(),
         kernel_log: cfg.kernel_log.clone(),
         operations: Arc::new(tokio::sync::Mutex::new(())),
@@ -433,12 +435,19 @@ fn serve() {
         web_proxy: None,
     };
     if let Some(port) = cfg.web_proxy_port {
+        let public = std::env::var("QWENPAW_WEB_PROXY_PUBLIC")
+            .ok()
+            .or_else(|| std::fs::read_to_string(format!("{}/web_proxy_public", cfg.var_dir)).ok())
+            .is_some_and(|value| value.trim() == "1");
         let manager = rt
-            .block_on(gateway::WebProxyManager::start(state.clone(), port))
+            .block_on(gateway::WebProxyManager::start(state.clone(), port, public))
             .unwrap_or_else(|error| panic!("start web proxy: {error}"));
-        let actual_port = rt.block_on(manager.port());
+        let (actual_port, public) = rt.block_on(manager.state());
         state.web_proxy = Some(Arc::new(manager));
-        logf(&format!("web proxy listening 0.0.0.0:{actual_port}"));
+        logf(&format!(
+            "web proxy listening {}:{actual_port}",
+            if public { "0.0.0.0" } else { "127.0.0.1" }
+        ));
     }
     let stable_helper_binary = cfg.stable_helper_binary();
     let persistent_helper_binary = crate::helper::path(&cfg.var_dir);
@@ -506,6 +515,7 @@ fn serve() {
             let settled = matches!(install_result, Ok(true)) && operation_guard.is_some();
             if !settled {
                 logf_for_signal("shutdown timeout: 未完成事务将在下次启动时恢复");
+                kernel_for_signal.stop().await;
                 return false;
             }
 
@@ -666,11 +676,16 @@ fn parse_orphan_stat(stat: &str) -> Option<OrphanProcessStat> {
 }
 
 fn install_argv_matches(cmdline: &[u8]) -> bool {
-    cmdline
-        .split(|byte| *byte == 0)
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|args| args[0] == b"-m" && matches!(args[1], b"pip" | b"venv"))
+    let args = cmdline.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let direct_uv = args
+        .first()
+        .is_some_and(|executable| *executable == b"uv" || executable.ends_with(b"/uv"))
+        && args.get(1) == Some(&b"pip".as_slice())
+        && args.get(2) == Some(&b"install".as_slice());
+    direct_uv
+        || args
+            .windows(2)
+            .any(|args| args[0] == b"-m" && matches!(args[1], b"pip" | b"venv"))
 }
 
 fn inspect_orphan_leader(record: InstallProcessRecord) -> Result<Option<OrphanLeader>, String> {
@@ -696,7 +711,7 @@ fn inspect_orphan_leader(record: InstallProcessRecord) -> Result<Option<OrphanLe
         std::fs::read(&cmdline_path).map_err(|error| format!("read {}: {error}", cmdline_path))?;
     if !install_argv_matches(&cmdline) {
         return Err(format!(
-            "install.pid PID {} is not running an exact '-m pip' or '-m venv' argv; refusing to signal",
+            "install.pid PID {} is not an exact pip, venv, or 'uv pip install' process; refusing to signal",
             record.pid
         ));
     }
@@ -873,6 +888,151 @@ mod orphan_install_tests {
         assert!(!install_argv_matches(b"python3\0-m\0pipx\0"));
         assert!(!install_argv_matches(b"python3\0pip\0-m\0"));
         assert!(!install_argv_matches(b"pip install qwenpaw\0"));
+    }
+
+    #[test]
+    fn direct_uv_orphan_requires_executable_and_exact_subcommands() {
+        for cmdline in [
+            &b"uv\0pip\0install\0qwenpaw\0"[..],
+            &b"/tmp/staging/bin/uv\0pip\0install\0--python\0/tmp/python3\0"[..],
+        ] {
+            assert!(install_argv_matches(cmdline), "rejected {cmdline:?}");
+        }
+        for cmdline in [
+            &b"uvx\0pip\0install\0"[..],
+            &b"/tmp/not-uv\0pip\0install\0"[..],
+            &b"uv\0pipx\0install\0"[..],
+            &b"uv\0pip\0uninstall\0"[..],
+            &b"uv\0--help\0pip\0install\0"[..],
+            &b"python3\0/tmp/uv\0pip\0install\0"[..],
+        ] {
+            assert!(!install_argv_matches(cmdline), "accepted {cmdline:?}");
+        }
+    }
+
+    #[test]
+    fn non_uv_executable_without_direct_uv_argv_is_not_an_orphan_installer() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let root = std::env::temp_dir().join(format!("qwenpaw-not-uv-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let script = root.join("not-uv");
+        std::fs::write(&script, "printf ready > ready\nIFS= read -r line\n").unwrap();
+        let mut child = crate::api::test_support::ChildGuard(
+            Command::new("/bin/bash")
+                .arg(&script)
+                .current_dir(&root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("ready").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            root.join("ready").exists(),
+            "impostor fixture did not start"
+        );
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let parsed = parse_orphan_stat(&stat).unwrap();
+        let record = InstallProcessRecord {
+            pid,
+            starttime: parsed.starttime,
+            pgid: pid,
+        };
+        let observed = inspect_orphan_leader(record);
+        let still_alive = child.0.try_wait().unwrap().is_none();
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(still_alive);
+        assert!(
+            observed.is_err(),
+            "non-uv executable was accepted: {observed:?}"
+        );
+    }
+
+    #[test]
+    fn direct_uv_orphan_cleanup_checks_identity_and_reaps_only_its_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!("qwenpaw-uv-orphan-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let uv = root.join("uv");
+        std::fs::copy("/usr/bin/tail", &uv).unwrap();
+        std::fs::write(root.join("pip"), "pip is a stable watched file\n").unwrap();
+        std::fs::write(root.join("install"), "install is a stable watched file\n").unwrap();
+        let mut child = Command::new(&uv)
+            .args(["pip", "install", "-f"])
+            .current_dir(&root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let mut sentinel = crate::api::test_support::ChildGuard(
+            Command::new("/bin/sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "direct uv fixture exited early"
+        );
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let parsed = parse_orphan_stat(&stat).unwrap();
+        let record = InstallProcessRecord {
+            pid,
+            starttime: parsed.starttime,
+            pgid: pid,
+        };
+        assert_eq!(parsed.pgid, pid);
+        assert_eq!(
+            inspect_orphan_leader(record).unwrap(),
+            Some(OrphanLeader::Match)
+        );
+        let path = root.join("install.pid");
+        let bad_record = format!("{pid}\n{}\n{pid}\n", parsed.starttime + 1);
+        std::fs::write(&path, &bad_record).unwrap();
+        assert!(cleanup_orphan_install(root.to_str().unwrap()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bad_record);
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "stale identity received a signal"
+        );
+
+        std::fs::write(&path, format!("{pid}\n{}\n{pid}\n", parsed.starttime)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _ = tx.send(child.wait());
+        });
+        let cleanup = cleanup_orphan_install(root.to_str().unwrap());
+        if cleanup.is_err()
+            && matches!(inspect_orphan_leader(record), Ok(Some(OrphanLeader::Match)))
+        {
+            let _ = signal_install_group(pid, libc::SIGKILL);
+        }
+        let waited = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        waiter.join().unwrap();
+        assert!(cleanup.is_ok(), "{cleanup:?}");
+        assert!(!waited.success());
+        assert!(!path.exists(), "successful cleanup must remove install.pid");
+        assert!(
+            sentinel.0.try_wait().unwrap().is_none(),
+            "external sentinel was signalled"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

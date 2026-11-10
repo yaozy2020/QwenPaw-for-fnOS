@@ -25,6 +25,21 @@ pub fn stage_current_executable(var_dir: &str) -> Result<(), String> {
     })
 }
 
+pub fn restore_installed(var_dir: &str, installed: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(installed)
+        .map_err(|error| format!("installed target is unavailable: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("installed target is not an executable regular file".into());
+    }
+    stage_from_path(var_dir, installed).map_err(|error| {
+        format!(
+            "restore supervisor helper {} from installed target {}: {error}",
+            path(var_dir).display(),
+            installed.display()
+        )
+    })
+}
+
 fn stage_from_path(var_dir: &str, source_path: &Path) -> io::Result<()> {
     let var = Path::new(var_dir);
     fs::create_dir_all(var)?;

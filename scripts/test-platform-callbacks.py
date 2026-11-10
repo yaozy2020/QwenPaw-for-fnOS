@@ -287,7 +287,8 @@ class Fixture:
                           "fi\n"
                           "if [ \"${1:-}\" = -c ] && [[ \"${2:-}\" == *'import qwenpaw'* ]] \\\n"
                           "    && [ \"$(stat -Lc '%i' -- \"$0\")\" = \"${QWENPAW_TEST_BAD_PYTHON_INODE:-}\" ]; then\n"
-                          "  exit 43\n"
+                          "  printf \"ModuleNotFoundError: No module named 'qwenpaw'\\n\" >&2\n"
+                          "  exit 1\n"
                           "fi\n"
                           "exec \"$0.real\" \"$@\"\n")
         os.chmod(binary, 0o755)
@@ -436,23 +437,29 @@ class Fixture:
 
         wait_for(current_runtime, 15, "healthy test runtime process identity")
 
-    def control_status(self):
+    def control_request(self, operation):
         path = self.var / "supervisor-control.sock"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(2)
             client.connect(str(path))
-            client.sendall(b'{"operation":"install-status"}\n')
+            client.sendall(json.dumps({"operation": operation}).encode() + b"\n")
             response = bytearray()
             while not response.endswith(b"\n"):
                 chunk = client.recv(4096)
                 if not chunk:
                     break
                 response.extend(chunk)
-        require(response.endswith(b"\n"), "UDS install-status response was truncated")
+        require(response.endswith(b"\n"), f"UDS {operation} response was truncated")
         payload = json.loads(response)
         require(payload.get("status") == 200 and payload.get("success") is True,
-                f"UDS install-status failed: {payload}")
+                f"UDS {operation} failed: {payload}")
         return payload
+
+    def control_status(self):
+        return self.control_request("install-status")
+
+    def runtime_health(self):
+        return self.control_request("runtime-health")["runtime"]
 
     def wait_task(self, previous_seq=0):
         def terminal():
@@ -844,7 +851,7 @@ def case_persistent_helper_after_target_removal(parent, hashes):
                 f"installed uninstall callback without sibling failed to use the var helper "
                 f"or default keep mode (rc={code}): {output}")
         require(fixture.helper.is_file(), "default keep uninstall removed the persistent var helper")
-        require(not fixture.venv.exists(), "default keep uninstall did not remove the venv")
+        require(not fixture.venv.exists(), "default keep uninstall removed the venv")
         require(fixture.pin.read_text() == "2.4.1\n", "default keep uninstall removed the version pin")
         require((fixture.home / "workspace-sentinel").read_text() == "home-sentinel\n",
                 "default keep uninstall removed other home data")
@@ -942,7 +949,7 @@ def case_cross_version_uninstall_uses_candidate_helper(parent, hashes):
         code, output = fixture.callback("uninstall", wizard_keep_data="keep")
         require(code == 0 and "卸载清理完成" in output,
                 f"outer helper did not enter the real Rust uninstall flow (rc={code}): {output}")
-        require(not fixture.venv.exists(), "outer-helper uninstall did not remove the venv")
+        require(not fixture.venv.exists(), "outer-helper keep uninstall did not remove the venv")
         require(not fixture.helper.exists(), "cross-version uninstall depended on a var helper")
         require(fixture.user_data.is_dir(), "keep uninstall removed shared user data")
         require(fixture.sentinel.read_text() == "must survive uninstall remove\n",
@@ -1042,13 +1049,125 @@ def case_healthy_upgrade(parent, hashes):
         require(not (fixture.control / "init-count").exists(), "healthy upgrade invoked init")
 
 
+def case_upgrade_preserves_runtime(parent, hashes):
+    with Fixture(parent, "upgrade-preserves-runtime", hashes) as fixture:
+        fixture.create_runtime("2.4.1")
+        fixture.pin.write_text("2.4.1\n")
+        fixture.user_data.joinpath("config.json").write_text("existing config\n")
+        fixture.stage_installed_helper()
+        fixture.start_manager(expect_kernel=True)
+        original_inode = (fixture.venv / "bin/python3").stat().st_ino
+        prior = fixture.control_status()
+
+        code, output = fixture.callback("uninstall", TRIM_APP_STATUS="UPGRADE")
+        require(code == 0, f"upgrade keep cleanup failed: {output}")
+        require((fixture.venv / "bin/python3").stat().st_ino == original_inode,
+                "upgrade keep cleanup removed or replaced the runtime")
+
+        code, output = fixture.callback("install", TRIM_APP_STATUS="UPGRADE")
+        require(code == 0, f"install during upgrade failed: {output}")
+        require(fixture.control_status()["seq"] == prior["seq"],
+                "upgrade submitted an install task")
+        require(not (fixture.control / "pip-started").exists(),
+                "upgrade invoked the installer")
+        require((fixture.venv / "bin/python3").stat().st_ino == original_inode,
+                "upgrade replaced the runtime")
+        fixture.wait_kernel()
+
+
+def case_running_bad_import_matching_pin_is_kept(parent, hashes):
+    with Fixture(parent, "running-bad-import-matching-pin", hashes) as fixture:
+        fixture.create_runtime("2.4.1", bad_import=True)
+        fixture.pin.write_text("2.4.1\n")
+        fixture.user_data.joinpath("config.json").write_text("existing config\n")
+        fixture.start_manager(expect_kernel=True)
+        runtime = fixture.runtime_health()
+        require(runtime["installed"] is True and runtime["version"] == ""
+                and runtime["metadata_repairable"] is True
+                and runtime["running"] is True and runtime["reachable"] is True
+                and runtime["port"] == fixture.service_port,
+                f"running bad-import precondition not met: {runtime}")
+        original_process = fixture.runtime_identities[-1]
+        original_inode = (fixture.venv / "bin/python3").stat().st_ino
+        records = fixture.venv / ".qwenpaw-test-runtime-health"
+        prior_records = records.read_text()
+        prior = fixture.control_status()
+        pip_log = fixture.var / "qwenpaw-upgrade.log.pip"
+        require(not pip_log.exists(), "matching-pin fixture already has a pip log")
+
+        code, output = fixture.callback("install")
+
+        require(code == 0, f"install callback failed for running matching pin (rc={code}): {output}")
+        require(fixture.control_status()["seq"] == prior["seq"],
+                "matching pin unexpectedly submitted a runtime install task")
+        require(alive(original_process), "matching pin stopped the running kernel")
+        require((fixture.venv / "bin/python3").stat().st_ino == original_inode,
+                "matching pin replaced the active runtime")
+        require(fixture.pin.read_text() == "2.4.1\n", "matching pin was changed")
+        new_records = records.read_text()
+        expected_probe = f"pid={original_process['pid']} version=2.4.1\n"
+        require(new_records.startswith(prior_records)
+                and expected_probe in new_records[len(prior_records):],
+                "matching pin did not probe the original runtime over HTTP")
+        require(not (fixture.control / "pip-started").exists(), "matching pin invoked pip")
+        require(not pip_log.exists(), "matching pin created a pip log")
+        require(not list(fixture.home.glob(".venv.staging.*")), "matching pin left staging")
+        require(not (fixture.control / "init-count").exists(), "matching pin reran init")
+        fixture.wait_kernel()
+        require(identity_matches(fixture.runtime_identities[-1], original_process),
+                "matching pin changed the runtime process identity")
+
+
+def case_running_bad_import_wrong_version_repairs(parent, hashes):
+    with Fixture(parent, "running-bad-import-wrong-version", hashes) as fixture:
+        fixture.create_runtime("2.4.0", bad_import=True)
+        fixture.pin.write_text("2.4.1\n")
+        fixture.user_data.joinpath("config.json").write_text("existing config\n")
+        fixture.start_manager(expect_kernel=True)
+        runtime = fixture.runtime_health()
+        require(runtime["installed"] is True and runtime["version"] == ""
+                and runtime["metadata_repairable"] is True
+                and runtime["running"] is True and runtime["reachable"] is True,
+                f"running bad-import precondition not met: {runtime}")
+        original_process = fixture.runtime_identities[-1]
+        original_inode = (fixture.venv / "bin/python3").stat().st_ino
+        prior = fixture.control_status()
+        records = fixture.venv / ".qwenpaw-test-runtime-health"
+        with records.open() as probe_records:
+            prior_records = probe_records.read()
+            code, output = fixture.callback("install")
+            probe_records.seek(0)
+            new_records = probe_records.read()
+
+        expected_probe = f"pid={original_process['pid']} version=2.4.0\n"
+        require(new_records.startswith(prior_records)
+                and expected_probe in new_records[len(prior_records):],
+                "wrong-version callback did not probe the original runtime over HTTP")
+        require(code == 0, f"wrong-version repair callback failed (rc={code}): {output}")
+        task = fixture.wait_task(prior["seq"])
+        require(task["phase"] == "done", f"wrong-version repair failed: {task}")
+        require(not alive(original_process), "wrong-version runtime was kept running")
+        require((fixture.venv / "bin/python3").stat().st_ino != original_inode,
+                "wrong-version runtime was not replaced")
+        require((fixture.venv / "installed").read_text() == "2.4.1\n",
+                "wrong-version repair did not install the exact pin")
+        require(fixture.pin.read_text() == "2.4.1\n", "wrong-version repair changed the pin")
+        require((fixture.control / "pip-started").exists(), "wrong-version repair did not run pip")
+        fixture.wait_kernel()
+
+
 def case_exact_repair(parent, hashes):
     with Fixture(parent, "exact-repair", hashes) as fixture:
         fixture.create_runtime("1.7.0", bad_import=True)
         fixture.pin.write_text("2.8.4\n")
+        fixture.env["SUPERVISOR_AUTOSTART"] = "0"
         fixture.stage_installed_helper()
         before_inode = (fixture.venv / "bin/python3").stat().st_ino
         fixture.start_manager(expect_kernel=False)
+        runtime = fixture.runtime_health()
+        require(runtime["installed"] is True and runtime["version"] == ""
+                and runtime["metadata_repairable"] is True and runtime["running"] is False,
+                f"stopped bad-import precondition not met: {runtime}")
         prior = fixture.control_status()
         code, output = fixture.callback("upgrade")
         require(code == 0, f"pinned repair callback failed (rc={code}): {output}")
@@ -1122,7 +1241,7 @@ def case_uninstall(parent, hashes, choice):
             for path in (fixture.home, fixture.etc, fixture.var, fixture.user_data, fixture.user_secret):
                 require(not path.exists(), f"remove left deletion target: {path}")
         else:
-            require(not fixture.venv.exists(), f"uninstall {choice} did not remove only the venv")
+            require(not fixture.venv.exists(), f"uninstall {choice} removed the preserved venv")
             require((fixture.home / "workspace-sentinel").exists(),
                     f"uninstall {choice} removed home data")
             require((fixture.etc / "settings").exists(), f"uninstall {choice} removed etc data")
@@ -1155,7 +1274,7 @@ def case_fnos_layout_uninstall(parent, hashes, choice):
                          fixture.user_data, fixture.user_secret):
                 require(not path.exists(), f"remove left real fnOS deletion target: {path}")
         else:
-            require(not fixture.venv.exists(), "keep uninstall left home/venv")
+            require(not fixture.venv.exists(), "keep uninstall removed home/venv")
             require(fixture.pin.read_text() == "2.4.1\n", "keep uninstall removed the version pin")
             require(fixture.helper.is_file(), "keep uninstall removed the var helper")
             require((fixture.home / "workspace-sentinel").read_text() == "home-sentinel\n",
@@ -1241,6 +1360,8 @@ def case_task_failure(parent, hashes):
         require(fixture.pin.read_bytes() == before_pin, "failed task changed the prior pin")
         require((fixture.venv / "bin/python3").stat().st_ino == active_inode,
                 "failed task did not restore the original active venv")
+        require(sha256(fixture.helper) == sha256(fixture.binary),
+                "failed upgrade left the persistent helper out of sync with the installed target")
         require(not list(fixture.home.glob(".venv.staging.*")), "failed task left a staging directory")
 
 
@@ -1296,7 +1417,13 @@ def main():
                  lambda: case_stop_running_target_without_execute_bit(parent, hashes), failures)
         run_case("healthy upgrade preserves version, init count and pip count",
                  lambda: case_healthy_upgrade(parent, hashes), failures)
-        run_case("bad import repair honors exact pin and commits fresh staging",
+        run_case("upgrade keep preserves the exact runtime without installing",
+                 lambda: case_upgrade_preserves_runtime(parent, hashes), failures)
+        run_case("running bad-import runtime matching the pin survives install callback",
+                 lambda: case_running_bad_import_matching_pin_is_kept(parent, hashes), failures)
+        run_case("running bad-import runtime with wrong version is repaired",
+                 lambda: case_running_bad_import_wrong_version_repairs(parent, hashes), failures)
+        run_case("stopped bad-import repair honors exact pin and commits fresh staging",
                  lambda: case_exact_repair(parent, hashes), failures)
         run_case("upgrade without a pin fails without invoking pip",
                  lambda: case_missing_pin(parent, hashes), failures)

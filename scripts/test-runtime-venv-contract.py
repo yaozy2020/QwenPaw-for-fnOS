@@ -104,7 +104,10 @@ def create_wheel(wheel_dir, distribution, version, files, entry_points=None):
     wheel_path = wheel_dir / filename
     with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in sorted(contents.items()):
-            archive.writestr(name, data)
+            member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            member.compress_type = zipfile.ZIP_DEFLATED
+            member.external_attr = 0o644 << 16
+            archive.writestr(member, data)
     return wheel_path
 
 
@@ -197,26 +200,80 @@ def create_probe_wheel(wheel_dir):
     )
 
 
+def create_uv_test_adapter_wheel(wheel_dir):
+    adapter = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "import subprocess\n"
+        "import sys\n"
+        "from urllib.parse import urlsplit\n"
+        "\n"
+        "def reject(reason):\n"
+        "    print(f'local uv test adapter rejected invocation: {reason}', file=sys.stderr)\n"
+        "    return 2\n"
+        "\n"
+        "def main():\n"
+        "    args = sys.argv[1:]\n"
+        "    if len(args) != 6 or args[:3] != ['pip', 'install', '--upgrade'] or args[4] != '--python':\n"
+        "        return reject(f'unexpected argv {args!r}')\n"
+        "    requirement = args[3]\n"
+        "    prefix = 'qwenpaw=='\n"
+        f"    if not requirement.startswith(prefix) or requirement[len(prefix):] not in {VERSIONS!r}:\n"
+        "        return reject(f'unexpected requirement {requirement!r}')\n"
+        "    python = str(Path(sys.prefix) / 'bin' / 'python3')\n"
+        "    if args[5] != python or not Path(python).is_file():\n"
+        "        return reject(f'--python must target this venv: {python!r}')\n"
+        "    if str(Path(sys.argv[0]).absolute()) != str(Path(sys.prefix) / 'bin' / 'uv'):\n"
+        "        return reject('uv executable is not installed in this venv')\n"
+        "    index = os.environ.get('UV_DEFAULT_INDEX', '')\n"
+        "    try:\n"
+        "        parsed = urlsplit(index)\n"
+        "        local_index = (parsed.scheme == 'http' and parsed.hostname == '127.0.0.1'\n"
+        "                       and parsed.port is not None and parsed.path == '/simple'\n"
+        "                       and not parsed.username and not parsed.password\n"
+        "                       and not parsed.query and not parsed.fragment)\n"
+        "    except ValueError:\n"
+        "        local_index = False\n"
+        "    if not local_index or index != os.environ.get('QWENPAW_CONTRACT_INDEX'):\n"
+        "        return reject(f'UV_DEFAULT_INDEX must be the localhost test index, got {index!r}')\n"
+        "    print('local uv test adapter: installing via venv pip and localhost index', flush=True)\n"
+        "    return subprocess.run([\n"
+        "        python, '-m', 'pip', 'install', '--upgrade',\n"
+        "        '--disable-pip-version-check', '--no-cache-dir', '--no-input',\n"
+        "        '--no-deps', '--only-binary=:all:', '--index-url', index, requirement,\n"
+        "    ], check=False).returncode\n"
+    )
+    return create_wheel(
+        wheel_dir,
+        "uv",
+        "0.0.0",
+        {"runtime_contract_uv_adapter.py": adapter.encode()},
+        "[console_scripts]\nuv = runtime_contract_uv_adapter:main\n",
+    )
+
+
 class SimpleIndexHandler(BaseHTTPRequestHandler):
     wheel_dir = None
     versions = ()
+    uv_wheel = None
     requests = []
     requests_lock = threading.Lock()
 
-    def _respond(self, send_body):
-        path = urlsplit(self.path).path
+    def _record_request(self):
         with self.requests_lock:
-            self.requests.append((self.client_address[0], path, self.headers.get("Host", "")))
+            self.requests.append((self.client_address[0], self.command, self.path, self.headers.get("Host", "")))
+
+    def _respond(self, send_body):
+        self._record_request()
+        path = urlsplit(self.path).path
+        if not self.path.startswith("/"):
+            self.send_error(403)
+            return
 
         if path == "/simple/qwenpaw/":
-            port = self.server.server_address[1]
-            links = "".join(
-                f'<a href="http://127.0.0.1:{port}/packages/{quote(f"qwenpaw-{version}-py3-none-any.whl")}">'
-                f'qwenpaw-{version}-py3-none-any.whl</a><br>\n'
-                for version in self.versions
-            )
-            body = f"<!doctype html><html><body>{links}</body></html>".encode()
-            content_type = "text/html; charset=utf-8"
+            filenames = [f"qwenpaw-{version}-py3-none-any.whl" for version in self.versions]
+        elif path == "/simple/uv/":
+            filenames = [self.uv_wheel.name]
         elif path.startswith("/packages/"):
             filename = path.removeprefix("/packages/")
             if Path(filename).name != filename:
@@ -232,6 +289,16 @@ class SimpleIndexHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
+        if path.startswith("/simple/"):
+            port = self.server.server_address[1]
+            links = "".join(
+                f'<a href="http://127.0.0.1:{port}/packages/{quote(filename)}">'
+                f"{filename}</a><br>\n"
+                for filename in filenames
+            )
+            body = f"<!doctype html><html><body>{links}</body></html>".encode()
+            content_type = "text/html; charset=utf-8"
+
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -245,15 +312,25 @@ class SimpleIndexHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self._respond(False)
 
+    def do_CONNECT(self):
+        self._record_request()
+        self.send_error(403)
+
     def log_message(self, *_args):
         pass
 
 
-def start_simple_index(wheel_dir, versions):
+def start_simple_index(wheel_dir, versions, uv_wheel):
     handler = type(
         "LocalSimpleIndexHandler",
         (SimpleIndexHandler,),
-        {"wheel_dir": wheel_dir, "versions": versions, "requests": [], "requests_lock": threading.Lock()},
+        {
+            "wheel_dir": wheel_dir,
+            "versions": versions,
+            "uv_wheel": uv_wheel,
+            "requests": [],
+            "requests_lock": threading.Lock(),
+        },
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     server.daemon_threads = True
@@ -404,8 +481,16 @@ def create_trim_fixture(root, system_python, index_url, supervisor_port, kernel_
     (paths["share"] / ".qwenpaw").mkdir()
 
     env = test_environment(root)
+    proxy_url = f"http://{urlsplit(index_url).netloc}"
     env.update(
         {
+            "PIP_RETRIES": "0",
+            "HTTP_PROXY": proxy_url,
+            "http_proxy": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "https_proxy": proxy_url,
+            "NO_PROXY": "127.0.0.1",
+            "no_proxy": "127.0.0.1",
             "TRIM_PKGHOME": str(paths["home"]),
             "TRIM_PKGVAR": str(paths["var"]),
             "TRIM_PKGETC": str(paths["etc"]),
@@ -517,6 +602,41 @@ def submit_install(base, version, index_url):
     )
 
 
+def check_local_uv_adapter_guards(active, env, root, expected_version, label):
+    uv = active / "bin/uv"
+    check(uv.is_file() and os.access(uv, os.X_OK), f"{label}: local uv test adapter is installed in active venv")
+    if not uv.is_file() or not os.access(uv, os.X_OK):
+        return
+
+    python = str(active / "bin/python3")
+    valid_args = ["pip", "install", "--upgrade", f"qwenpaw=={expected_version}", "--python", python]
+    local_env = dict(env)
+    local_env["UV_DEFAULT_INDEX"] = env["QWENPAW_CONTRACT_INDEX"]
+    remote_env = dict(local_env)
+    remote_env["UV_DEFAULT_INDEX"] = "https://pypi.org/simple"
+    cases = (
+        ("rejects the wrong uv subcommand", ["venv", *valid_args[1:]], local_env),
+        ("rejects a missing --python", valid_args[:-2], local_env),
+        ("rejects extra uv arguments", valid_args + ["--no-deps"], local_env),
+        ("rejects an unexpected requirement", [*valid_args[:3], "other-package", *valid_args[4:]], local_env),
+        (
+            "rejects a --python path outside the active venv",
+            valid_args[:-1] + [str(root / "not-the-active-venv/bin/python3")],
+            local_env,
+        ),
+        ("rejects a non-local UV_DEFAULT_INDEX", valid_args, remote_env),
+    )
+    for description, args, probe_env in cases:
+        try:
+            result = run_process([uv, *args], env=probe_env, cwd=root, timeout=15)
+            check(
+                result.returncode == 2 and "local uv test adapter rejected invocation" in result.stderr,
+                f"{label}: local uv test adapter {description} (exit={result.returncode})",
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            check(False, f"{label}: local uv test adapter {description}: {error}")
+
+
 def check_generation(paths, env, root, expected_version, kernel_port, probe_wheel, base, label):
     active = paths["home"] / "venv"
     python = active / "bin/python3"
@@ -525,6 +645,7 @@ def check_generation(paths, env, root, expected_version, kernel_port, probe_whee
     check(python.is_file() and os.access(python, os.X_OK), f"{label}: active venv contains an executable real python3")
     if not python.is_file() or not os.access(python, os.X_OK):
         return
+    check_local_uv_adapter_guards(active, env, root, expected_version, label)
 
     inspection_code = (
         "import json, pathlib, sys, qwenpaw; "
@@ -789,13 +910,19 @@ def run_contract(root):
     for assertion in (
         "release supervisor is exercised through authenticated real HTTP install/status APIs",
         "real local Python venv has active sys.prefix, qwenpaw import, executable console script, and pip",
-        "all qwenpaw release wheels are fetched only from a localhost PEP 503 Simple Index",
+        "the local uv test adapter strictly validates uv argv and delegates to the venv's real pip via UV_DEFAULT_INDEX",
+        "qwenpaw and uv bootstrap wheels are fetched only from a localhost PEP 503 Simple Index",
+        "real uv networking is not exercised by this local test adapter",
         "post-activation pip install/check and package import work without an external index",
         "the live /api/version health and supervisor status match the installed package generation",
         "an installable but non-starting generation triggers rollback and the previous generation remains usable",
         "release SHA256 is recorded and the owned supervisor is safely stopped before temporary-root cleanup",
     ):
         print(f"  - {assertion}", flush=True)
+    print(
+        "LOCAL_UV_ADAPTER_SCOPE=local test-only uv wheel; real uv network behavior is not covered",
+        flush=True,
+    )
 
     env = test_environment(root)
     system_python = Path(sys.executable).resolve()
@@ -824,8 +951,10 @@ def run_contract(root):
     wheel_dir.mkdir()
     qwenpaw_wheels = make_qwenpaw_wheels(wheel_dir)
     probe_wheel = create_probe_wheel(wheel_dir)
+    uv_wheel = create_uv_test_adapter_wheel(wheel_dir)
     for version, wheel in qwenpaw_wheels.items():
         print(f"LOCAL_WHEEL_SHA256_{version}={hashlib.sha256(wheel.read_bytes()).hexdigest()} {wheel.name}", flush=True)
+    print(f"LOCAL_UV_ADAPTER_SHA256={hashlib.sha256(uv_wheel.read_bytes()).hexdigest()} {uv_wheel.name}", flush=True)
 
     index_server = None
     index_thread = None
@@ -837,12 +966,13 @@ def run_contract(root):
     supervisor_env = None
     kernel_port = None
     try:
-        index_server, index_thread, index_url = start_simple_index(wheel_dir, VERSIONS)
+        index_server, index_thread, index_url = start_simple_index(wheel_dir, VERSIONS, uv_wheel)
         sup_port = free_port()
         kernel_port = free_port((sup_port,))
         paths, supervisor_env = create_trim_fixture(root, system_python, index_url, sup_port, kernel_port)
         supervisor, supervisor_identity, supervisor_log_file, supervisor_log_path, base = start_supervisor(root, supervisor_env)
-        print(f"LOCAL_SIMPLE_INDEX={index_url}/qwenpaw/", flush=True)
+        print(f"LOCAL_QWENPAW_INDEX={index_url}/qwenpaw/", flush=True)
+        print(f"LOCAL_UV_BOOTSTRAP_INDEX={index_url}/uv/", flush=True)
         print(f"SUPERVISOR_HTTP={base}", flush=True)
         print(f"KERNEL_HTTP=http://127.0.0.1:{kernel_port}", flush=True)
         check(True, "release supervisor started as an identity-verified isolated process with temporary TRIM paths")
@@ -909,11 +1039,38 @@ def run_contract(root):
 
         with index_server.RequestHandlerClass.requests_lock:
             requests = tuple(index_server.RequestHandlerClass.requests)
-        requested_wheels = {Path(path).name for _host, path, _header in requests if path.startswith("/packages/")}
+        index_host = f"127.0.0.1:{index_server.server_address[1]}"
+        allowed_wheels = {wheel.name for wheel in qwenpaw_wheels.values()} | {uv_wheel.name}
+        allowed_targets = {"/simple/qwenpaw/", "/simple/uv/"} | {
+            f"/packages/{filename}" for filename in allowed_wheels
+        }
+        requested_wheels = {
+            Path(target).name for _peer, method, target, _host in requests
+            if method == "GET" and target.startswith("/packages/")
+        }
         check(
-            all(host == "127.0.0.1" and path.startswith(("/simple/qwenpaw/", "/packages/")) for host, path, _header in requests),
-            f"Simple Index observed only loopback index/wheel paths ({len(requests)} requests)",
+            bool(requests)
+            and all(
+                peer == "127.0.0.1" and method in ("GET", "HEAD") and host == index_host
+                and target in allowed_targets
+                for peer, method, target, host in requests
+            ),
+            f"Simple Index observed only expected localhost index/wheel requests ({len(requests)} requests)",
         )
+        uv_index_gets = sum(
+            peer == "127.0.0.1" and method == "GET" and target == "/simple/uv/" and host == index_host
+            for peer, method, target, host in requests
+        )
+        uv_wheel_gets = sum(
+            peer == "127.0.0.1" and method == "GET" and target == f"/packages/{uv_wheel.name}" and host == index_host
+            for peer, method, target, host in requests
+        )
+        check(
+            uv_index_gets >= len(VERSIONS) and uv_wheel_gets >= len(VERSIONS),
+            f"all {len(VERSIONS)} uv bootstraps fetched the localhost index and test adapter wheel"
+            f" (index GETs={uv_index_gets}, wheel GETs={uv_wheel_gets})",
+        )
+        check(uv_wheel.name in requested_wheels, "local index served the uv test adapter wheel")
         for version in VERSIONS:
             filename = qwenpaw_wheels[version].name
             check(filename in requested_wheels, f"local index served requested qwenpaw {version} wheel")

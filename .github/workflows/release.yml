@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   build-and-release:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -33,7 +34,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version: '22'
 
       - name: Determine tag
         id: tag
@@ -170,6 +171,16 @@ jobs:
           STRICT_CI: "1"
         run: bash scripts/lint.sh
 
+      - name: Install pinned musl build toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: FPK audit self-test
+        run: bash scripts/audit-fpk.sh --self-test
+
       # [5] 双构建 SHA256 对比。
       # 覆盖范围:web 打包与 FPK 封装的确定性(每次都重算)。
       # 不覆盖:cargo target 复用带来的同工具链稳定输出 —— 真正的洁净房重建
@@ -229,6 +240,13 @@ jobs:
       - name: Supervisor API and configuration transactions
         run: python3 scripts/test-supervisor-api.py
 
+      - name: Musl release Gateway UDS regression
+        run: |
+          sudo -E env \
+            QWENPAW_TEST_SUP_BIN="${{ github.workspace }}/supervisor/target/x86_64-unknown-linux-musl/release/qwenpaw-supervisor" \
+            QWENPAW_TEST_RUNTIME_BIN="${{ github.workspace }}/supervisor/target/release/qwenpaw-test-runtime" \
+            python3 scripts/test-gateway-uds.py
+
       # [6] FPK 内容全量审计
       - name: Audit generated FPK
         run: |
@@ -251,20 +269,18 @@ jobs:
           cat <<EOF > release_notes.md
           # QwenPaw for fnOS ${TAG} (外壳版本 v${VERSION})
 
-          ### 📦 发布包校验清单
-          - **安装包**: \`${FPK_NAME}\`
-          - **SHA256**: \`${SHA256}\`
+          ## 安装包校验
+          - 安装包：\`${FPK_NAME}\`
+          - SHA256：\`${SHA256}\`
 
-          ---
+          这是第三方打包的部署外壳，与 QwenPaw 上游团队无隶属关系。QwenPaw 本体不随包分发，安装时需要从所选 PyPI 镜像下载。
 
-          ### ⚠️ 已知限制与运行说明 (Known Limitations)
-          1. **桌面图标动态隐藏限制**：
-             - 由于飞牛 fnOS 桌面平台采用静态应用索引与桌面会话缓存机制，内核处于未安装或仅卸载状态时，外壳设置的 \`NoDisplay=true\` 状态可能不会立即在当前打开的桌面视图中消失；
-             - 如需刷新图标状态，可按 \`F5\` 刷新浏览器页面或重新进入应用中心。
-          2. **独立事务自愈保障**：
-             - 本版本已正式闭环 venv 独立事务状态机。安装中途如遭遇断电或异常中断，监督者重启时会自动回滚或自愈，保障环境单一权威。
-          3. **服务端口修改说明**：
-             - 修改端口后监督者会自动热重启，请使用新端口访问管理控制台。
+          ## 使用说明与限制
+          - 支持 fnOS 1.2.0800 或更高版本，当前仅提供 x86_64 包。
+          - 内核仅监听 loopback；控制台与独立图标走 fnOS Gateway。独立 Web 反代默认仅允许本机访问，需要外部访问时须在控制台显式开启。
+          - 外壳暂不支持代理 WebSocket，相关请求返回 501。
+          - fnOS 不允许原位安装低版本 FPK。曾安装早期 2.x RC 的测试设备须先保留数据卸载，再安装本版本。
+          - 外壳升级不主动更改已安装内核版本；运行环境缺损时仅按已有精确版本钉修复。
           EOF
           cat release_notes.md
 

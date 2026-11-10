@@ -38,12 +38,14 @@ pub fn run(cfg: &Config) -> i32 {
     let log_path = env::var_os("TRIM_TEMP_LOGFILE")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);
+    let preserve_runtime = env::var("TRIM_APP_STATUS").is_ok_and(|status| status == "UPGRADE");
     match service::with_lifecycle_lock(cfg, |expected_exe| {
-        run_with(
+        run_with_runtime(
             cfg,
             &option,
             share_paths.as_deref(),
             log_path.as_deref(),
+            preserve_runtime,
             || match service::stop_for_uninstall(cfg, expected_exe) {
                 Ok(()) => 0,
                 Err(error) => {
@@ -62,6 +64,7 @@ pub fn run(cfg: &Config) -> i32 {
     }
 }
 
+#[cfg(test)]
 fn run_with<FStop, FRemove>(
     cfg: &Config,
     option: &str,
@@ -74,8 +77,24 @@ where
     FStop: FnOnce() -> i32,
     FRemove: FnMut(&Path) -> io::Result<()>,
 {
+    run_with_runtime(cfg, option, share_paths, log_path, false, stop, remove)
+}
+
+fn run_with_runtime<FStop, FRemove>(
+    cfg: &Config,
+    option: &str,
+    share_paths: Option<&str>,
+    log_path: Option<&Path>,
+    preserve_runtime: bool,
+    stop: FStop,
+    remove: FRemove,
+) -> i32
+where
+    FStop: FnOnce() -> i32,
+    FRemove: FnMut(&Path) -> io::Result<()>,
+{
     let (mode, unknown_option) = parse_mode(option);
-    let plan = match build_plan(cfg, mode, share_paths) {
+    let plan = match build_plan_with_runtime(cfg, mode, share_paths, preserve_runtime) {
         Ok(plan) => plan,
         Err(error) => {
             if unknown_option {
@@ -107,7 +126,11 @@ where
     }
     match plan.mode {
         Mode::Keep => log_message(
-            "用户选择保留数据；仅移除 home/venv，保留 pin、共享数据和认证。",
+            if preserve_runtime {
+                "外壳更新保留数据与 home/venv；不删除运行环境。"
+            } else {
+                "用户选择保留数据；移除 home/venv，保留 pin、共享数据和认证。"
+            },
             log_path,
             &guards,
         ),
@@ -159,7 +182,17 @@ fn parse_mode(option: &str) -> (Mode, bool) {
     }
 }
 
+#[cfg(test)]
 fn build_plan(cfg: &Config, mode: Mode, share_paths: Option<&str>) -> Result<Plan, String> {
+    build_plan_with_runtime(cfg, mode, share_paths, false)
+}
+
+fn build_plan_with_runtime(
+    cfg: &Config,
+    mode: Mode,
+    share_paths: Option<&str>,
+    preserve_runtime: bool,
+) -> Result<Plan, String> {
     let home = validate_package_directory(Path::new(&cfg.home_dir), "home", "@apphome")?;
     let etc = validate_package_directory(Path::new(&cfg.etc_dir), "etc", "@appconf")?;
     let var = validate_package_directory(Path::new(&cfg.var_dir), "var", "@appdata")?;
@@ -171,13 +204,17 @@ fn build_plan(cfg: &Config, mode: Mode, share_paths: Option<&str>) -> Result<Pla
             if Path::new(&cfg.kernel_venv) != venv {
                 return Err("kernel_venv does not match home/venv".into());
             }
-            let venv = validate_named_directory(&venv, "venv", "home virtual environment")?;
+            validate_named_directory(&venv, "venv", "home virtual environment")?;
             Ok(Plan {
                 mode,
-                targets: vec![DeleteTarget {
-                    label: "home/venv",
-                    path: venv,
-                }],
+                targets: if preserve_runtime {
+                    Vec::new()
+                } else {
+                    vec![DeleteTarget {
+                        label: "home/venv",
+                        path: venv,
+                    }]
+                },
                 warnings: Vec::new(),
             })
         }
@@ -573,7 +610,9 @@ mod tests {
 
     use crate::config::Config;
 
-    use super::{build_plan, parse_mode, remove_targets, remove_tree, run_with, Mode};
+    use super::{
+        build_plan, parse_mode, remove_targets, remove_tree, run_with, run_with_runtime, Mode,
+    };
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -689,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_removes_only_venv_and_preserves_pin_data_and_auth() {
+    fn keep_removes_runtime_and_preserves_pin_data_and_auth() {
         let root = TempTrimRoot::new();
         let cfg = root.config();
         root.populate(&cfg);
@@ -705,6 +744,22 @@ mod tests {
             .with_file_name(".qwenpaw.secret")
             .join("auth.json")
             .exists());
+    }
+
+    #[test]
+    fn upgrade_preserves_runtime_without_environment_mutation() {
+        let root = TempTrimRoot::new();
+        let cfg = root.config();
+        root.populate(&cfg);
+
+        assert_eq!(
+            run_with_runtime(&cfg, "keep", None, None, true, || 0, remove_tree),
+            0
+        );
+
+        assert!(Path::new(&cfg.home_dir).join("venv").exists());
+        assert!(Path::new(&cfg.var_dir).join("qwenpaw-version").exists());
+        assert!(Path::new(&cfg.share_dir).join("config.json").exists());
     }
 
     #[test]

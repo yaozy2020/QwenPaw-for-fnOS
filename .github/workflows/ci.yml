@@ -43,6 +43,9 @@ jobs:
       - name: Preflight (version SSOT + repo hygiene)
         run: bash scripts/preflight.sh
 
+      - name: FPK audit self-test
+        run: bash scripts/audit-fpk.sh --self-test
+
       - name: Verify AUDIT_REPORT.md is up-to-date
         run: python3 scripts/gen-audit.py --check
 

@@ -82,7 +82,8 @@ def main():
         ok = cur_base == base
         want = base
         if not ok:
-            want = f"{base}[-rc.N]"
+            if cur_suffix and re.fullmatch(r"rc\.[1-9][0-9]*", cur_suffix):
+                want = f"{base}-{cur_suffix}"
         elif cur_suffix:
             # 允许 rc.N 预发布串,但序号不得低于 tag 的 rc 序号
             m_tag_rc = re.search(r"-rc\.(\d+)$", tag) if tag else None

@@ -33,9 +33,9 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
     let rawVersionList: VersionItem[] = [];
     let userPickedVersion = false;
-    let selectedVersion = "2.2.2.post1";
-    let latestStableVer = "2.2.2.post1";
-    let latestBetaVer = "2.3.0b2";
+    let selectedVersion = "";
+    let latestStableVer = "";
+    let latestBetaVer = "";
 
     
     // 语义化版本比对函数:分级权重 [major, minor, patch, stage, num]
@@ -331,6 +331,15 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       return error instanceof Error ? error.message : String(error);
     }
 
+    function operationSucceeded<T extends { success?: boolean; message?: string }>(
+      result: { ok: boolean; status: number; data: T },
+    ): T {
+      if (!result.ok || result.data.success !== true) {
+        throw new Error(result.data.message || `操作失败（HTTP ${result.status}）`);
+      }
+      return result.data;
+    }
+
     // 服务状态监控 (全空值保护，稳健守护)
     // 轮询请求的序号守卫。fetch 的完成顺序不保证与发起顺序一致:
     // 后端短暂 502/超时后,旧请求可能晚于新请求返回,此时若直接渲染,
@@ -367,7 +376,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         // 从降级态恢复时必须解禁,否则一次断连后按钮永久禁用
         const upBtnOk = document.getElementById("btnUpgradeAction") as HTMLButtonElement | null;
         if (upBtnOk) {
-          upBtnOk.disabled = false;
+          upBtnOk.disabled = !selectedVersion;
           upBtnOk.title = "";
         }
 
@@ -575,7 +584,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
       try {
         showToast(`正在保存新端口 ${newPort}...`);
-        const { data } = await api.changePort(newPort);
+        const data = operationSucceeded(await api.changePort(newPort));
         if (data.success === false) {
           // 后端事务失败(端口冲突/回滚完成)必须如实呈现,不提示"已更改"
           showToast("修改端口失败: " + (data.message || "未知错误"));
@@ -596,6 +605,8 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         if (element && Number.isInteger(data.port) && data.port > 0) {
           element.innerText = String(data.port);
         }
+        const publicToggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
+        if (publicToggle) publicToggle.checked = data.public === true;
       } catch (e) {
         console.error("fetchWebProxyPort err:", e);
       }
@@ -630,7 +641,8 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       });
       if (!ok) return;
       try {
-        const { data } = await api.changeWebProxyPort(newPort);
+        const publicAccess = (document.getElementById("webProxyPublic") as HTMLInputElement | null)?.checked === true;
+        const data = operationSucceeded(await api.changeWebProxyPort(newPort, publicAccess));
         if (data.success === false) {
           showToast("修改反代端口失败: " + (data.message || "未知错误"));
           return;
@@ -640,6 +652,32 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         showToast(`Web 反代端口已切换为 ${data.port}`);
       } catch (e) {
         showToast("修改反代端口失败: " + errorMessage(e));
+      }
+    }
+
+    async function setWebProxyPublic() {
+      const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
+      if (!toggle) return;
+      const publicAccess = toggle.checked;
+      if (publicAccess) {
+        const ok = await showModal({
+          title: "允许外部访问 Web 反代",
+          message: "开启后，同一网络中的其他设备可通过该端口访问 QwenPaw 主 Web。请确认已设置 QwenPaw 管理员密码。",
+          type: "warn",
+          confirmText: "允许外部访问",
+        });
+        if (!ok) {
+          toggle.checked = false;
+          return;
+        }
+      }
+      const port = Number(document.getElementById("valWebProxyPort")?.innerText) || 0;
+      try {
+        operationSucceeded(await api.changeWebProxyPort(port, publicAccess));
+        showToast(publicAccess ? "已允许外部访问 Web 反代" : "Web 反代已改为仅本机访问");
+      } catch (e) {
+        toggle.checked = !publicAccess;
+        showToast("切换访问范围失败: " + errorMessage(e));
       }
     }
 
@@ -655,7 +693,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
       try {
         showToast("正在请求重置...");
-        const { data } = await api.resetAuth();
+        const data = operationSucceeded(await api.resetAuth());
         if (data.success === false) {
           showToast("重置失败: " + (data.message || "服务重启异常,请查看日志"));
         } else {
@@ -704,7 +742,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
       try {
         showToast(`正在发送${actionName}指令...`);
-        const { data } = await api.controlService(act);
+        const data = operationSucceeded(await api.controlService(act));
         showToast(data.message || `${actionName}指令已成功执行`);
         setTimeout(() => { fetchStatus(); fetchLogs(); }, 2000);
       } catch (e) {
@@ -799,7 +837,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         const { data } = result;
         if (result.ok && data.success && Array.isArray(data.versions)) {
           rawVersionList = data.versions;
-          latestStableVer = data.latest_stable || "2.2.2.post1";
+          latestStableVer = data.latest_stable || "";
           const firstBeta = rawVersionList.find(v => v.is_beta);
           if (firstBeta) latestBetaVer = firstBeta.version;
           if (!userPickedVersion) {
@@ -895,11 +933,17 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     }
 
     function updateUpgradeButtonText() {
-      const btn = document.getElementById("btnUpgradeAction");
+      const btn = document.getElementById("btnUpgradeAction") as HTMLButtonElement | null;
       const warnBar = document.getElementById("downgradeWarnBar");
       if (!btn) return;
 
-      const activeSelected = selectedVersion || latestStableVer || "2.2.2.post1";
+      if (!selectedVersion) {
+        btn.disabled = true;
+        btn.innerText = "正在加载可用版本...";
+        return;
+      }
+      btn.disabled = false;
+      const activeSelected = selectedVersion;
       // 内核未安装：按钮语义是「安装」而非「更新/降级」
       if (!currentRunningVersion) {
         btn.innerText = `安装内核 v${activeSelected}`;
@@ -929,6 +973,10 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
     // 升级执行与专属流式终端
     async function checkOrUpgrade() {
+      if (!selectedVersion) {
+        showToast("可用版本尚未加载，请检查下载源后重试");
+        return;
+      }
       let ok = false;
 
       if (!currentRunningVersion) {
@@ -992,10 +1040,8 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       pollFailureStreak = 0;
       openUpgradeModal(false);
 
-      // 触发安装:fetch(keepalive) 为主 —— 能读到受理响应(成功 seq / busy 提示),
-      // 失败才退回 sendBeacon(浏览器保证尽力送达,但响应不可读)。
-      // 后端接单与页面生死解耦:墓碑只中断界面,NAS 侧任务照常执行
-      let accepted = false;
+      // fetch(keepalive) 直接受理；网络错误只重连后端任务，不另行重放写请求。
+      // 后端任务与页面生命周期分离，页面重建后按实例身份恢复。
       try {
         const result = await api.upgrade(selectedVersion, currentMirror());
         const d = result.data;
@@ -1010,28 +1056,20 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           closeUpgradeModal();
           return;
         }
+        if (!result.ok || d.success !== true) {
+          throw new Error(d.message || `安装受理失败（HTTP ${result.status}）`);
+        }
         if (typeof d.seq === "number") {
           installTask = acceptInstallTask(installTask, d.seq, d.instance); // 受理确认:后端已接单
           persistInstallTask(installTaskStorage(), installTask);
         }
-        accepted = true;
       } catch (e) {
         if (!(e instanceof ApiClientError) || e.kind !== "network") {
           showToast("安装请求失败: " + errorMessage(e));
           closeUpgradeModal();
           return;
         }
-        // 网络失败(切后台/网络抖动):退回当前协议的 sendBeacon,送达与否交给弹窗对 seq 的轮询
-        try {
-          const beacon = api.upgradeBeaconRequest(selectedVersion, currentMirror());
-          accepted = Boolean(navigator.sendBeacon && (beacon.body === undefined
-            ? navigator.sendBeacon(beacon.url)
-            : navigator.sendBeacon(beacon.url, beacon.body)));
-        } catch (e2) { accepted = false; }
-      }
-      if (!accepted) {
-        const subtitle = document.getElementById("upSubTitle");
-        if (subtitle) subtitle.innerText = "触发请求可能未送达,正在确认...";
+        openUpgradeModal(true);
       }
     }
 
@@ -1155,9 +1193,9 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       if (document.hidden) return;
       upPollLastAt = now;
 
-      if (!upLogsPollInFlight) {
+      if (!upLogsPollInFlight && installTask.taskSeq !== null && installTask.taskInstance !== null) {
         upLogsPollInFlight = true;
-        void api.upgradeLogs().then(logsRes => {
+        void api.upgradeLogs(installTask.taskSeq, installTask.taskInstance).then(logsRes => {
           if (!logsRes.ok) return;
           const ldata = logsRes.data;
           if (!ldata.success || !Array.isArray(ldata.logs)) return;
@@ -1201,6 +1239,12 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
               : phase === "starting" ? "正在启动并检查服务..."
                 : "安装任务正在执行...";
           updateUpgradeElement("upTerminal", element => { element.innerText = progress; });
+        }
+
+        if (observed.owned && !observed.terminal && Date.now() - upgradeStartedAt > UPGRADE_POLL_MAX_MS) {
+          stopUpgradePolling();
+          showUpgradePollingFailure(true);
+          return;
         }
 
         // 未归属且后端已无任务:10s 后给出出口,不显示成功.
@@ -1409,7 +1453,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
     // 内联 onclick/onchange 处理器需全局可见 —— esbuild IIFE 会封住顶层作用域
     Object.assign(window, {
-      fetchStatus, fetchLogs, controlService, changeServicePort, changeWebProxyPort, resetAuth,
+      fetchStatus, fetchLogs, controlService, changeServicePort, changeWebProxyPort, setWebProxyPublic, resetAuth,
       checkOrUpgrade, checkOnlineVersions, pickVersion, toggleHistoryDropdown,
       saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
       closeUpgradeModal, minimizeUpgradeModal, logGoPrev, logGoNext, logGoLatest,

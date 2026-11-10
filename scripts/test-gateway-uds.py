@@ -1052,8 +1052,12 @@ class GatewayUDSTests(unittest.TestCase):
         f.install_runtime()
         f.start()
         csrf = f.csrf()
-        for path in ("/status", "/logs", "/kernel/install-status", "/kernel/install-log", "/mirror"):
+        for path in ("/status", "/logs", "/kernel/install-status", "/mirror"):
             self.assertEqual(f.request(API + path)[0], 200, path)
+        self.assertEqual(f.request(API + "/kernel/install-log")[0], 404)
+        install = response_json(f.request(API + "/kernel/install-status"))
+        identified_log = f"/kernel/install-log?seq={install['seq']}&instance={install['instance']}"
+        self.assertEqual(f.request(API + identified_log)[0], 200)
         self.assertTrue(response_json(f.request(API + "/start", "POST", csrf, {}))["success"])
         wait_for(lambda: response_json(f.request(API + "/status"))["running"], "real helper kernel running")
         f.remember_tree()

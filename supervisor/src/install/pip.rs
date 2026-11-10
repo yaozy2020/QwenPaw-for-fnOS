@@ -1,4 +1,4 @@
-use super::{pip_args, truncate_utf8, InstallChannel, InstallState, Phase};
+use super::{truncate_utf8, uv_args, uv_bootstrap_args, InstallChannel, InstallState, Phase};
 use std::{
     io::{self, Read, Write},
     os::fd::AsRawFd,
@@ -27,6 +27,12 @@ const LOG_LINE_CAP: usize = 4096;
 const LOG_TOTAL_CAP: u64 = 1024 * 1024;
 const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Clone, Copy)]
+enum InstallerTool {
+    PipBootstrap,
+    Uv,
+}
 
 fn append_line(log: &mut Option<std::fs::File>, total: &Arc<Mutex<u64>>, raw: &str) {
     if let Some(f) = log.as_mut() {
@@ -93,24 +99,78 @@ where
 }
 
 impl InstallState {
-    pub(super) fn run_pip(
+    pub(super) fn run_uv(
         &self,
         python: &Path,
         channel: &InstallChannel,
         mirror: &str,
         pip_log: &str,
     ) -> Result<(), String> {
+        self.run_installer(
+            python,
+            channel,
+            mirror,
+            pip_log,
+            InstallerTool::PipBootstrap,
+            false,
+        )?;
+        self.run_installer(python, channel, mirror, pip_log, InstallerTool::Uv, true)
+    }
+
+    fn run_installer(
+        &self,
+        python: &Path,
+        channel: &InstallChannel,
+        mirror: &str,
+        pip_log: &str,
+        tool: InstallerTool,
+        append_log: bool,
+    ) -> Result<(), String> {
         use super::process::{install_pid_file, terminate_process_group};
         use std::os::unix::process::CommandExt;
+        let cache_dir = Path::new(pip_log)
+            .parent()
+            .ok_or_else(|| "安装日志路径缺少父目录".to_string())?
+            .join(match tool {
+                InstallerTool::PipBootstrap => "pip-cache",
+                InstallerTool::Uv => "uv-cache",
+            });
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|error| format!("创建安装缓存目录失败: {error}"))?;
         let mut cmd = Command::new(python);
-        cmd.arg("-m").arg("pip").args(pip_args(channel, mirror));
+        match tool {
+            InstallerTool::PipBootstrap => {
+                cmd.arg("-m").arg("pip").args(uv_bootstrap_args());
+                if !mirror.is_empty() {
+                    cmd.env("PIP_INDEX_URL", mirror);
+                }
+            }
+            InstallerTool::Uv => {
+                let uv = python
+                    .parent()
+                    .ok_or_else(|| "venv Python 路径缺少 bin 目录".to_string())?
+                    .join("uv");
+                cmd = Command::new(uv);
+                cmd.args(uv_args(channel))
+                    .arg("--python")
+                    .arg(python)
+                    .env("UV_DEFAULT_INDEX", mirror);
+            }
+        }
+        cmd.env(
+            match tool {
+                InstallerTool::PipBootstrap => "PIP_CACHE_DIR",
+                InstallerTool::Uv => "UV_CACHE_DIR",
+            },
+            cache_dir,
+        );
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
         let log = std::fs::OpenOptions::new()
             .create(true)
-            .write(true)
-            .truncate(true)
+            .append(append_log)
+            .truncate(!append_log)
             .open(pip_log)
             .ok();
         let total = Arc::new(Mutex::new(0u64));

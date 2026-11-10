@@ -115,17 +115,12 @@ function isJsonContentType(contentType: string): boolean {
   return mediaType === "application/json" || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
 }
 
-export interface ApiBeaconRequest {
-  url: string;
-  body?: Blob;
-}
-
 export interface ApiClient {
   readonly base: string;
   status(): Promise<ApiResult<StatusResponse>>;
   changePort(port: number): Promise<ApiResult<ApiMessageResponse>>;
-  webProxyPort(): Promise<ApiResult<{ port: number }>>;
-  changeWebProxyPort(port: number): Promise<ApiResult<ApiMessageResponse & { port: number }>>;
+  webProxyPort(): Promise<ApiResult<{ port: number; public: boolean }>>;
+  changeWebProxyPort(port: number, publicAccess: boolean): Promise<ApiResult<ApiMessageResponse & { port: number }>>;
   resetAuth(): Promise<ApiResult<ApiMessageResponse>>;
   uninstallKernel(): Promise<ApiResult<ApiMessageResponse>>;
   controlService(action: ServiceAction): Promise<ApiResult<ApiMessageResponse>>;
@@ -134,8 +129,7 @@ export interface ApiClient {
   versionList(): Promise<ApiResult<VersionListResponse>>;
   upgradeStatus(): Promise<ApiResult<InstallStatusResponse>>;
   upgrade(version: string, mirror: string): Promise<ApiResult<InstallStatusResponse>>;
-  upgradeBeaconRequest(version: string, mirror: string): ApiBeaconRequest;
-  upgradeLogs(): Promise<ApiResult<LogsResponse>>;
+  upgradeLogs(seq: number, instance: string): Promise<ApiResult<LogsResponse>>;
   logs(lines: number): Promise<ApiResult<LogsResponse>>;
   clearLogs(): Promise<ApiResult<ApiMessageResponse>>;
 }
@@ -223,20 +217,12 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     return post<InstallStatusResponse>("kernel/install", { version, mirror }, true);
   }
 
-  function upgradeBeaconRequest(version: string, mirror: string): ApiBeaconRequest {
-    const csrf = encodeURIComponent(readCsrfToken(cookie()));
-    return {
-      url: `${base}/kernel/install?_csrf=${csrf}`,
-      body: new Blob([JSON.stringify({ version, mirror })], { type: "application/json" }),
-    };
-  }
-
   return {
     base,
     status: () => get<StatusResponse>("status"),
     changePort: (port) => post<ApiMessageResponse>("port", { port }),
-    webProxyPort: () => get<{ port: number }>("web-proxy/port"),
-    changeWebProxyPort: (port) => post<ApiMessageResponse & { port: number }>("web-proxy/port", { port }),
+    webProxyPort: () => get<{ port: number; public: boolean }>("web-proxy/port"),
+    changeWebProxyPort: (port, publicAccess) => post<ApiMessageResponse & { port: number }>("web-proxy/port", { port, public: publicAccess }),
     resetAuth: () => post<ApiMessageResponse>("kernel/reset-auth"),
     uninstallKernel: () => post<ApiMessageResponse>("kernel/uninstall"),
     controlService: (action) => post<ApiMessageResponse>(action),
@@ -245,8 +231,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     versionList: () => get<VersionListResponse>("kernel/versions"),
     upgradeStatus: () => get<InstallStatusResponse>("kernel/install-status"),
     upgrade,
-    upgradeBeaconRequest,
-    upgradeLogs: () => get<LogsResponse>("kernel/install-log", "tail=40"),
+    upgradeLogs: (seq, instance) => get<LogsResponse>(
+      "kernel/install-log",
+      `tail=40&seq=${seq}&instance=${encodeURIComponent(instance)}`,
+    ),
     logs: (lines) => get<LogsResponse>("logs", `tail=${lines}`),
     clearLogs: () => post<ApiMessageResponse>("logs/clear"),
   };

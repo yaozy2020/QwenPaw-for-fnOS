@@ -343,6 +343,7 @@ pub(crate) mod test_support {
                     var_dir: var.to_string_lossy().into_owned(),
                     home_dir: home.to_string_lossy().into_owned(),
                     share_dir: share.to_string_lossy().into_owned(),
+                    etc_dir: self.0.to_string_lossy().into_owned(),
                     ui_config_file: self.0.join("ui-config").to_string_lossy().into_owned(),
                     kernel_log: var.join("kernel.log").to_string_lossy().into_owned(),
                     operations: Arc::new(tokio::sync::Mutex::new(())),
@@ -383,14 +384,18 @@ pub(crate) mod test_support {
             let thread_shutdown = Arc::clone(&shutdown);
             let worker = std::thread::spawn(move || {
                 use std::io::{Read, Write};
-                let body = br#"{"enabled":true,"has_users":true}"#;
                 while !thread_shutdown.load(std::sync::atomic::Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             let _ = stream
                                 .set_read_timeout(Some(std::time::Duration::from_millis(300)));
                             let mut request = [0; 4096];
-                            let _ = stream.read(&mut request);
+                            let size = stream.read(&mut request).unwrap_or_default();
+                            let body: &[u8] = if request[..size].starts_with(b"GET /api/version ") {
+                                br#"{"version":"2.3.0"}"#
+                            } else {
+                                br#"{"enabled":true,"has_users":true}"#
+                            };
                             let _ = write!(
                                 stream,
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -445,7 +450,7 @@ pub(crate) mod test_support {
         std::fs::write(
             &base_python,
             format!(
-                "#!/usr/bin/python3\nimport pathlib, shutil, sys\nif len(sys.argv) < 4 or sys.argv[1:3] != ['-m', 'venv']:\n    sys.exit(2)\nbin_dir = pathlib.Path(sys.argv[3]) / 'bin'\nbin_dir.mkdir(parents=True)\nshutil.copy2({python_template}, bin_dir / 'python3')\n"
+                "#!/usr/bin/python3\nimport pathlib, shutil, sys\nif sys.argv[1:] == ['--version']:\n    print('Python 3.12.0')\n    sys.exit(0)\nif len(sys.argv) < 4 or sys.argv[1:3] != ['-m', 'venv']:\n    sys.exit(2)\nbin_dir = pathlib.Path(sys.argv[3]) / 'bin'\nbin_dir.mkdir(parents=True)\nshutil.copy2({python_template}, bin_dir / 'python3')\n"
             ),
         )
         .unwrap();

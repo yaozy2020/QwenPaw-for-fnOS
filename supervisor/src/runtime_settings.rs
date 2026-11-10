@@ -214,9 +214,9 @@ mod tests {
         std::fs::create_dir_all(home.join("venv/bin")).unwrap();
         std::fs::create_dir_all(&var).unwrap();
         let script = if fail_start {
-            "#!/usr/bin/env python3\nimport sys\nif sys.argv[1] == '-c': print('1.0.0'); sys.exit(0)\nsys.exit(1)\n"
+            "#!/usr/bin/env python3\nimport sys\nif sys.argv[1] == '-c': print('2.3.0'); sys.exit(0)\nsys.exit(1)\n"
         } else {
-            "#!/usr/bin/env python3\nimport sys, time\nif sys.argv[1] == '-c': print('1.0.0'); sys.exit(0)\ntime.sleep(3600)\n"
+            "#!/usr/bin/env python3\nimport sys, time\nif sys.argv[1] == '-c': print('2.3.0'); sys.exit(0)\ntime.sleep(3600)\n"
         };
         let python = home.join("venv/bin/python3");
         std::fs::write(&python, script).unwrap();
@@ -246,6 +246,7 @@ mod tests {
             var_dir: var.to_string_lossy().into_owned(),
             home_dir: home.to_string_lossy().into_owned(),
             share_dir: root.to_string_lossy().into_owned(),
+            etc_dir: root.to_string_lossy().into_owned(),
             ui_config_file: ui.to_string_lossy().into_owned(),
             kernel_log,
             operations: Arc::new(tokio::sync::Mutex::new(())),
@@ -257,6 +258,7 @@ mod tests {
     #[tokio::test]
     async fn batch_settings_commit_after_real_health_check() {
         let (root, core, _old_server) = fixture("success", false);
+        let _kernel = crate::api::test_support::KernelGuard(Arc::clone(&core.kernel));
         let port = crate::api::test_support::free_port();
         let _new_server = crate::api::test_support::serve_reserved_port(port);
         let patch = SettingsPatch {
@@ -293,6 +295,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let (root, core, _old_server) = fixture("failure", true);
+        let _kernel = crate::api::test_support::KernelGuard(Arc::clone(&core.kernel));
         let old_port = core.kernel.port();
         let old_ui = std::fs::read(&core.ui_config_file).unwrap();
         let files = [
@@ -338,6 +341,7 @@ mod tests {
     #[tokio::test]
     async fn unchanged_settings_do_not_restart_a_running_kernel() {
         let (root, core, _server) = fixture("unchanged", false);
+        let _kernel = crate::api::test_support::KernelGuard(Arc::clone(&core.kernel));
         let before = core.kernel.spawn().unwrap();
         assert!(core.kernel.wait_healthy(Duration::from_secs(3)));
         let outcome = apply(

@@ -1167,7 +1167,7 @@ touch "$QWENPAW_WORKING_DIR/config.json"
             &dir,
             &state,
             &format!(
-                "import pathlib, sys, time\nroot = pathlib.Path({root})\nif sys.argv[1:3] == ['-m', 'pip']:\n    (root / 'pip-started').touch()\n    while not (root / 'release-pip').exists():\n        time.sleep(0.01)\n    sys.exit(1)\n"
+                "import pathlib, shutil, sys, time\nroot = pathlib.Path({root})\nif sys.argv[1:3] == ['-m', 'pip']:\n    (root / 'bootstrap-started').touch()\n    shutil.copy2(sys.argv[0], pathlib.Path(sys.argv[0]).with_name('uv'))\n    sys.exit(0)\nif pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install']:\n    (root / 'uv-started').touch()\n    while not (root / 'release-uv').exists():\n        time.sleep(0.01)\n    sys.exit(1)\n"
             ),
         );
         assert!(state.install.try_start(
@@ -1179,10 +1179,14 @@ touch "$QWENPAW_WORKING_DIR/config.json"
             format!("{}/qwenpaw-version", state.var_dir),
         ));
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !dir.0.join("pip-started").exists() && Instant::now() < deadline {
+        while !dir.0.join("uv-started").exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(dir.0.join("pip-started").exists(), "pip did not start");
+        assert!(
+            dir.0.join("bootstrap-started").exists(),
+            "bootstrap did not start"
+        );
+        assert!(dir.0.join("uv-started").exists(), "uv did not start");
         let seq = state.install.snapshot().seq;
 
         let response = exchange_request(
@@ -1196,7 +1200,7 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         assert_eq!(response["success"], false);
         assert_eq!(response["seq"], seq);
         assert!(response["instance"].as_str().is_some());
-        std::fs::write(dir.0.join("release-pip"), "release").unwrap();
+        std::fs::write(dir.0.join("release-uv"), "release").unwrap();
         assert!(state.install.shutdown(Duration::from_secs(3)));
     }
 

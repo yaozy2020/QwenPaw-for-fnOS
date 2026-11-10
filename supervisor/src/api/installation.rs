@@ -340,20 +340,77 @@ mod tests {
             .unwrap()
     }
 
-    fn install_python_with_pip_recorder(dir: &TestDir, state: &AppState) {
+    fn install_python_with_installer_recorder(dir: &TestDir, state: &AppState) {
         install_python(
             dir,
             state,
             r#"
-import json, time
+import json, os, shutil, time
 if sys.argv[1:3] == ['-m', 'pip']:
-    (root / 'pip-args.json').write_text(json.dumps(sys.argv[3:]))
-    (root / 'pip-started').touch()
-    while (root / 'block-pip').exists() and not (root / 'release-pip').exists():
+    (root / 'bootstrap.json').write_text(json.dumps({
+        'argv': sys.argv[1:], 'python': sys.argv[0],
+        'cache': os.environ.get('PIP_CACHE_DIR'),
+        'custom_index': os.environ.get('PIP_INDEX_URL') == 'https://mirror.example/custom/simple/',
+    }))
+    (root / 'bootstrap-started').touch()
+    while (root / 'block-bootstrap').exists() and not (root / 'release-bootstrap').exists():
         time.sleep(0.01)
+    shutil.copy2(sys.argv[0], pathlib.Path(sys.argv[0]).with_name('uv'))
+    sys.exit(0)
+if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install']:
+    if not (root / 'bootstrap-started').exists():
+        sys.exit(2)
+    (root / 'uv.json').write_text(json.dumps({
+        'argv': sys.argv[1:], 'program': sys.argv[0],
+        'cache': os.environ.get('UV_CACHE_DIR'), 'index': os.environ.get('UV_DEFAULT_INDEX'),
+    }))
     sys.exit(1)
 "#,
         );
+    }
+
+    fn assert_installer_calls(dir: &TestDir, state: &AppState, index: &str) {
+        let bootstrap: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.0.join("bootstrap.json")).unwrap()).unwrap();
+        let uv: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.0.join("uv.json")).unwrap()).unwrap();
+        assert_eq!(
+            bootstrap["argv"],
+            json!([
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--disable-pip-version-check",
+                "uv"
+            ])
+        );
+        let python = bootstrap["python"].as_str().unwrap();
+        assert!(python.starts_with(&format!("{}/.venv.staging.", state.home_dir)));
+        assert!(python.ends_with("/bin/python3"));
+        assert_eq!(
+            uv["program"],
+            std::path::Path::new(python)
+                .with_file_name("uv")
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(
+            uv["argv"],
+            json!(["pip", "install", "--upgrade", "qwenpaw", "--python", python])
+        );
+        assert_eq!(bootstrap["cache"], format!("{}/pip-cache", state.var_dir));
+        assert_eq!(uv["cache"], format!("{}/uv-cache", state.var_dir));
+        assert_eq!(uv["index"], index);
+        assert!(std::path::Path::new(&state.var_dir)
+            .join("pip-cache")
+            .is_dir());
+        assert!(std::path::Path::new(&state.var_dir)
+            .join("uv-cache")
+            .is_dir());
+        if !index.is_empty() {
+            assert_eq!(bootstrap["custom_index"], true);
+        }
     }
 
     async fn wait_for_path(path: &std::path::Path) -> bool {
@@ -377,10 +434,10 @@ if sys.argv[1:3] == ['-m', 'pip']:
     async fn invalid_mirror_is_rejected_without_install_or_config_side_effects() {
         let dir = TestDir::new("invalid-install-mirror");
         let state = dir.state(crate::api::test_support::free_port());
-        install_python_with_pip_recorder(&dir, &state);
+        install_python_with_installer_recorder(&dir, &state);
         let mirror_file = std::path::Path::new(&state.var_dir).join("pip-mirror");
-        let pip_started = dir.0.join("pip-started");
-        std::fs::write(dir.0.join("block-pip"), "block").unwrap();
+        let bootstrap_started = dir.0.join("bootstrap-started");
+        std::fs::write(dir.0.join("block-bootstrap"), "block").unwrap();
 
         let response = kernel_install(
             axum::extract::State(state.clone()),
@@ -390,9 +447,9 @@ if sys.argv[1:3] == ['-m', 'pip']:
         let status = response.status();
         let snapshot = state.install.snapshot();
         if snapshot.seq != 0 {
-            let _ = wait_for_path(&pip_started).await;
+            let _ = wait_for_path(&bootstrap_started).await;
         }
-        let _ = std::fs::write(dir.0.join("release-pip"), "release");
+        let _ = std::fs::write(dir.0.join("release-bootstrap"), "release");
         let settled = wait_for_install(&state).await;
         if !settled {
             let _ = state.install.shutdown(std::time::Duration::from_secs(3));
@@ -404,7 +461,14 @@ if sys.argv[1:3] == ['-m', 'pip']:
             "invalid input must not create an install task"
         );
         assert!(!snapshot.running);
-        assert!(!pip_started.exists(), "invalid input must not invoke pip");
+        assert!(
+            !bootstrap_started.exists(),
+            "invalid input must not invoke bootstrap"
+        );
+        assert!(
+            !dir.0.join("uv.json").exists(),
+            "invalid input must not invoke uv"
+        );
         assert!(!std::path::Path::new(&state.var_dir)
             .join("qwenpaw-upgrade.log.pip")
             .exists());
@@ -419,9 +483,9 @@ if sys.argv[1:3] == ['-m', 'pip']:
     async fn accepted_mirror_is_snapshotted_before_a_later_mirror_change() {
         let dir = TestDir::new("install-mirror-snapshot");
         let state = dir.state(crate::api::test_support::free_port());
-        install_python_with_pip_recorder(&dir, &state);
-        let pip_started = dir.0.join("pip-started");
-        std::fs::write(dir.0.join("block-pip"), "block").unwrap();
+        install_python_with_installer_recorder(&dir, &state);
+        let bootstrap_started = dir.0.join("bootstrap-started");
+        std::fs::write(dir.0.join("block-bootstrap"), "block").unwrap();
 
         let response = kernel_install(
             axum::extract::State(state.clone()),
@@ -429,29 +493,25 @@ if sys.argv[1:3] == ['-m', 'pip']:
         )
         .await;
         let status = response.status();
-        let started = wait_for_path(&pip_started).await;
+        let started = wait_for_path(&bootstrap_started).await;
         let setter_rejected = state
             .core
             .set_mirror("https://later.example/other/simple")
             .is_err();
         let mirror_store_updated =
             crate::mirror::write(&state.var_dir, "https://later.example/other/simple").is_ok();
-        let _ = std::fs::write(dir.0.join("release-pip"), "release");
+        let _ = std::fs::write(dir.0.join("release-bootstrap"), "release");
         let settled = wait_for_install(&state).await;
         if !settled {
             let _ = state.install.shutdown(std::time::Duration::from_secs(3));
         }
-        let args = std::fs::read_to_string(dir.0.join("pip-args.json"))
-            .ok()
-            .and_then(|contents| serde_json::from_str::<Vec<String>>(&contents).ok());
-        let mirror_arg = args.as_ref().and_then(|args| {
-            args.windows(2)
-                .find(|pair| pair[0] == "--index-url")
-                .map(|pair| pair[1].clone())
-        });
 
         assert_eq!(status, StatusCode::OK);
-        assert!(started, "accepted install should invoke pip");
+        assert!(
+            started,
+            "accepted install should invoke bootstrap: {}",
+            state.install.snapshot().error
+        );
         assert!(
             setter_rejected,
             "the management setter rejects concurrent changes"
@@ -460,19 +520,16 @@ if sys.argv[1:3] == ['-m', 'pip']:
             mirror_store_updated,
             "the persisted mirror can change independently"
         );
-        assert_eq!(
-            mirror_arg.as_deref(),
-            Some("https://mirror.example/custom/simple/")
-        );
-        assert!(settled, "pip test process should finish after release");
+        assert!(settled, "installer should finish after release");
+        assert_installer_calls(&dir, &state, "https://mirror.example/custom/simple/");
     }
 
     #[tokio::test]
     async fn empty_mirror_keeps_the_official_pip_index_semantics() {
         let dir = TestDir::new("install-empty-mirror");
         let state = dir.state(crate::api::test_support::free_port());
-        install_python_with_pip_recorder(&dir, &state);
-        let pip_started = dir.0.join("pip-started");
+        install_python_with_installer_recorder(&dir, &state);
+        let bootstrap_started = dir.0.join("bootstrap-started");
 
         let response = kernel_install(
             axum::extract::State(state.clone()),
@@ -480,20 +537,16 @@ if sys.argv[1:3] == ['-m', 'pip']:
         )
         .await;
         let status = response.status();
-        let started = wait_for_path(&pip_started).await;
+        let started = wait_for_path(&bootstrap_started).await;
         let settled = wait_for_install(&state).await;
         if !settled {
             let _ = state.install.shutdown(std::time::Duration::from_secs(3));
         }
-        let args = std::fs::read_to_string(dir.0.join("pip-args.json"))
-            .ok()
-            .and_then(|contents| serde_json::from_str::<Vec<String>>(&contents).ok());
 
         assert_eq!(status, StatusCode::OK);
-        assert!(started, "accepted install should invoke pip");
-        assert!(args.is_some());
-        assert!(!args.unwrap().iter().any(|arg| arg == "--index-url"));
-        assert!(settled, "pip test process should finish");
+        assert!(started, "accepted install should invoke bootstrap");
+        assert!(settled, "installer should finish");
+        assert_installer_calls(&dir, &state, "");
     }
 
     #[test]

@@ -3,9 +3,9 @@
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
 > 数据源：manifest / cmd / wizard / app / .github / git tags。
 
-## 当前版本：v1.1.1-11
+## 当前版本：v1.1.2-9
 
-- **生成时间**：2026-11-10 00:30:12 +0800
+- **生成时间**：2026-11-10 13:37:08 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312

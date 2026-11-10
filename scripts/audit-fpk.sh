@@ -227,9 +227,38 @@ def test_desktop_entries():
     print("audit: desktop SELF-TEST PASSED (source positive, 7 drift negatives, 4 malformed negatives)")
 
 
+def has_elf_interpreter(binary):
+    if len(binary) < 64 or binary[:6] != b"\x7fELF\x02\x01":
+        return True
+    phoff = struct.unpack_from("<Q", binary, 32)[0]
+    phentsize, phnum = struct.unpack_from("<HH", binary, 54)
+    if phentsize < 56 or phoff + phentsize * phnum > len(binary):
+        return True
+    return any(
+        struct.unpack_from("<I", binary, phoff + index * phentsize)[0] == 3
+        for index in range(phnum)
+    )
+
+
+def test_static_elf_checks():
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", header, 18, 62)
+    struct.pack_into("<Q", header, 32, 64)
+    struct.pack_into("<HH", header, 54, 56, 1)
+    static_binary = bytes(header) + bytes(56)
+    dynamic_binary = bytearray(static_binary)
+    struct.pack_into("<I", dynamic_binary, 64, 3)
+    assert not has_elf_interpreter(static_binary)
+    assert has_elf_interpreter(bytes(dynamic_binary))
+    assert has_elf_interpreter(b"not an ELF")
+    print("audit: static ELF SELF-TEST PASSED (static-pie accepted, interpreter and malformed input rejected)")
+
+
 if fpk_path == "--self-test":
     test_safe_members_modes()
     test_desktop_entries()
+    test_static_elf_checks()
     raise SystemExit(0)
 
 
@@ -466,7 +495,9 @@ packaged_binaries = {
     "app/bin/qwenpaw-supervisor": (app_payloads["bin/qwenpaw-supervisor"], app_members["bin/qwenpaw-supervisor"].mode),
     "cmd/qwenpaw-supervisor": (outer_payloads["cmd/qwenpaw-supervisor"], outer_members["cmd/qwenpaw-supervisor"].mode),
 }
-source_binary = os.path.join(root, "supervisor", "target", "release", "qwenpaw-supervisor")
+source_binary = os.path.join(
+    root, "supervisor", "target", "x86_64-unknown-linux-musl", "release", "qwenpaw-supervisor"
+)
 source_sha256 = None
 if os.path.isfile(source_binary):
     with open(source_binary, "rb") as source:
@@ -483,6 +514,9 @@ for name, (binary, mode) in packaged_binaries.items():
         and struct.unpack_from("<H", binary, 18)[0] == 62
     )
     report(is_x86_64, f"{name} 是 ELF64 little-endian x86_64", f"{name} 不是 ELF64 little-endian x86_64")
+    report(is_x86_64 and not has_elf_interpreter(binary),
+           f"{name} 无 PT_INTERP，使用 musl 静态链接",
+           f"{name} 含动态加载器 PT_INTERP 或 ELF 头无效，不是可移植静态产物")
     report(mode == 0o755, f"{name} 模式为 0755", f"{name} 模式不是 0755: {mode:04o}")
     packaged_hashes[name] = hashlib.sha256(binary).hexdigest()
     if source_sha256 is not None:

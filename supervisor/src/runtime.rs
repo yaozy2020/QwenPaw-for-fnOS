@@ -14,10 +14,17 @@ const INIT_PROBE: &str =
     "import importlib.metadata as metadata; import qwenpaw; print(metadata.version('qwenpaw'))";
 const NODE_PATH: &str = "/var/apps/nodejs_v24/target/bin:/usr/local/bin:/usr/bin:/bin";
 
+#[derive(Debug)]
+pub(crate) struct MetadataError {
+    pub(crate) message: String,
+    pub(crate) repairable: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct RuntimeAdapter {
     venv_dir: PathBuf,
     share_dir: PathBuf,
+    etc_dir: PathBuf,
     log_level: String,
 }
 
@@ -25,11 +32,13 @@ impl RuntimeAdapter {
     pub(crate) fn new(
         venv_dir: impl Into<PathBuf>,
         share_dir: impl Into<PathBuf>,
+        etc_dir: impl Into<PathBuf>,
         log_level: impl Into<String>,
     ) -> Self {
         Self {
             venv_dir: venv_dir.into(),
             share_dir: share_dir.into(),
+            etc_dir: etc_dir.into(),
             log_level: log_level.into(),
         }
     }
@@ -38,19 +47,65 @@ impl RuntimeAdapter {
         self.venv_dir.join("bin/python3")
     }
 
-    pub(crate) fn metadata_version(python: &Path) -> Result<String, String> {
-        let mut command = Command::new(python);
-        command.args(["-c", INIT_PROBE]);
+    pub(crate) fn metadata_version(&self) -> Result<String, MetadataError> {
+        let mut command = Command::new(self.python());
+        command
+            .args(["-c", INIT_PROBE])
+            .current_dir(&self.share_dir)
+            .env("HOME", &self.etc_dir)
+            .env("QWENPAW_WORKING_DIR", &self.share_dir)
+            .env(
+                "QWENPAW_DEPENDENCY_STATE_DIR",
+                self.share_dir.join("dependency-environments"),
+            );
         let output = crate::install::run_with_timeout(command, METADATA_TIMEOUT, "读取内核版本")
-            .map_err(|error| format!("读取内核版本失败: {error}"))?;
+            .map_err(|error| MetadataError {
+                message: format!("读取内核版本失败: {error}"),
+                repairable: false,
+            })?;
         if !output.status.success() {
-            return Err(format!("读取内核版本失败: {}", output.status));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(MetadataError {
+                message: format!("读取内核版本失败: {}", output.status),
+                repairable: stderr.contains("ModuleNotFoundError")
+                    || stderr.contains("ImportError"),
+            });
         }
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if version.is_empty() {
-            return Err("内核 metadata/import 探针未返回版本".into());
+            return Err(MetadataError {
+                message: "内核 metadata/import 探针未返回版本".into(),
+                repairable: false,
+            });
         }
         Ok(version)
+    }
+
+    pub(crate) fn ensure_supported_python(python: &Path) -> Result<(), String> {
+        let mut command = Command::new(python);
+        command.arg("--version");
+        let output =
+            crate::install::run_with_timeout(command, METADATA_TIMEOUT, "检查 Python 版本")
+                .map_err(|error| format!("检查 Python 版本失败: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("检查 Python 版本失败: {}", output.status));
+        }
+        let text = if output.stdout.is_empty() {
+            String::from_utf8_lossy(&output.stderr)
+        } else {
+            String::from_utf8_lossy(&output.stdout)
+        };
+        let version = text.trim().strip_prefix("Python ").unwrap_or_default();
+        let mut parts = version.split('.');
+        let major = parts.next().and_then(|value| value.parse::<u32>().ok());
+        let minor = parts.next().and_then(|value| value.parse::<u32>().ok());
+        if major != Some(3) || !matches!(minor, Some(11..=13)) {
+            return Err(format!(
+                "QwenPaw 需要 Python >=3.11,<3.14；当前为 {}，请先调整解释器版本",
+                text.trim()
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn has_initial_data(&self) -> io::Result<bool> {
@@ -251,7 +306,7 @@ mod tests {
             std::fs::create_dir_all(python.parent().unwrap()).unwrap();
             std::fs::create_dir_all(&share).unwrap();
             Self {
-                adapter: RuntimeAdapter::new(&venv, &share, "debug"),
+                adapter: RuntimeAdapter::new(&venv, &share, root.join("etc"), "debug"),
                 root,
                 python,
             }
@@ -267,6 +322,42 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn supported_python_versions_are_checked_from_stdout_or_stderr() {
+        let fixture = RuntimeFixture::new("python-version");
+        let write_python = |name: &str, script: &str| {
+            let python = fixture.python.with_file_name(format!("python-{name}"));
+            std::fs::write(&python, script).unwrap();
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+            python
+        };
+        for (index, version) in ["3.11.0", "3.12.8", "3.13.1"].iter().enumerate() {
+            let python = write_python(
+                &format!("supported-{index}"),
+                &format!("#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 2\nprintf 'Python {version}\\n'\n"),
+            );
+            assert!(
+                RuntimeAdapter::ensure_supported_python(&python).is_ok(),
+                "{version}"
+            );
+        }
+        let python = write_python("stderr", "#!/bin/sh\nprintf 'Python 3.12.0\\n' >&2\n");
+        assert!(RuntimeAdapter::ensure_supported_python(&python).is_ok());
+        for (index, version) in ["3.10.9", "3.14.0", "2.7.18"].iter().enumerate() {
+            let python = write_python(
+                &format!("unsupported-{index}"),
+                &format!("#!/bin/sh\nprintf 'Python {version}\\n'\n"),
+            );
+            let error = RuntimeAdapter::ensure_supported_python(&python).unwrap_err();
+            assert!(error.contains(">=3.11,<3.14"), "{version}: {error}");
+            assert!(error.contains(version), "{version}: {error}");
+        }
+        let python = write_python("invalid", "#!/bin/sh\nprintf 'not a version\\n'\n");
+        assert!(RuntimeAdapter::ensure_supported_python(&python).is_err());
+        let python = write_python("failed", "#!/bin/sh\nexit 7\n");
+        assert!(RuntimeAdapter::ensure_supported_python(&python).is_err());
     }
 
     #[test]
@@ -333,21 +424,32 @@ mod tests {
     }
 
     #[test]
-    fn metadata_probe_requires_both_package_metadata_and_import() {
+    fn metadata_probe_uses_kernel_working_and_dependency_environment() {
         let fixture = RuntimeFixture::new("metadata-probe");
         fixture.write_python(&format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}/home/probe-args'\nprintf '2.3.0\\n'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}/home/probe-args'\nprintf '%s\\n' \"$HOME\" \"$QWENPAW_WORKING_DIR\" \"$QWENPAW_DEPENDENCY_STATE_DIR\" > '{0}/home/probe-env'\npwd > '{0}/home/probe-cwd'\nprintf '2.3.0\\n'\n",
             fixture.root.display()
         ));
 
-        assert_eq!(
-            RuntimeAdapter::metadata_version(&fixture.python).unwrap(),
-            "2.3.0"
-        );
+        assert_eq!(fixture.adapter.metadata_version().unwrap(), "2.3.0");
         let args = std::fs::read_to_string(fixture.root.join("home/probe-args")).unwrap();
         assert!(args.starts_with("-c\n"));
         assert!(args.contains("importlib.metadata"));
         assert!(args.contains("import qwenpaw"));
+        let share = fixture.root.join("share");
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("home/probe-env")).unwrap(),
+            format!(
+                "{}\n{}\n{}\n",
+                fixture.root.join("etc").display(),
+                share.display(),
+                share.join("dependency-environments").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("home/probe-cwd")).unwrap(),
+            format!("{}\n", share.display())
+        );
     }
 
     #[test]

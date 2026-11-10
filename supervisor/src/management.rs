@@ -41,6 +41,7 @@ pub struct ManagementCore {
     pub var_dir: String,
     pub home_dir: String,
     pub share_dir: String,
+    pub etc_dir: String,
     pub ui_config_file: String,
     pub kernel_log: String,
     pub operations: Arc<tokio::sync::Mutex<()>>,
@@ -155,17 +156,16 @@ impl ManagementCore {
         RuntimeAdapter::new(
             Path::new(&self.home_dir).join("venv"),
             &self.share_dir,
+            &self.etc_dir,
             self.kernel.log_level(),
         )
     }
 
     pub fn runtime_health(&self) -> serde_json::Value {
         let adapter = self.runtime_adapter();
-        let (version, metadata_error) = match RuntimeAdapter::metadata_version(
-            &Path::new(&self.home_dir).join("venv/bin/python3"),
-        ) {
-            Ok(version) => (version, None),
-            Err(error) => (String::new(), Some(error)),
+        let (version, metadata_error, metadata_repairable) = match adapter.metadata_version() {
+            Ok(version) => (version, None, false),
+            Err(error) => (String::new(), Some(error.message), error.repairable),
         };
         let (initialized, data_error) = match adapter.has_initial_data() {
             Ok(initialized) => (initialized, None),
@@ -180,13 +180,14 @@ impl ManagementCore {
             .is_ok();
         let error = metadata_error.or(data_error);
         serde_json::json!({
-            "installed": !version.is_empty(),
+            "installed": self.kernel.installed(),
             "version": version,
             "initialized": initialized,
             "running": status.running,
             "reachable": reachable,
             "healthy": error.is_none() && !version.is_empty() && initialized && reachable,
             "error": error,
+            "metadata_repairable": metadata_repairable,
             "port": self.kernel.port(),
         })
     }
@@ -282,6 +283,7 @@ mod tests {
             var_dir: root.join("var").to_string_lossy().into_owned(),
             home_dir: root.join("home").to_string_lossy().into_owned(),
             share_dir: root.join("share").to_string_lossy().into_owned(),
+            etc_dir: root.join("etc").to_string_lossy().into_owned(),
             ui_config_file: root.join("ui/config").to_string_lossy().into_owned(),
             kernel_log: root.join("var/kernel.log").to_string_lossy().into_owned(),
             operations: Arc::new(tokio::sync::Mutex::new(())),

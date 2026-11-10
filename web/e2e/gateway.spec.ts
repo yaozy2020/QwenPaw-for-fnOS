@@ -91,17 +91,18 @@ test("Gateway transport exposes the prefixed console over real UDS and enforces 
   expect(csrf).toMatchObject({ secure: true, path: "/", sameSite: "Lax" });
   expect(csrf?.value).toMatch(/^\d+\.[a-f0-9]{64}\.[a-f0-9]{64}$/);
   const before = await readFile(fixture.files.mirror, "utf8");
-  const rejections = await page.evaluate(async ({ api, token }) => {
+  const rejections = await page.evaluate(async ({ api, token, mirror }) => {
     const results: number[] = [];
     for (const headers of [{}, { "X-CSRF-Token": "wrong-token" }]) {
       const response = await fetch(`${api}mirror`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify({ mirror: "https://denied.invalid/simple" }) });
       results.push(response.status);
     }
-    const duplicate = await fetch(`${api}mirror?_csrf=${token}`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": token }, body: JSON.stringify({ mirror: "https://denied.invalid/simple" }) });
-    results.push(duplicate.status);
-    return results;
-  }, { api, token: csrf!.value });
-  expect(rejections).toEqual([403, 403, 403]);
+    const queryOnly = await fetch(`${api}port?_csrf=${token}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ port: 0 }) });
+    results.push(queryOnly.status);
+    const headerWithQuery = await fetch(`${api}mirror?_csrf=ignored`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": token }, body: JSON.stringify({ mirror }) });
+    return { results, headerWithQuery: headerWithQuery.status };
+  }, { api, token: csrf!.value, mirror: before.trim() });
+  expect(rejections).toEqual({ results: [403, 403, 403], headerWithQuery: 200 });
   await page.context().addCookies([{ ...csrf!, value: "forged-pair" }]);
   expect(await page.evaluate(async api => (await fetch(`${api}mirror`, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": "forged-pair" }, body: JSON.stringify({ mirror: "https://denied.invalid/simple" }) })).status, api)).toBe(403);
   await page.context().addCookies([csrf!]);
@@ -175,6 +176,181 @@ test("Web proxy port UI handles validation, conflict and successful automatic se
   expect(writes.every(item => item.csrf.length > 0)).toBe(true);
 });
 
+for (const responseCase of [
+  { label: "HTTP 403 despite success=true", status: 403, body: { success: true } },
+  { label: "HTTP 500 despite success=true", status: 500, body: { success: true } },
+  { label: "HTTP 200 without success", status: 200, body: {} },
+]) {
+  test(`management actions never report success for ${responseCase.label}`, async ({ page }) => {
+    const posts: string[] = [];
+    let validToggle = false;
+    await page.route(`**${api}**`, async route => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname.slice(api.length);
+      if (request.method() === "GET") {
+        const data = path === "status"
+          ? { success: true, installed: true, running: false, version: "2.0.0", port: 18088, authStatus: "protected", install: { running: false } }
+          : path === "logs" ? { success: true, logs: [] }
+            : path === "kernel/versions" ? { success: true, latest_stable: "2.1.0", versions: [{ version: "2.1.0", is_beta: false }] }
+              : path === "mirror" ? { success: true, mirror: "" }
+                : path === "web-proxy/port" ? { success: true, port: 43126, public: false }
+                  : { success: true, upgrading: false };
+        await route.fulfill({ json: data });
+        return;
+      }
+      posts.push(path);
+      await route.fulfill(validToggle && path === "web-proxy/port"
+        ? { json: { success: true, port: 43126, public: true } }
+        : { status: responseCase.status, json: { ...responseCase.body, port: 43127, seq: 31, instance: "worker-a" } });
+    });
+
+    await page.goto(prefix);
+    await expect(page.locator("#btnStartService")).toBeVisible();
+    await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+    await page.getByRole("button", { name: "修改端口" }).click();
+    await page.locator("#modalInput").fill("23001");
+    await page.locator("#modalConfirmBtn").click();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("修改端口失败");
+    await expect(page.locator("#valPort")).toHaveText("18088");
+
+    await page.getByRole("button", { name: "修改反代端口" }).click();
+    await page.locator("#modalInput").fill("43127");
+    await page.locator("#modalConfirmBtn").click();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("修改反代端口失败");
+    await expect(page.locator("#valWebProxyPort")).toHaveText("43126");
+
+    await page.getByRole("button", { name: "重置 QwenPaw 管理员密码" }).click();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("请求失败");
+    await page.locator("#btnStartService").click();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("操作失败");
+
+    await page.locator("#btnUpgradeAction").click();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("安装请求失败");
+    await expect(page.locator("#upgradeModal")).not.toHaveClass(/active/);
+    expect(posts).toEqual(["port", "web-proxy/port", "kernel/reset-auth", "start", "kernel/install"]);
+
+    validToggle = true;
+    await page.locator("#webProxyPublic").check();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("已允许外部访问 Web 反代");
+    await expect(page.locator("#webProxyPublic")).toBeChecked();
+  });
+}
+
+test("version action stays disabled until a successful version list has loaded", async ({ page }) => {
+  let releaseVersions!: () => void;
+  const versionsHeld = new Promise<void>(resolve => { releaseVersions = resolve; });
+  let installPosts = 0;
+  await page.route(`**${api}**`, async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname.slice(api.length);
+    if (request.method() === "POST" && path === "kernel/install") installPosts++;
+    if (request.method() === "GET" && path === "kernel/versions") {
+      await versionsHeld;
+      await route.fulfill({ status: 503, json: { success: true, versions: [{ version: "2.9.9", is_beta: false }] } });
+      return;
+    }
+    const data = path === "status"
+      ? { success: true, installed: false, running: false, port: 18088, install: { running: false } }
+      : path === "logs" ? { success: true, logs: [] }
+        : path === "mirror" ? { success: true, mirror: "" }
+          : path === "web-proxy/port" ? { success: true, port: 43126, public: false }
+            : { success: true, upgrading: false };
+    await route.fulfill({ json: data });
+  });
+
+  await page.goto(prefix);
+  await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
+  releaseVersions();
+  await expect(page.locator("#versionSourceStatus")).toBeVisible();
+  await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
+  await page.evaluate(() => (window as unknown as { checkOrUpgrade(): void }).checkOrUpgrade());
+  await expect(page.locator("#toast")).toContainText("可用版本尚未加载");
+  expect(installPosts).toBe(0);
+});
+
+test("lost acceptance attaches without replay, polls identified logs and times out a stuck task", async ({ page }) => {
+  const identity = { seq: 31, instance: "worker-a" };
+  const logQueries: Array<{ seq: string | null; instance: string | null }> = [];
+  let statusPolls = 0;
+  let installPosts = 0;
+  let active = false;
+  let releaseInstall!: () => void;
+  let signalInstall!: () => void;
+  const installHeld = new Promise<void>(resolve => { releaseInstall = resolve; });
+  const installStarted = new Promise<void>(resolve => { signalInstall = resolve; });
+  await page.route(`**${api}**`, async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname.slice(api.length);
+    if (request.method() === "POST" && path === "kernel/install") {
+      installPosts++;
+      signalInstall();
+      await installHeld;
+      active = true;
+      await route.abort("failed");
+      return;
+    }
+    if (request.method() === "GET" && path === "kernel/install-log") {
+      const query = { seq: url.searchParams.get("seq"), instance: url.searchParams.get("instance") };
+      logQueries.push(query);
+      await route.fulfill({ status: query.seq === String(identity.seq) && query.instance === identity.instance ? 200 : 404,
+        json: query.seq === String(identity.seq) && query.instance === identity.instance
+          ? { success: true, logs: ["matching task log"] }
+          : { success: false, logs: ["private other task log"] } });
+      return;
+    }
+    if (request.method() === "GET" && path === "kernel/install-status") {
+      statusPolls++;
+      await route.fulfill({ json: active
+        ? { success: true, upgrading: true, running: true, ...identity, phase: "installing" }
+        : { success: true, upgrading: false, running: false, seq: 30, instance: "old-worker", phase: "done" } });
+      return;
+    }
+    const data = path === "status"
+      ? { success: true, installed: false, running: false, port: 18088, install: { running: false } }
+      : path === "logs" ? { success: true, logs: [] }
+        : path === "kernel/versions" ? { success: true, latest_stable: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] }
+          : path === "mirror" ? { success: true, mirror: "" }
+            : path === "web-proxy/port" ? { success: true, port: 43126, public: false }
+              : { success: true };
+    await route.fulfill({ json: data });
+  });
+
+  await page.goto(prefix);
+  await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+  await page.locator("#btnUpgradeAction").click();
+  await page.locator("#modalConfirmBtn").click();
+  try {
+    await installStarted;
+    await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
+    await page.waitForTimeout(1_800);
+    expect(logQueries).toEqual([]);
+    expect(installPosts).toBe(1);
+  } finally {
+    releaseInstall();
+  }
+  await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+  await expect.poll(() => logQueries.length).toBeGreaterThan(0);
+  expect(logQueries.every(query => query.seq === String(identity.seq) && query.instance === identity.instance)).toBe(true);
+  await expect(page.locator("#upTerminal")).toContainText("matching task log");
+  expect(installPosts).toBe(1);
+  await page.evaluate(() => {
+    const now = Date.now;
+    Date.now = () => now() + 10 * 60 * 1000 + 1;
+  });
+  await expect(page.locator("#upTitle")).toHaveText("任务仍未结束", { timeout: 5_000 });
+  const stoppedAt = statusPolls;
+  await page.waitForTimeout(1_500);
+  expect(statusPolls).toBe(stoppedAt);
+  expect(installPosts).toBe(1);
+});
+
 test("real Gateway Web proxy port UI reads, rejects conflict and switches listeners", async ({ page, request }) => {
   test.skip(process.env.QWENPAW_E2E_WEB_PROXY_PORT !== "0", "requires an enabled automatic Web proxy fixture");
   const fixture = await metadata(request);
@@ -225,7 +401,7 @@ test("real Gateway Web proxy port UI reads, rejects conflict and switches listen
 });
 
 test("real Gateway Chromium flow persists, restores accepted install progress, handles lost acceptance and uninstalls", async ({ page, request }, testInfo) => {
-  test.setTimeout(150_000);
+  test.setTimeout(240_000);
   const fixture = await metadata(request);
   testInfo.annotations.push({ type: "supervisor-sha256", description: fixture.binaries.supervisor.sha256 }, { type: "identity-boundary", description: fixture.identityBoundary });
   const pageErrors: string[] = [];
@@ -234,6 +410,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   const failedRequests: Array<{ method: string; url: string; errorText: string }> = [];
   const browserRequests: string[] = [];
   const installStatusRequests: number[] = [];
+  const installLogUrls: string[] = [];
   const csrfCredentials: Array<{ header: string; query: string | null }> = [];
   const installAttemptResults = new Map<object, { responseStatus?: number; failed: boolean }>();
   page.on("pageerror", error => {
@@ -256,6 +433,9 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
     browserRequests.push(request.url());
     if (request.method() === "GET" && new URL(request.url()).pathname === `${api}kernel/install-status`) {
       installStatusRequests.push(Date.now());
+    }
+    if (request.method() === "GET" && new URL(request.url()).pathname === `${api}kernel/install-log`) {
+      installLogUrls.push(request.url());
     }
     if (request.method() === "POST" && new URL(request.url()).pathname === `${api}kernel/install`) {
       installAttemptResults.set(request, { failed: false });
@@ -368,11 +548,15 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
       expect(canceledUrl.pathname.startsWith(`${prefix}api/`)).toBe(true);
       const endpoint = canceledUrl.pathname.slice(`${prefix}api/`.length);
       expect(allowedEndpoints).toContain(endpoint);
-      const expectedQueryKeys = endpoint === "logs" || endpoint === "kernel/install-log" ? ["_t", "tail"] : ["_t"];
+      const expectedQueryKeys = endpoint === "kernel/install-log" ? ["_t", "instance", "seq", "tail"] : endpoint === "logs" ? ["_t", "tail"] : ["_t"];
       expect([...canceledUrl.searchParams.keys()].sort()).toEqual(expectedQueryKeys);
       expect(canceledUrl.searchParams.get("_t")).toMatch(/^\d+$/);
       if (endpoint === "logs") expect(canceledUrl.searchParams.get("tail")).toBe("100");
-      if (endpoint === "kernel/install-log") expect(canceledUrl.searchParams.get("tail")).toBe("40");
+      if (endpoint === "kernel/install-log") {
+        expect(canceledUrl.searchParams.get("tail")).toBe("40");
+        expect(canceledUrl.searchParams.get("seq")).toBe(String(recoveryTask.seq));
+        expect(canceledUrl.searchParams.get("instance")).toBe(recoveryTask.instance);
+      }
       return endpoint;
     });
     expect(canceledEndpoints.sort()).toEqual([...allowedEndpoints].sort());
@@ -435,21 +619,38 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
 
   await page.locator("#versionCardsContainer .ver-number").filter({ hasText: "v2.1.0b1" }).click();
   await expect(page.locator("#btnUpgradeAction")).toHaveText("重新安装 v2.1.0b1");
-  expect((await request.post("/__e2e/lose-next-upgrade-receipt")).ok()).toBeTruthy();
-  await page.locator("#btnUpgradeAction").click();
-  await expect(page.locator("#modalTitle")).toHaveText("重新安装当前版本");
-  await page.locator("#modalConfirmBtn").click();
-  await expect(page.locator("#upTitle")).toHaveText("无法确认安装任务结果", { timeout: 25_000 });
-  await expect.poll(async () => {
-    const response = await request.get(`${api}kernel/install-status`);
-    if (!response.ok()) return false;
-    const status = await response.json() as { phase?: string; upgrading?: boolean; recovery_required?: boolean; seq?: number; instance?: string };
-    return status.phase === "done"
-      && status.upgrading === false
-      && status.recovery_required === false
-      && Number.isInteger(status.seq)
-      && typeof status.instance === "string";
-  }).toBe(true);
+  await writeFile(slowPip, "hold task after dropping the acceptance receipt\n");
+  await rm(pipStarted, { force: true });
+  try {
+    expect((await request.post("/__e2e/lose-next-upgrade-receipt")).ok()).toBeTruthy();
+    await page.locator("#btnUpgradeAction").click();
+    await expect(page.locator("#modalTitle")).toHaveText("重新安装当前版本");
+    await page.locator("#modalConfirmBtn").click();
+    await expect.poll(() => exists(pipStarted)).toBe(true);
+    let lostReceiptTask: { seq: number; instance: string } | null = null;
+    await expect.poll(async () => {
+      const response = await request.get(`${api}kernel/install-status`);
+      if (!response.ok()) return false;
+      const status = await response.json() as { upgrading?: boolean; seq?: number; instance?: string };
+      if (!status.upgrading || !Number.isInteger(status.seq) || !status.instance) return false;
+      lostReceiptTask = { seq: status.seq!, instance: status.instance };
+      return true;
+    }).toBe(true);
+    const attachedTask = lostReceiptTask!;
+    await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
+    await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+    await expect.poll(() => installLogUrls.some(url => {
+      const parsed = new URL(url);
+      return parsed.searchParams.get("seq") === String(attachedTask.seq)
+        && parsed.searchParams.get("instance") === attachedTask.instance;
+    })).toBe(true);
+    await expect.poll(async () => (await observations(request)).upgradePosts).toHaveLength(3);
+    await page.waitForTimeout(1800);
+    expect((await observations(request)).upgradePosts).toHaveLength(3);
+  } finally {
+    await rm(slowPip, { force: true });
+  }
+  await expect(page.locator("#upTitle")).toHaveText("安装任务已顺利完成！", { timeout: 75_000 });
   await expect.poll(async () => (await readFile(`${fixture.files.venv}/installed`, "utf8")).trim()).toBe("2.1.0b1");
   await expect.poll(async () => (await readFile(fixture.files.pin, "utf8")).trim()).toBe("2.1.0b1");
   await expect(page.locator("#statusCardMount .status-text")).toHaveText("运行中");
@@ -474,24 +675,27 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   expect(await readFile(fixture.files.auth, "utf8")).toBe("isolated-browser-auth-must-survive\n");
   expect((await readFile(fixture.files.mirror, "utf8")).trim()).toBe(fixture.mirrors.tsinghua);
 
-  await expect.poll(async () => (await observations(request)).upgradePosts.length).toBe(4);
+  await expect.poll(async () => (await observations(request)).upgradePosts.length).toBe(3);
   const seen = await observations(request);
   expect(seen.indexRequests).toContain("/mirror/aliyun/qwenpaw/");
   expect(seen.indexRequests).toContain("/mirror/tsinghua/qwenpaw/");
-  expect(seen.upgradePosts.map(post => post.version)).toEqual(["2.0.0", "2.1.0b1", "2.1.0b1", "2.1.0b1"]);
-  expect(seen.upgradePosts.map(post => post.receiptLost)).toEqual([false, false, true, false]);
-  expect(seen.upgradePosts.map(post => post.status)).toEqual([200, 200, 200, 200]);
-  expect(seen.upgradePosts.map(post => post.success)).toEqual([true, true, true, false]);
-  const acceptedPosts = seen.upgradePosts.filter(post => post.success === true);
-  expect(acceptedPosts.every(post => Number.isInteger(post.seq) && Boolean(post.instance))).toBe(true);
-  expect(new Set(acceptedPosts.map(post => post.seq)).size).toBe(3);
-  expect(seen.upgradePosts[3]).toMatchObject({ seq: acceptedPosts[2].seq, instance: acceptedPosts[2].instance, csrfHeader: false, csrfQuery: true, contentType: "application/json" });
+  expect(seen.upgradePosts.map(post => post.version)).toEqual(["2.0.0", "2.1.0b1", "2.1.0b1"]);
+  expect(seen.upgradePosts.map(post => post.receiptLost)).toEqual([false, false, true]);
+  expect(seen.upgradePosts.map(post => post.status)).toEqual([200, 200, 200]);
+  expect(seen.upgradePosts.map(post => post.success)).toEqual([true, true, true]);
+  expect(seen.upgradePosts.every(post => Number.isInteger(post.seq) && Boolean(post.instance))).toBe(true);
+  expect(new Set(seen.upgradePosts.map(post => post.seq)).size).toBe(3);
+  expect(seen.upgradePosts.every(post => post.csrfHeader && !post.csrfQuery && post.contentType === "application/json")).toBe(true);
   expect(seen.upgradePosts.every(post => post.mirror === fixture.mirrors.tsinghua)).toBe(true);
   expect(seen.upgradePosts.every(post => post.origin === origin && post.upstreamHost === "qwenpaw-backend.internal" && post.fetchSite === "same-origin")).toBe(true);
-  for (const post of acceptedPosts) expect(seen.upgradeStatuses).toContainEqual(expect.objectContaining({ phase: "done", seq: post.seq, instance: post.instance, upgrading: false }));
+  for (const post of seen.upgradePosts) expect(seen.upgradeStatuses).toContainEqual(expect.objectContaining({ phase: "done", seq: post.seq, instance: post.instance, upgrading: false }));
+  expect(installLogUrls.every(url => {
+    const parsed = new URL(url);
+    return Boolean(parsed.searchParams.get("seq") && parsed.searchParams.get("instance"));
+  })).toBe(true);
   expect(seen.forwarded.some(item => item.path === `${api}kernel/install-log` && item.status === 200)).toBe(true);
   expect(csrfCredentials.length).toBeGreaterThan(0);
-  expect(csrfCredentials.every(({ header, query }) => (header || query) === csrf?.value)).toBe(true);
+  expect(csrfCredentials.every(({ header, query }) => header === csrf?.value && query === null)).toBe(true);
   expect(browserRequests.every(url => new URL(url).origin === origin && new URL(url).pathname.startsWith(prefix))).toBe(true);
   expect(pageErrors).toEqual([]);
   const expectedConsoleText = (() => {
@@ -505,8 +709,8 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
     }
   })();
   expect(consoleErrors).toEqual([{ text: expectedConsoleText, url: `${origin}${api}kernel/install` }]);
-  expect([...installAttemptResults.values()].map(attempt => attempt.responseStatus)).toEqual([200, 200, undefined, 200]);
-  expect([...installAttemptResults.values()].map(attempt => attempt.failed)).toEqual([false, false, true, false]);
+  expect([...installAttemptResults.values()].map(attempt => attempt.responseStatus)).toEqual([200, 200, undefined]);
+  expect([...installAttemptResults.values()].map(attempt => attempt.failed)).toEqual([false, false, true]);
   expect(failedRequests).toEqual([{ method: "POST", url: `${origin}${api}kernel/install`, errorText: expect.stringMatching(/\S/) }]);
 });
 

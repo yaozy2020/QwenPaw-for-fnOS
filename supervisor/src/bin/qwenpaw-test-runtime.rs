@@ -23,6 +23,10 @@ fn main() {
 
 fn run() -> io::Result<()> {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == OsStr::new("--version") {
+        println!("Python 3.12.0");
+        return Ok(());
+    }
     if args
         .first()
         .is_some_and(|arg| arg == OsStr::new("--test-worker"))
@@ -43,6 +47,31 @@ fn run() -> io::Result<()> {
         return run_code_probe(&args[1], control.as_deref());
     }
     if args.len() >= 2 && args[0] == OsStr::new("-m") && args[1] == OsStr::new("pip") {
+        if args.len() == 6
+            && args[2] == OsStr::new("install")
+            && args[3] == OsStr::new("--upgrade")
+            && args[4] == OsStr::new("--disable-pip-version-check")
+            && args[5] == OsStr::new("uv")
+        {
+            let python = env::current_exe()?;
+            fs::copy(&python, python.with_file_name("uv"))?;
+            println!("Successfully installed uv");
+            return Ok(());
+        }
+        return install_package(&args[2..]);
+    }
+    if args.len() >= 3 && args[0] == OsStr::new("pip") && args[1] == OsStr::new("install") {
+        let uv = env::current_exe()?;
+        let python = uv.with_file_name("python3");
+        let uses_python = args
+            .windows(2)
+            .any(|pair| pair[0] == OsStr::new("--python") && pair[1] == python.as_os_str());
+        if uv.file_name() != Some(OsStr::new("uv")) || !uses_python {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid test uv invocation",
+            ));
+        }
         return install_package(&args[2..]);
     }
     if args.len() == 4
@@ -97,6 +126,7 @@ fn is_qwenpaw_import_probe(code: &OsStr) -> bool {
 
 fn qwenpaw_import_probe(control: &Path) -> io::Result<()> {
     if control.join("bad-import").exists() || control.join("fail-import").exists() {
+        eprintln!("ModuleNotFoundError: No module named 'qwenpaw'");
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "test runtime forced qwenpaw import failure",

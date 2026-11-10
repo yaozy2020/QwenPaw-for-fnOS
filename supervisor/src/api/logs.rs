@@ -86,15 +86,26 @@ pub(super) async fn install_log(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    let tail = req
-        .uri()
-        .query()
-        .and_then(|q| {
-            q.split('&')
-                .find(|p| p.starts_with("tail="))
-                .map(|p| p[5..].parse::<usize>().ok())
-        })
-        .flatten()
+    let query = req.uri().query().unwrap_or_default();
+    let mut seq = None;
+    let mut instance = None;
+    for field in query.split('&') {
+        if let Some(value) = field.strip_prefix("seq=") {
+            seq = value.parse::<u64>().ok();
+        } else if let Some(value) = field.strip_prefix("instance=") {
+            instance = Some(value);
+        }
+    }
+    let snapshot = state.install.snapshot();
+    let matches = seq == Some(snapshot.seq)
+        && instance.is_some_and(|value| !value.is_empty() && value == super::instance_id());
+    if !matches {
+        return err_json(StatusCode::NOT_FOUND, "安装任务身份不匹配");
+    }
+    let tail = query
+        .split('&')
+        .find_map(|field| field.strip_prefix("tail="))
+        .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(40)
         .clamp(1, 500);
     let path = std::path::PathBuf::from(format!("{}/qwenpaw-upgrade.log.pip", state.var_dir));

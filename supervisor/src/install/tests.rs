@@ -141,29 +141,22 @@ mod tests {
     }
 
     #[test]
-    fn pip_args_shape() {
-        let a = pip_args(&InstallChannel::Latest, "");
-        assert_eq!(a, vec!["install", "--upgrade", "qwenpaw"]);
-
-        let a = pip_args(&InstallChannel::Beta, "");
-        assert_eq!(a, vec!["install", "--upgrade", "--pre", "qwenpaw"]);
-
-        let a = pip_args(&InstallChannel::Exact("2.3.0b2".into()), "");
-        assert_eq!(a, vec!["install", "--upgrade", "qwenpaw==2.3.0b2"]);
-
-        let a = pip_args(
-            &InstallChannel::Latest,
-            "https://pypi.tuna.tsinghua.edu.cn/simple",
+    fn uv_args_shape() {
+        assert_eq!(
+            uv_bootstrap_args(),
+            vec!["install", "--upgrade", "--disable-pip-version-check", "uv"]
         );
         assert_eq!(
-            a,
-            vec![
-                "install",
-                "--upgrade",
-                "qwenpaw",
-                "--index-url",
-                "https://pypi.tuna.tsinghua.edu.cn/simple"
-            ]
+            uv_args(&InstallChannel::Latest),
+            vec!["pip", "install", "--upgrade", "qwenpaw"]
+        );
+        assert_eq!(
+            uv_args(&InstallChannel::Beta),
+            vec!["pip", "install", "--upgrade", "--pre", "qwenpaw"]
+        );
+        assert_eq!(
+            uv_args(&InstallChannel::Exact("2.3.0b2".into())),
+            vec!["pip", "install", "--upgrade", "qwenpaw==2.3.0b2"]
         );
     }
 
@@ -299,7 +292,7 @@ mod tests {
         std::fs::write(
             &base_python,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ntouch '{}'\nsleep 30 &\nwait\n",
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'Python 3.12.0\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > '{}'\ntouch '{}'\nsleep 30 &\nwait\n",
                 root.join("venv-argv").display(),
                 root.join("venv-started").display()
             ),
@@ -360,45 +353,127 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_latch_still_rolls_back_a_slow_pip_transaction() {
-        use std::os::unix::fs::PermissionsExt;
+    fn shutdown_latch_still_rolls_back_a_slow_uv_transaction() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::process::CommandExt;
 
-        let dir = fake_venv("shutdown-slow-pip-latch");
-        let root = dir.clone();
+        struct NativeUvSpawner(std::path::PathBuf);
+        impl PipSpawner for NativeUvSpawner {
+            fn spawn(
+                &self,
+                cmd: &mut std::process::Command,
+            ) -> std::io::Result<std::process::Child> {
+                if Path::new(cmd.get_program())
+                    .file_name()
+                    .is_some_and(|name| name == "uv")
+                {
+                    cmd.current_dir(&self.0).stdin(std::process::Stdio::piped());
+                }
+                cmd.spawn()
+            }
+        }
+
+        let dir = fake_venv("shutdown-slow-uv-latch");
+        std::fs::copy("/bin/bash", dir.join("native-uv")).unwrap();
+        std::fs::write(
+            dir.join("pip"),
+            "printf started > uv-started\nIFS= read -r line\n",
+        )
+        .unwrap();
         let python = dir.join("venv/bin/python3");
         std::fs::write(
             &python,
             format!(
-                "#!/bin/bash\nroot='{}'\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then touch \"$root/pip-started\"; sleep 30; fi\nif [ \"$1\" = \"-m\" ]; then printf new > \"$(dirname \"$0\")/../installed\"; exit 0; fi\nprintf '2.0.0\\n'\n",
-                root.display()
+                "#!/bin/bash\nroot='{}'\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then cp \"$root/native-uv\" \"$(dirname \"$0\")/uv\"; touch \"$root/bootstrap-started\"; exit 0; fi\nexit 2\n",
+                dir.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let state = InstallState::new(Arc::new(|_| {}), Arc::new(|| Ok(0)));
+        let mut sentinel = crate::api::test_support::ChildGuard(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let state = InstallState::with_spawner(
+            Arc::new(NativeUvSpawner(dir.clone())),
+            Arc::new(|_| {}),
+            Arc::new(|| Ok(0)),
+        );
         let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
         assert!(start_fake_install(&state, &dir, 0, &pin));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !dir.join("pip-started").exists() && std::time::Instant::now() < deadline {
+        while !dir.join("uv-started").exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            dir.join("pip-started").exists(),
-            "slow pip command did not start"
+            dir.join("bootstrap-started").exists(),
+            "bootstrap did not start"
         );
-        state.block_recovery("监督者正在关闭".into());
-        assert!(state.shutdown(Duration::from_secs(4)));
+        assert!(
+            dir.join("uv-started").exists(),
+            "slow uv command did not start"
+        );
+        let pid_file = dir.join("install.pid");
+        let pid = loop {
+            if let Ok(record) = std::fs::read_to_string(&pid_file) {
+                if let Some(pid) = record
+                    .lines()
+                    .next()
+                    .and_then(|line| line.parse::<u32>().ok())
+                {
+                    if state.registered_identity(pid).is_some() {
+                        break pid;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "uv process was not registered"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let argv = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+        let args: Vec<_> = argv.split(|byte| *byte == 0).collect();
+        let program = std::str::from_utf8(args[0]).unwrap();
+        assert!(program.ends_with("/bin/uv"), "{program}");
+        assert_eq!(&args[1..3], &[&b"pip"[..], &b"install"[..]]);
+        let executable = std::fs::metadata(format!("/proc/{pid}/exe")).unwrap();
+        let installed_uv = std::fs::metadata(program).unwrap();
+        let registered = state.registered_identity(pid).unwrap().executable.unwrap();
+        assert_eq!(
+            (executable.dev(), executable.ino()),
+            (installed_uv.dev(), installed_uv.ino())
+        );
+        assert_eq!(
+            (registered.dev, registered.ino),
+            (executable.dev(), executable.ino())
+        );
 
+        state.block_recovery("监督者正在关闭".into());
+        assert!(state.shutdown(Duration::from_secs(8)));
         let snapshot = state.snapshot();
         assert_eq!(snapshot.phase, Phase::Cancelled, "{}", snapshot.error);
         assert!(!snapshot.recovery_required, "{}", snapshot.error);
+        assert!(
+            !crate::procfs::process_alive(pid as i32),
+            "direct uv survived cancellation"
+        );
+        assert!(
+            sentinel.0.try_wait().unwrap().is_none(),
+            "external sentinel was signalled"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("venv/installed")).unwrap(),
             "old"
         );
+        assert_eq!(std::fs::read_to_string(pin).unwrap(), "1.0.0\n");
         assert!(pending_transactions(&dir.join("venv")).unwrap().is_empty());
-        assert!(!dir.join("install.pid").exists());
+        assert!(!pid_file.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -441,7 +516,7 @@ mod tests {
     fn regression_cancel_after_metadata_never_activates_or_starts() {
         let dir = fake_venv("cancel-metadata");
         let python = dir.join("venv/bin/python3");
-        std::fs::write(&python, "#!/bin/bash\nroot=\"$(dirname \"$0\")/../..\"\nif [ \"$1\" = \"-m\" ]; then printf new > \"$(dirname \"$0\")/../installed\"; exit 0; fi\ntouch \"$root/metadata-entered\"\nwhile [ ! -f \"$root/release\" ]; do sleep 0.01; done\nprintf '2.0.0\\n'\n").unwrap();
+        std::fs::write(&python, "#!/bin/bash\nroot=\"$(dirname \"$0\")/../..\"\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then cp \"$0\" \"$(dirname \"$0\")/uv\"; exit 0; fi\nif [ \"$(basename \"$0\")\" = \"uv\" ] && [ \"$1\" = \"pip\" ] && [ \"$2\" = \"install\" ]; then printf new > \"$(dirname \"$0\")/../installed\"; exit 0; fi\n[ \"$1\" = \"-c\" ] || exit 2\ntouch \"$root/metadata-entered\"\nwhile [ ! -f \"$root/release\" ]; do sleep 0.01; done\nprintf '2.0.0\\n'\n").unwrap();
         let calls = Arc::new(AtomicU64::new(0));
         let called = Arc::clone(&calls);
         let st = InstallState::new(
@@ -933,7 +1008,7 @@ mod tests {
         let python = bin.join("python3");
         std::fs::write(
             &python,
-            "#!/bin/bash\nif [ \"$1\" = \"-m\" ]; then\n  printf new > \"$(dirname \"$0\")/../installed\"\n  exit \"${FAKE_PIP_EXIT:-0}\"\nfi\nprintf '2.0.0\\n'\n",
+            "#!/bin/bash\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then cp \"$0\" \"$(dirname \"$0\")/uv\"; exit 0; fi\nif [ \"$(basename \"$0\")\" = \"uv\" ]; then\n  [ \"$1\" = \"pip\" ] && [ \"$2\" = \"install\" ] || exit 2\n  [ \"$5\" = \"--python\" ] && [ \"$6\" = \"$(dirname \"$0\")/python3\" ] || exit 2\n  printf new > \"$(dirname \"$0\")/../installed\"\n  exit \"${FAKE_PIP_EXIT:-0}\"\nfi\n[ \"$1\" = \"-c\" ] || exit 2\nprintf '2.0.0\\n'\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&python).unwrap().permissions();
@@ -954,7 +1029,7 @@ mod tests {
         std::fs::write(
             &base_python,
             format!(
-                "#!/usr/bin/python3\nimport pathlib, shutil, sys\nif len(sys.argv) < 4 or sys.argv[1:3] != ['-m', 'venv']:\n    sys.exit(2)\nbin_dir = pathlib.Path(sys.argv[3]) / 'bin'\nbin_dir.mkdir(parents=True)\nshutil.copy2({python_template}, bin_dir / 'python3')\n"
+                "#!/usr/bin/python3\nimport pathlib, shutil, sys\nif sys.argv[1:] == ['--version']:\n    print('Python 3.12.0')\n    sys.exit(0)\nif len(sys.argv) < 4 or sys.argv[1:3] != ['-m', 'venv']:\n    sys.exit(2)\nbin_dir = pathlib.Path(sys.argv[3]) / 'bin'\nbin_dir.mkdir(parents=True)\nshutil.copy2({python_template}, bin_dir / 'python3')\n"
             ),
         )
         .unwrap();
@@ -968,6 +1043,231 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         st.snapshot()
+    }
+
+    #[test]
+    fn unsupported_python_rejects_before_creating_a_transaction_or_installer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = fake_venv("unsupported-python");
+        let base = dir.join("venv/base-python");
+        std::fs::write(
+            &base,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'Python 3.10.9\\n'; exit 0; fi\ntouch '{}/unexpected-venv'\nexit 1\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let starts = Arc::new(AtomicU64::new(0));
+        let started = Arc::clone(&starts);
+        let state = InstallState::new(
+            Arc::new(|_| {}),
+            Arc::new(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                Ok(0)
+            }),
+        );
+        assert!(start_fake_install(&state, &dir, 0, &dir.join("pin")));
+        let snapshot = wait_for_terminal(&state);
+        assert_eq!(snapshot.phase, Phase::Failed, "{}", snapshot.error);
+        assert!(
+            snapshot.error.contains(">=3.11,<3.14"),
+            "{}",
+            snapshot.error
+        );
+        assert!(snapshot.error.contains("3.10.9"), "{}", snapshot.error);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("venv/installed")).unwrap(),
+            "old"
+        );
+        assert!(pending_transactions(&dir.join("venv")).unwrap().is_empty());
+        assert!(!dir.join("unexpected-venv").exists());
+        assert!(!dir.join("pip.log").exists());
+        assert!(!dir.join("pip-cache").exists());
+        assert!(!dir.join("uv-cache").exists());
+        assert!(!dir.join("pin").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_uv_and_bootstrap_failure_restore_previous_transaction() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (name, bootstrap_exit) in [("failed-bootstrap", 1), ("missing-uv", 0)] {
+            let dir = fake_venv(name);
+            let python = dir.join("venv/bin/python3");
+            std::fs::write(
+                &python,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then touch '{}/bootstrap-attempted'; printf 'ERROR: injected bootstrap failure\\n' >&2; exit {bootstrap_exit}; fi\ntouch '{}/unexpected-command'\nexit 2\n",
+                    dir.display(), dir.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let pin = dir.join("pin");
+            std::fs::write(&pin, "1.0.0\n").unwrap();
+            let starts = Arc::new(AtomicU64::new(0));
+            let started = Arc::clone(&starts);
+            let restores = Arc::new(AtomicU64::new(0));
+            let restored = Arc::clone(&restores);
+            let active = dir.join("venv/installed");
+            let state = InstallState::with_lifecycle(
+                Arc::new(|_| {}),
+                Arc::new(move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    Ok(0)
+                }),
+                Arc::new(|| {}),
+                Arc::new(move || {
+                    assert_eq!(std::fs::read_to_string(&active).unwrap(), "old");
+                    restored.fetch_add(1, Ordering::SeqCst);
+                    Ok(0)
+                }),
+            );
+            assert!(start_fake_install(&state, &dir, 0, &pin));
+            let snapshot = wait_for_terminal(&state);
+            assert_eq!(snapshot.phase, Phase::Failed, "{name}: {}", snapshot.error);
+            assert!(!snapshot.recovery_required, "{name}: {}", snapshot.error);
+            if bootstrap_exit == 1 {
+                assert!(
+                    snapshot.error.contains("pip 安装失败"),
+                    "{}",
+                    snapshot.error
+                );
+                assert!(!dir.join("uv-cache").exists());
+            } else {
+                assert!(snapshot.error.contains("os error 2"), "{}", snapshot.error);
+                assert!(dir.join("uv-cache").is_dir());
+            }
+            assert!(dir.join("bootstrap-attempted").exists());
+            assert!(!dir.join("unexpected-command").exists());
+            assert!(!dir.join("venv/bin/uv").exists());
+            assert_eq!(starts.load(Ordering::SeqCst), 0);
+            assert_eq!(restores.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("venv/installed")).unwrap(),
+                "old"
+            );
+            assert_eq!(std::fs::read_to_string(pin).unwrap(), "1.0.0\n");
+            assert!(pending_transactions(&dir.join("venv")).unwrap().is_empty());
+            assert!(!dir.join("install.pid").exists());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn uv_bootstrap_and_install_reuse_persistent_caches_and_stop_on_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = fake_venv("uv-two-stages-cache");
+        let python = dir.join("venv/bin/python3");
+        let root = serde_json::to_string(&dir.to_string_lossy()).unwrap();
+        std::fs::write(
+            &python,
+            format!(
+                r##"#!/usr/bin/python3
+import json, os, pathlib, shutil, sys
+root = pathlib.Path({root})
+if sys.argv[1:3] == ['-m', 'pip']:
+    module = 'pip'
+elif pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install']:
+    module = 'uv'
+else:
+    sys.exit(2)
+with (root / 'installer-trace').open('a') as trace:
+    trace.write(json.dumps({{'module': module, 'argv': sys.argv[1:], 'program': sys.argv[0],
+        'cache': os.environ.get('PIP_CACHE_DIR' if module == 'pip' else 'UV_CACHE_DIR'),
+        'index': os.environ.get('PIP_INDEX_URL' if module == 'pip' else 'UV_DEFAULT_INDEX')}}) + '\n')
+if (root / ('fail-' + module)).exists():
+    sys.exit(1)
+if module == 'pip':
+    shutil.copy2(sys.argv[0], pathlib.Path(sys.argv[0]).with_name('uv'))
+"##
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let var = dir.join("var");
+        std::fs::create_dir(&var).unwrap();
+        let log = var.join("pip.log");
+        let log = log.to_str().unwrap();
+        let mirror = "https://mirrors.aliyun.com/pypi/simple/";
+        let state = InstallState::new(Arc::new(|_| {}), Arc::new(|| Ok(0)));
+        let channel = InstallChannel::Exact("2.2.2.post1".into());
+        state.run_uv(&python, &channel, mirror, log).unwrap();
+        std::fs::write(var.join("pip-cache/sentinel"), "pip cache").unwrap();
+        std::fs::write(var.join("uv-cache/sentinel"), "uv cache").unwrap();
+        state.run_uv(&python, &channel, mirror, log).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(var.join("pip-cache/sentinel")).unwrap(),
+            "pip cache"
+        );
+        assert_eq!(
+            std::fs::read_to_string(var.join("uv-cache/sentinel")).unwrap(),
+            "uv cache"
+        );
+
+        std::fs::write(dir.join("fail-pip"), "").unwrap();
+        assert!(state.run_uv(&python, &channel, mirror, log).is_err());
+        std::fs::remove_file(dir.join("fail-pip")).unwrap();
+        std::fs::write(dir.join("fail-uv"), "").unwrap();
+        assert!(state.run_uv(&python, &channel, mirror, log).is_err());
+
+        let trace = std::fs::read_to_string(dir.join("installer-trace")).unwrap();
+        let calls: Vec<serde_json::Value> = trace
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls.len(), 7);
+        for (index, module) in ["pip", "uv", "pip", "uv", "pip", "pip", "uv"]
+            .iter()
+            .enumerate()
+        {
+            let call = &calls[index];
+            assert_eq!(call["module"], *module);
+            assert_eq!(call["index"], mirror);
+            let cache = if *module == "pip" {
+                "pip-cache"
+            } else {
+                "uv-cache"
+            };
+            assert_eq!(call["cache"], var.join(cache).to_str().unwrap());
+            if *module == "pip" {
+                assert_eq!(call["program"], python.to_str().unwrap());
+                assert_eq!(
+                    call["argv"],
+                    serde_json::json!([
+                        "-m",
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "--disable-pip-version-check",
+                        "uv"
+                    ])
+                );
+            } else {
+                assert_eq!(
+                    call["program"],
+                    python.with_file_name("uv").to_str().unwrap()
+                );
+                assert_eq!(
+                    call["argv"],
+                    serde_json::json!([
+                        "pip",
+                        "install",
+                        "--upgrade",
+                        "qwenpaw==2.2.2.post1",
+                        "--python",
+                        python.to_str().unwrap()
+                    ])
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1028,8 +1328,16 @@ mod tests {
             "old"
         );
         assert_eq!(std::fs::read_to_string(pin).unwrap(), "1.0.0\n");
-        let entries = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(entries, 3, "暂存与备份目录必须清理: {entries}");
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            ["pin", "pip-cache", "pip.log", "uv-cache", "venv"],
+            "暂存与备份目录必须清理，缓存必须保留"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1082,8 +1390,16 @@ mod tests {
             "new"
         );
         assert_eq!(std::fs::read_to_string(pin).unwrap(), "2.0.0\n");
-        let entries = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(entries, 3, "成功后不得残留暂存与备份目录: {entries}");
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            ["pin", "pip-cache", "pip.log", "uv-cache", "venv"],
+            "成功后不得残留暂存与备份目录，缓存必须保留"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
