@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.1.2-14
+version                    = 1.1.2-15
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS 是第三方打包的部署外壳，与 QwenPaw 上游团队无隶属关系。</p><p>提供内核安装、版本选择、运行状态、日志、端口与下载源管理。QwenPaw 本体不随包分发，由用户从所选 PyPI 镜像安装。</p>`
 platform                   = x86
