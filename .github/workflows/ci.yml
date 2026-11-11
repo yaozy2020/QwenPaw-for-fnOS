@@ -150,4 +150,4 @@ jobs:
 
       - name: Gateway disconnected mutation recovery
         working-directory: .
-        run: python3 scripts/test-gateway-uds.py GatewayUDSTests.test_disconnected_configuration_retains_gate_until_rollback
+        run: sudo -E env "PATH=$PATH" python3 scripts/test-gateway-uds.py GatewayUDSTests.test_disconnected_configuration_retains_gate_until_rollback
