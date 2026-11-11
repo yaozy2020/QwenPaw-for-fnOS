@@ -273,7 +273,7 @@ mod tests {
     fn start_fake_install(st: &InstallState, dir: &Path, port: u16, pin: &Path) -> bool {
         st.set_base_python(dir.join("venv/base-python"));
         st.try_start(
-            dir.join("venv").to_string_lossy().into_owned(),
+            crate::runtime::RuntimeAdapter::new(dir.join("venv"), dir, dir, "info"),
             port,
             InstallChannel::Latest,
             String::new(),
@@ -1314,7 +1314,7 @@ if module == 'pip':
         );
         st.set_base_python(dir.join("venv/base-python"));
         assert!(st.try_start(
-            venv.to_string_lossy().into_owned(),
+            crate::runtime::RuntimeAdapter::new(&venv, &dir, &dir, "info"),
             crate::api::test_support::free_port(),
             InstallChannel::Latest,
             String::new(),
@@ -1376,7 +1376,7 @@ if module == 'pip':
         let st = InstallState::new(Arc::new(|_: InstallSnapshot| {}), on_success);
         st.set_base_python(dir.join("venv/base-python"));
         assert!(st.try_start(
-            venv.to_string_lossy().into_owned(),
+            crate::runtime::RuntimeAdapter::new(&venv, &dir, &dir, "info"),
             port,
             InstallChannel::Latest,
             String::new(),
@@ -1565,7 +1565,7 @@ if module == 'pip':
 
         st.set_base_python(dir.join("venv/base-python"));
         assert!(st.try_start(
-            dir.join("venv").to_string_lossy().into_owned(),
+            crate::runtime::RuntimeAdapter::new(dir.join("venv"), &dir, &dir, "info"),
             crate::api::test_support::free_port(),
             InstallChannel::Latest,
             String::new(),

@@ -78,6 +78,7 @@ export interface ApiClientOptions {
   fetch?: FetchLike;
   now?: () => number;
   readTimeoutMs?: number;
+  writeTimeoutMs?: number;
 }
 
 export type ServiceAction = "start" | "stop" | "restart";
@@ -145,6 +146,12 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     && configuredReadTimeout > 0
     ? configuredReadTimeout
     : 5_000;
+  const configuredWriteTimeout = options.writeTimeoutMs;
+  const writeTimeoutMs = typeof configuredWriteTimeout === "number"
+    && Number.isFinite(configuredWriteTimeout)
+    && configuredWriteTimeout > 0
+    ? configuredWriteTimeout
+    : 10_000;
 
   function csrfHeaders(): Record<string, string> {
     const token = readCsrfToken(cookie());
@@ -210,7 +217,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       headers.set("Content-Type", "application/json");
       init.body = JSON.stringify(body);
     }
-    return request<T>(`${base}/${route}`, init);
+    return request<T>(`${base}/${route}`, init, writeTimeoutMs);
   }
 
   function upgrade(version: string, mirror: string): Promise<ApiResult<InstallStatusResponse>> {

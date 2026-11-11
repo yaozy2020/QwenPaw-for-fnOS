@@ -1171,7 +1171,12 @@ touch "$QWENPAW_WORKING_DIR/config.json"
             ),
         );
         assert!(state.install.try_start(
-            format!("{}/venv", state.home_dir),
+            crate::runtime::RuntimeAdapter::new(
+                format!("{}/venv", state.home_dir),
+                &state.share_dir,
+                &state.etc_dir,
+                state.kernel.log_level(),
+            ),
             state.kernel.port(),
             crate::install::InstallChannel::Latest,
             String::new(),

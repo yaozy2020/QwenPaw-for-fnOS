@@ -588,7 +588,12 @@ time.sleep(3600)
         );
         state.install.set_base_python(dir.0.join("base-python"));
         assert!(state.install.try_start(
-            format!("{}/venv", state.home_dir),
+            crate::runtime::RuntimeAdapter::new(
+                format!("{}/venv", state.home_dir),
+                &state.share_dir,
+                &state.etc_dir,
+                state.kernel.log_level(),
+            ),
             port,
             crate::install::InstallChannel::Exact("2.0.0".into()),
             String::new(),

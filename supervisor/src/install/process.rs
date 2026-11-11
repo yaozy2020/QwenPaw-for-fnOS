@@ -654,20 +654,6 @@ pub(crate) fn terminate_process_group(
     }
 }
 
-/// 用 venv 内 python 读已安装内核版本(importlib.metadata)
-pub(super) fn metadata_version(python: &Path) -> String {
-    let mut cmd = std::process::Command::new(python);
-    cmd.args([
-        "-c",
-        "import importlib.metadata as m; print(m.version('qwenpaw'))",
-    ]);
-    run_with_timeout(cmd, std::time::Duration::from_secs(30), "读取内核版本")
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 /// 实际版本 vs 请求版本:PEP 440 允许前导 v 且大小写不敏感,其余按字面比较。
 /// 不相等即失败 —— 宁可报错也不静默装错版本。
 pub(super) fn version_matches(actual: &str, want: &str) -> bool {

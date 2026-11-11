@@ -63,7 +63,8 @@ test("upgrade uses the Gateway REST route, encoded JSON body, CSRF and keepalive
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.body, JSON.stringify({ version: "2.2 + rc", mirror: "https://mirror.example/simple/?a=1&b=2" }));
   assert.equal(captured.init.keepalive, true);
-  assert.equal(captured.init.signal, undefined);
+  assert.ok(captured.init.signal instanceof AbortSignal);
+  assert.equal(captured.init.signal.aborted, false);
   assert.equal(new Headers(captured.init.headers).get("X-CSRF-Token"), "csrf-token");
   assert.equal(new Headers(captured.init.headers).get("Content-Type"), "application/json");
 
@@ -246,7 +247,29 @@ test("truncated JSON responses fail explicitly instead of producing an empty suc
   });
 });
 
-test("GET requests time out and abort the underlying request while POST stays unchanged", async () => {
+test("POST requests time out and abort instead of leaving acceptance pending", async () => {
+  let capturedSignal;
+  const client = createApiClient({
+    pathname: "/app/qwenpaw/",
+    writeTimeoutMs: 20,
+    fetch: async (_url, init) => {
+      capturedSignal = init?.signal;
+      return await new Promise(() => {});
+    },
+  });
+  const result = await Promise.race([
+    client.upgrade("2.2.2", "").then(value => ({ value }), error => ({ error })),
+    new Promise(resolve => setTimeout(() => resolve({ pending: true }), 250)),
+  ]);
+  assert.equal(result.pending, undefined, "POST must settle even when acceptance never responds");
+  assert.ok(result.error instanceof ApiClientError);
+  assert.equal(result.error.kind, "network");
+  assert.match(result.error.message, /timed out/i);
+  assert.ok(capturedSignal instanceof AbortSignal);
+  assert.equal(capturedSignal.aborted, true);
+});
+
+test("GET requests time out and abort the underlying request", async () => {
   let capturedSignal;
   const client = createApiClient({
     pathname: "/app/qwenpaw/",

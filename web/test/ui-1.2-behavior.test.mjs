@@ -515,6 +515,15 @@ browserTest("unknown proxy scope cannot be silently sent as private when changin
   assert.equal(state.posts[0].csrf, "test-token");
 });
 
+browserTest("unknown proxy port disables scope changes instead of requesting automatic reassignment", async t => {
+  const { page, state } = await fixture(t, { proxy: { success: true, port: 0, public: false } });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#valWebProxyPort")).toHaveText("自动分配");
+  await expect(page.locator("#webProxyPublic")).toBeDisabled();
+  await expect(page.locator("#webProxyPublic")).toHaveJSProperty("indeterminate", true);
+  assert.equal(state.posts.length, 0);
+});
+
 browserTest("owned task remains reopenable in background and terminal without adopting other identities", async t => {
   const { page, state } = await fixture(t);
   await page.goto(origin + prefix);

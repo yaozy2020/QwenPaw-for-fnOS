@@ -621,16 +621,18 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     }
 
     let webProxyPublic: boolean | null = null;
+    let webProxyPort: number | null = null;
     let webProxyReadSeq = 0;
 
     function setWebProxyScope(value: boolean | null): void {
       webProxyPublic = value;
+      const available = value !== null && webProxyPort !== null;
       const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
       if (!toggle) return;
-      toggle.indeterminate = value === null;
-      toggle.disabled = value === null;
+      toggle.indeterminate = !available;
+      toggle.disabled = !available;
       if (value !== null) toggle.checked = value;
-      toggle.title = value === null ? "无法确认反代访问范围，请重试" : "";
+      toggle.title = available ? "" : "无法确认反代端口或访问范围，请重试";
     }
 
     async function fetchWebProxyPort() {
@@ -640,27 +642,31 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         if (seq !== webProxyReadSeq) return;
         const { data } = result;
         if (!result.ok || !data) {
+          webProxyPort = null;
           setWebProxyScope(null);
           return;
         }
+        const validPort = Number.isInteger(data.port) && data.port > 0 && data.port <= 65535;
+        webProxyPort = validPort ? data.port : null;
         const element = document.getElementById("valWebProxyPort");
-        if (element && Number.isInteger(data.port) && data.port > 0) {
-          element.innerText = String(data.port);
-        }
+        if (element && webProxyPort !== null) element.innerText = String(webProxyPort);
         setWebProxyScope(typeof data.public === "boolean" ? data.public : null);
       } catch (e) {
-        if (seq === webProxyReadSeq) setWebProxyScope(null);
+        if (seq === webProxyReadSeq) {
+          webProxyPort = null;
+          setWebProxyScope(null);
+        }
         console.error("fetchWebProxyPort err:", e);
       }
     }
 
     async function changeWebProxyPort() {
-      if (webProxyPublic === null) {
-        showToast("无法确认反代访问范围，请重试");
+      if (webProxyPublic === null || webProxyPort === null) {
+        showToast("无法确认反代端口或访问范围，请重试");
         void fetchWebProxyPort();
         return;
       }
-      const currentPort = document.getElementById("valWebProxyPort")?.innerText || "自动分配";
+      const currentPort = String(webProxyPort);
       const raw = await showModal({
         title: "修改 Web 反代端口",
         message: "输入 0 自动选择空闲端口，或输入 1024~65535 的指定端口。新端口绑定成功后才会切换，失败保留原端口。",
@@ -668,7 +674,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         confirmText: "保存并切换",
         input: {
           label: "反代端口",
-          value: currentPort === "自动分配" ? "0" : currentPort,
+          value: currentPort,
           inputMode: "numeric",
           placeholder: "0 表示自动分配",
           validate: (value) => /^[0-9]+$/.test(value) && Number(value) <= 65535,
@@ -696,6 +702,10 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       setWebProxyScope(null);
       try {
         const data = operationSucceeded(await api.changeWebProxyPort(newPort, publicAccess));
+        if (!Number.isInteger(data.port) || data.port <= 0 || data.port > 65535) {
+          throw new Error("后端未返回有效的反代端口");
+        }
+        webProxyPort = data.port;
         const element = document.getElementById("valWebProxyPort");
         if (element) element.innerText = String(data.port);
         setWebProxyScope(publicAccess);
@@ -710,7 +720,8 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
       if (!toggle) return;
       const previous = webProxyPublic;
-      if (previous === null) {
+      const port = webProxyPort;
+      if (previous === null || port === null) {
         setWebProxyScope(null);
         void fetchWebProxyPort();
         return;
@@ -729,7 +740,6 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         }
       }
       if (webProxyPublic !== previous) return;
-      const port = Number(document.getElementById("valWebProxyPort")?.innerText) || 0;
       ++webProxyReadSeq;
       setWebProxyScope(null);
       try {
@@ -780,12 +790,12 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       if (!ok) return;
       try {
         showToast("正在卸载内核并保留用户数据...");
-        const result = await api.uninstallKernel().catch(() => ({ data: { success: false, message: "后端响应异常" } }));
-        const data = result.data;
-        showToast(data.message || (data.success ? "内核已卸载" : "卸载失败"));
+        const data = operationSucceeded(await api.uninstallKernel());
+        showToast(data.message || "内核已卸载");
         await fetchStatus();
         fetchLogs();
       } catch (e) {
+        console.error("uninstallKernel err:", e);
         showToast("卸载请求失败: " + errorMessage(e));
       }
     }
@@ -857,15 +867,11 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
     async function saveMirror() {
       try {
-        const { data: d } = await api.setMirror(mirrorValue);
-        if (d.success) {
-          showToast("下载源已保存，版本查询与内核安装将共用此源");
-          await fetchVersionList();
-        } else {
-          showToast("保存失败: " + (d.message || ""));
-        }
+        operationSucceeded(await api.setMirror(mirrorValue));
+        showToast("下载源已保存，版本查询与内核安装将共用此源");
+        await fetchVersionList();
       } catch (e) {
-        showToast("下载源保存失败");
+        showToast("下载源保存失败: " + errorMessage(e));
       }
     }
 

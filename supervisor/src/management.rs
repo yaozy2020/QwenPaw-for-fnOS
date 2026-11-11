@@ -129,8 +129,11 @@ impl ManagementCore {
         }
 
         self.kernel.stop().await;
+        if let Some(error) = self.kernel.stop_verification_error() {
+            return Err(ManagementError::OperationFailed(error));
+        }
         let started = self.install.try_start(
-            format!("{}/venv", self.home_dir),
+            self.runtime_adapter(),
             self.kernel.port(),
             channel,
             mirror,

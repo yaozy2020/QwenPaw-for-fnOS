@@ -5,6 +5,7 @@
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHELLCHECK_VER="0.10.0"
+SHELLCHECK_SHA256="f35ae15a4677945428bdfe61ccc297490d89dd1e544cc06317102637638c6deb"
 fail=0
 
 echo "========== lint: 语法与静态检查 =========="
@@ -47,21 +48,41 @@ else
     fail=1
 fi
 
+shellcheck_hash_valid() {
+    [ -f "$1" ] || return 1
+    local actual
+    actual="$(sha256sum "$1")" || return 1
+    [ "${actual%% *}" = "$SHELLCHECK_SHA256" ]
+}
+
 echo "[2/6] shellcheck v${SHELLCHECK_VER} ..."
 SC_BIN="$(command -v shellcheck 2>/dev/null || true)"
+if [ -n "$SC_BIN" ] && ! shellcheck_hash_valid "$SC_BIN"; then
+    echo "  [WARN] 系统 shellcheck 哈希不符合钉住的 v${SHELLCHECK_VER}，改用隔离缓存"
+    SC_BIN=""
+fi
 if [ -z "$SC_BIN" ]; then
     CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/qwenpaw-build"
     mkdir -p "$CACHE_DIR"
     SC_BIN="$CACHE_DIR/shellcheck"
-    if [ ! -x "$SC_BIN" ]; then
+    if [ -f "$SC_BIN" ] && ! shellcheck_hash_valid "$SC_BIN"; then
+        echo "  [FAIL] 缓存 shellcheck SHA256 不匹配，拒绝执行并重新下载"
+        rm -f "$SC_BIN"
+    fi
+    if [ ! -f "$SC_BIN" ]; then
         TARBALL="$CACHE_DIR/shellcheck-${SHELLCHECK_VER}.tar.xz"
-        if curl -sL --max-time 120 -o "$TARBALL" \
+        if curl -fSL --max-time 120 -o "$TARBALL" \
             "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VER}/shellcheck-v${SHELLCHECK_VER}.linux.x86_64.tar.xz" \
-            && tar -xJf "$TARBALL" -C "$CACHE_DIR" "shellcheck-v${SHELLCHECK_VER}/shellcheck" 2>/dev/null; then
+            && tar -xJf "$TARBALL" -C "$CACHE_DIR" "shellcheck-v${SHELLCHECK_VER}/shellcheck"; then
             mv "$CACHE_DIR/shellcheck-v${SHELLCHECK_VER}/shellcheck" "$SC_BIN"
-            chmod +x "$SC_BIN"
-            rm -f "$TARBALL"
         fi
+        rm -f "$TARBALL"
+    fi
+    if ! shellcheck_hash_valid "$SC_BIN"; then
+        echo "  [FAIL] shellcheck SHA256 校验失败，禁止进入门禁执行"
+        SC_BIN=""
+    else
+        chmod +x "$SC_BIN"
     fi
 fi
 if [ -n "$SC_BIN" ] && [ -x "$SC_BIN" ]; then

@@ -408,13 +408,14 @@ impl InstallState {
 
     pub fn try_start(
         &self,
-        venv_dir: String,
+        runtime: crate::runtime::RuntimeAdapter,
         kernel_port: u16,
         channel: InstallChannel,
         mirror: String,
         pip_log: String,
         pin_path: String,
     ) -> bool {
+        let venv_dir = runtime.venv_dir().to_string_lossy().into_owned();
         let pid_file = match process::install_pid_file(Path::new(&pip_log)) {
             Ok(path) => path,
             Err(_) => return false,
@@ -497,11 +498,7 @@ impl InstallState {
                     let transaction = pending_transaction.as_mut().unwrap();
                     let python = transaction.python();
                     this.run_uv(&python, &channel, &mirror, &pip_log)?;
-                    let mut metadata = std::process::Command::new(&python);
-                    metadata.args([
-                        "-c",
-                        "import importlib.metadata as m; print(m.version('qwenpaw'))",
-                    ]);
+                    let metadata = runtime.metadata_command_for(&python);
                     let metadata = this
                         .run_cancellable_command(
                             metadata,
@@ -655,7 +652,7 @@ printf '2.0.0\n'
         state.set_base_python(dir.join("venv/base-python"));
 
         assert!(state.try_start(
-            active.to_string_lossy().into_owned(),
+            crate::runtime::RuntimeAdapter::new(&active, &dir, &dir, "info"),
             crate::api::test_support::free_port(),
             InstallChannel::Latest,
             String::new(),

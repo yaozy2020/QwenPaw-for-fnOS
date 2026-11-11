@@ -145,22 +145,30 @@ def ensure_fpkstudio_bin():
         with urllib.request.urlopen(req, timeout=120) as resp, open(fpk_path, "wb") as f:
             shutil.copyfileobj(resp, f)
 
-        # 解压获取 bin/fpkstudio
-        res = subprocess.run(
-            ["sh", "-c", f"tar -zxOf '{fpk_path}' app.tgz | tar -zx -C '{td}' bin/fpkstudio"],
-            capture_output=True, text=True
-        )
-        if res.returncode != 0:
-            print(f"ERROR: 提取 fpkstudio 失败: {res.stderr}", file=sys.stderr)
+        try:
+            with tarfile.open(fpk_path, "r:gz") as outer:
+                app_member = outer.getmember("app.tgz")
+                if not app_member.isfile():
+                    raise ValueError("app.tgz 不是普通文件")
+                app_data = outer.extractfile(app_member).read()
+            with tarfile.open(fileobj=io.BytesIO(app_data), mode="r:gz") as app:
+                member = app.getmember("bin/fpkstudio")
+                if not member.isfile():
+                    raise ValueError("bin/fpkstudio 不是普通文件")
+                payload = app.extractfile(member).read()
+        except (KeyError, OSError, tarfile.TarError, ValueError) as error:
+            print(f"ERROR: 提取 fpkstudio 失败: {error}", file=sys.stderr)
             sys.exit(1)
 
-        extracted_bin = os.path.join(td, "bin", "fpkstudio")
-        with open(extracted_bin, "rb") as f:
-            sha = hashlib.sha256(f.read()).hexdigest()
+        sha = hashlib.sha256(payload).hexdigest()
         if sha != EXPECTED_FPKSTUDIO_SHA256:
             print(f"ERROR: fpkstudio SHA256 校验失败: 期望 {EXPECTED_FPKSTUDIO_SHA256}, 实际 {sha}", file=sys.stderr)
             sys.exit(1)
 
+        extracted_bin = os.path.join(td, "fpkstudio")
+        with open(extracted_bin, "xb") as f:
+            f.write(payload)
+        os.chmod(extracted_bin, 0o755)
         shutil.copy2(extracted_bin, FPKSTUDIO_BIN)
         os.chmod(FPKSTUDIO_BIN, 0o755)
         print(f"[fpkstudio] 校验通过，就绪: {FPKSTUDIO_BIN}")

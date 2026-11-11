@@ -56,16 +56,7 @@ pub(super) async fn start(
 }
 
 pub(super) fn stop_verification_error(kernel: &crate::kernel::KernelManager) -> Option<String> {
-    let clean = kernel.last_stop_clean();
-    let status = kernel.status_now();
-    if clean && !status.running {
-        None
-    } else {
-        Some(format!(
-            "内核停止核验失败: last_stop_clean={clean}, running={}, pid={}",
-            status.running, status.pid
-        ))
-    }
+    kernel.stop_verification_error()
 }
 
 pub(super) async fn stop(

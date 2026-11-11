@@ -10,7 +10,6 @@ use std::{
     collections::BTreeMap,
     os::unix::process::CommandExt,
     path::Path,
-    process,
     sync::{
         atomic::{AtomicU16, Ordering},
         Mutex,
@@ -235,9 +234,13 @@ impl KernelManager {
             }
         }
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
-        let mut cmd = process::Command::new(&bin);
-        cmd.arg("-c")
-            .arg("import importlib.metadata as m; print(m.version('qwenpaw'))");
+        let runtime = crate::runtime::RuntimeAdapter::new(
+            &self.cfg.venv_dir,
+            &self.cfg.share_dir,
+            &self.cfg.etc_dir,
+            self.log_level(),
+        );
+        let cmd = runtime.metadata_command_for(Path::new(&bin));
         let version =
             match crate::install::run_with_timeout(cmd, timeout, "读取内核版本(缓存失效路径)")
             {
@@ -275,6 +278,19 @@ impl KernelManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .last_stop_clean
+    }
+
+    pub fn stop_verification_error(&self) -> Option<String> {
+        let clean = self.last_stop_clean();
+        let status = self.status_now();
+        if clean && !status.running {
+            None
+        } else {
+            Some(format!(
+                "内核停止核验失败: last_stop_clean={clean}, running={}, pid={}",
+                status.running, status.pid
+            ))
+        }
     }
 
     fn record_stop_failure(

@@ -228,11 +228,18 @@ for (const responseCase of [
     await page.locator("#modalConfirmBtn").click();
     await expect(page.locator("#toast")).toContainText("操作失败");
 
+    await page.locator("#mirrorToggleBtn").click();
+    await page.locator("#mirrorDropdown .history-item").first().click();
+    await expect(page.locator("#toast")).toContainText("下载源保存失败");
+    await page.locator("#btnUninstallKernel").click();
+    await page.locator("#modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText("卸载请求失败");
+
     await page.locator("#btnUpgradeAction").click();
     await page.locator("#modalConfirmBtn").click();
     await expect(page.locator("#toast")).toContainText("安装请求失败");
     await expect(page.locator("#upgradeModal")).not.toHaveClass(/active/);
-    expect(posts).toEqual(["port", "web-proxy/port", "kernel/reset-auth", "start", "kernel/install"]);
+    expect(posts).toEqual(["port", "web-proxy/port", "kernel/reset-auth", "start", "mirror", "kernel/uninstall", "kernel/install"]);
 
     validToggle = true;
     await page.locator("#webProxyPublic").check();

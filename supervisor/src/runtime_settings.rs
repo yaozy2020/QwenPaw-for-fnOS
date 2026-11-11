@@ -99,6 +99,13 @@ pub async fn apply(core: &ManagementCore, patch: SettingsPatch) -> ApplyOutcome 
 
     if restart {
         core.kernel.stop().await;
+        if let Some(error) = core.kernel.stop_verification_error() {
+            let message = match transaction.rollback() {
+                Ok(()) => error,
+                Err(rollback) => format!("{error}; 配置事务清理失败: {rollback}"),
+            };
+            return outcome(Err(failed(message)), false);
+        }
     }
     core.kernel.set_port(new_port);
     if let Err(error) = core.kernel.set_log_level(&new_level) {

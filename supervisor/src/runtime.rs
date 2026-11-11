@@ -47,8 +47,12 @@ impl RuntimeAdapter {
         self.venv_dir.join("bin/python3")
     }
 
-    pub(crate) fn metadata_version(&self) -> Result<String, MetadataError> {
-        let mut command = Command::new(self.python());
+    pub(crate) fn venv_dir(&self) -> &Path {
+        &self.venv_dir
+    }
+
+    pub(crate) fn metadata_command_for(&self, python: &Path) -> Command {
+        let mut command = Command::new(python);
         command
             .args(["-c", INIT_PROBE])
             .current_dir(&self.share_dir)
@@ -58,6 +62,11 @@ impl RuntimeAdapter {
                 "QWENPAW_DEPENDENCY_STATE_DIR",
                 self.share_dir.join("dependency-environments"),
             );
+        command
+    }
+
+    pub(crate) fn metadata_version(&self) -> Result<String, MetadataError> {
+        let command = self.metadata_command_for(&self.python());
         let output = crate::install::run_with_timeout(command, METADATA_TIMEOUT, "读取内核版本")
             .map_err(|error| MetadataError {
                 message: format!("读取内核版本失败: {error}"),
