@@ -145,70 +145,9 @@ pub(super) async fn install_status(
     .into_response()
 }
 
-#[derive(Debug)]
-enum RemoveKernelFilesError {
-    BeforeRemoval(String),
-    PartialRemoval(String),
-}
-
-fn remove_kernel_files(
-    home: &std::path::Path,
-    var: &std::path::Path,
-) -> Result<Vec<String>, RemoveKernelFilesError> {
-    let venv = home.join("venv");
-    let pin = var.join("qwenpaw-version");
-    if !venv.exists() {
-        return match std::fs::remove_file(&pin) {
-            Ok(()) => Ok(Vec::new()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(RemoveKernelFilesError::BeforeRemoval(format!(
-                "删除版本钉失败: {e}"
-            ))),
-        };
-    }
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let trash = home.join(format!(".venv.uninstall.{}.{unique}", std::process::id()));
-    let pin_backup = var.join(format!(
-        ".qwenpaw-version.uninstall.{}.{unique}",
-        std::process::id()
-    ));
-    let had_pin = pin.exists();
-    if had_pin {
-        std::fs::rename(&pin, &pin_backup)
-            .map_err(|e| RemoveKernelFilesError::BeforeRemoval(format!("备份版本钉失败: {e}")))?;
-    }
-    if let Err(e) = std::fs::rename(&venv, &trash) {
-        if had_pin {
-            if let Err(restore_error) = std::fs::rename(&pin_backup, &pin) {
-                return Err(RemoveKernelFilesError::PartialRemoval(format!(
-                    "移出内核运行环境失败: {e}; 恢复版本钉失败: {restore_error}; 状态未能恢复且不可回滚"
-                )));
-            }
-        }
-        return Err(RemoveKernelFilesError::BeforeRemoval(format!(
-            "移出内核运行环境失败: {e}"
-        )));
-    }
-    let mut warnings = Vec::new();
-    if let Err(e) = std::fs::remove_dir_all(&trash) {
-        warnings.push(format!("运行环境残留于 {}: {e}", trash.display()));
-    }
-    if had_pin {
-        if let Err(e) = std::fs::remove_file(&pin_backup) {
-            warnings.push(format!("版本钉备份残留于 {}: {e}", pin_backup.display()));
-        }
-    }
-    if !warnings.is_empty() {
-        return Err(RemoveKernelFilesError::PartialRemoval(format!(
-            "内核文件已部分删除，不可回滚；{}",
-            warnings.join("；")
-        )));
-    }
-    Ok(warnings)
-}
+use crate::install::removal::{
+    remove as remove_kernel_files, RemovalError as RemoveKernelFilesError,
+};
 
 pub(super) async fn kernel_uninstall(
     State(state): State<AppState>,
@@ -221,6 +160,7 @@ pub(super) async fn kernel_uninstall(
         Ok(guard) => guard,
         Err(response) => return *response,
     };
+    let was_running = state.kernel.status_now().running;
     state.kernel.stop().await;
     if let Some(error) = super::lifecycle::stop_verification_error(&state.kernel) {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
@@ -233,19 +173,22 @@ pub(super) async fn kernel_uninstall(
     .await
     .unwrap_or_else(|e| {
         Err(RemoveKernelFilesError::PartialRemoval(format!(
-            "卸载文件操作异常退出，文件状态未知且不可回滚: {e}"
+            "卸载文件操作异常退出，文件状态待恢复: {e}"
         )))
     });
 
     let warnings = match res {
         Ok(warnings) => warnings,
         Err(RemoveKernelFilesError::BeforeRemoval(error)) => {
-            let kernel = Arc::clone(&state.kernel);
-            let _ = tokio::task::spawn_blocking(move || kernel.spawn()).await;
+            if was_running {
+                let kernel = Arc::clone(&state.kernel);
+                let _ = tokio::task::spawn_blocking(move || kernel.spawn()).await;
+            }
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
         }
         Err(RemoveKernelFilesError::PartialRemoval(error)) => {
             state.kernel.invalidate_version();
+            state.install.block_recovery(error.clone());
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
         }
     };
@@ -709,39 +652,25 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     }
 
     #[tokio::test]
-    async fn kernel_uninstall_reports_runtime_removal_residue_without_claiming_rollback() {
+    async fn kernel_uninstall_rejects_non_directory_runtime_before_moving_pin() {
         let dir = TestDir::new("uninstall-runtime-residue");
         let state = dir.state(crate::api::test_support::free_port());
         let home = std::path::Path::new(&state.home_dir);
         let var = std::path::Path::new(&state.var_dir);
         std::fs::write(home.join("venv"), "not-a-directory").unwrap();
         std::fs::write(var.join("qwenpaw-version"), "2.3.0\n").unwrap();
-        std::fs::write(&state.ui_config_file, r#"{".url":{}}"#).unwrap();
-
         let response = kernel_uninstall(State(state.clone()), uninstall_request(&state)).await;
-        let status = response.status();
-        let value = response_json(response).await;
-        let message = value["message"].as_str().unwrap_or_default();
-        let residue_exists = std::fs::read_dir(home)
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".venv.uninstall.")
-            });
-
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(value["success"], false);
-        assert!(!home.join("venv").exists());
-        assert!(
-            residue_exists,
-            "failed cleanup must leave a reportable residue"
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response_json(response).await["success"], false);
+        assert_eq!(
+            std::fs::read_to_string(home.join("venv")).unwrap(),
+            "not-a-directory"
         );
-        assert!(!var.join("qwenpaw-version").exists());
-        assert!(message.contains("残留"), "{message}");
-        assert!(message.contains("不可回滚"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(var.join("qwenpaw-version")).unwrap(),
+            "2.3.0\n"
+        );
+        assert!(!var.join("kernel-uninstall.json").exists());
     }
 
     #[tokio::test]

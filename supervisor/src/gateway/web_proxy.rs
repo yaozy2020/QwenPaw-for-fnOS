@@ -41,7 +41,18 @@ pub(super) async fn forward(
     path: &str,
     secure: bool,
 ) -> Response {
-    forward_impl(state, request, path, secure, true).await
+    // Mounted HTML/JS/CSS is fetched as identity for path rewriting. Compress the
+    // resulting representation for the browser, just as the TCP entry does.
+    // Keep this around the Console only: management API/static handling is separate.
+    let service = tower::service_fn(|request| async move {
+        Ok::<_, std::convert::Infallible>(forward_impl(state, request, path, secure, true).await)
+    });
+    match tower::ServiceExt::oneshot(tower_http::compression::Compression::new(service), request)
+        .await
+    {
+        Ok(response) => response.map(Body::new),
+        Err(never) => match never {},
+    }
 }
 
 pub(crate) async fn forward_root(

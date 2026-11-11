@@ -138,7 +138,7 @@ test("Web proxy port UI handles validation, conflict and successful automatic se
   await page.route("**/api/web-proxy/port**", async route => {
     const request = route.request();
     if (request.method() === "GET") {
-      await route.fulfill({ json: { success: true, port: 43126 } });
+      await route.fulfill({ json: { success: true, port: 43126, public: false } });
       return;
     }
     const { port } = request.postDataJSON() as { port: number };
@@ -660,7 +660,9 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   expect(await betaHealth.json()).toEqual({ version: "2.1.0b1" });
   await page.locator("#btnUpClose").click();
 
-  await page.getByRole("button", { name: "清屏", exact: true }).click();
+  await page.getByRole("button", { name: "清空日志", exact: true }).click();
+  await expect(page.locator("#modalTitle")).toHaveText("删除服务日志");
+  await page.locator("#modalConfirmBtn").click();
   await expect.poll(async () => readFile(fixture.files.kernelLog, "utf8")).not.toContain("browser-e2e-runtime-log");
   await expect.poll(async () => (await observations(request)).forwarded.some(item => item.path === `${api}logs/clear` && item.method === "POST" && item.success === true)).toBe(true);
   await page.locator("#btnUninstallKernel").click();

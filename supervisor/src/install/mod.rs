@@ -3,6 +3,7 @@ mod io;
 mod pip;
 #[allow(dead_code)]
 mod process;
+pub(crate) mod removal;
 mod transaction;
 
 pub use channel::*;

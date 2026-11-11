@@ -534,6 +534,18 @@ pub fn recover_pending_transactions(
     let Some(parent) = venv_dir.parent().filter(|p| p.exists()) else {
         return Ok(report);
     };
+    if let Some(var) = pin_path.parent() {
+        if super::removal::pending(parent, var)? {
+            if !tx_files.is_empty() {
+                return Err(std::io::Error::other("安装与卸载记录同时存在，保留待检查"));
+            }
+            if let Some(stop) = stop_kernel {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop))
+                    .map_err(|_| std::io::Error::other("停止内核失败，未恢复卸载"))?;
+            }
+            super::removal::recover(parent, var)?;
+        }
+    }
     let mut records = Vec::new();
     for tx_path in &tx_files {
         let parsed = std::fs::read_to_string(tx_path).and_then(|content| {
@@ -651,10 +663,7 @@ pub fn recover_pending_transactions(
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(".venv.staging.")
-                || name.starts_with(".venv.uninstall.")
-                || name.starts_with(".venv.rollback.")
-            {
+            if name.starts_with(".venv.staging.") || name.starts_with(".venv.rollback.") {
                 if let Err(e) = remove_tree(&entry.path()) {
                     report
                         .pending
@@ -667,8 +676,7 @@ pub fn recover_pending_transactions(
                 let entry = entry?;
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.starts_with(".qwenpaw-version.uninstall.") || name == ".qwenpaw-version.tmp"
-                {
+                if name == ".qwenpaw-version.tmp" {
                     if let Err(e) = remove_file(&entry.path()) {
                         report
                             .pending

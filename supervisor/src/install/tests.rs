@@ -2569,6 +2569,7 @@ if module == 'pip':
         std::fs::create_dir_all(&var).unwrap();
         let pin = var.join("qwenpaw-version");
 
+        std::fs::remove_dir_all(&active).unwrap(); // legacy uninstall already moved the active venv
         let trash_venv = dir.join(".venv.uninstall.123.456");
         let orphan_rollback = dir.join(".venv.rollback.789.012");
         let trash_pin = var.join(".qwenpaw-version.uninstall.123.456");

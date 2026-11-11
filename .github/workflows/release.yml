@@ -147,15 +147,15 @@ jobs:
       - name: Frontend dependency audit
         run: npm audit --prefix web --registry=https://registry.npmjs.org
 
-      - name: Frontend Node tests
-        run: npm test --prefix web
-
-      - name: Frontend strict typecheck
-        run: npm run typecheck --prefix web
-
       - name: Install Chromium and system dependencies
         working-directory: web
         run: npx playwright install --with-deps chromium
+
+      - name: Frontend Node and browser behavior tests
+        run: STRICT_CI=1 npm test --prefix web
+
+      - name: Frontend strict typecheck
+        run: npm run typecheck --prefix web
 
       - name: Chromium Gateway UDS E2E delivery gate
         run: |
@@ -170,6 +170,12 @@ jobs:
         env:
           STRICT_CI: "1"
         run: bash scripts/lint.sh
+
+      - name: Supervisor API and recovery transactions
+        run: python3 scripts/test-supervisor-api.py
+
+      - name: Gateway disconnected mutation recovery
+        run: python3 scripts/test-gateway-uds.py GatewayUDSTests.test_disconnected_configuration_retains_gate_until_rollback
 
       - name: Install pinned musl build toolchain
         run: |

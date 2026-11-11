@@ -3,6 +3,7 @@
 //! 监督者被 SIGKILL 时内核存活,下次启动由 /proc 收养(D1)。
 
 mod api;
+mod auth_reset;
 mod cli;
 mod config;
 mod control;
@@ -383,19 +384,37 @@ fn serve() {
         .parent()
         .map(|p| p.join(".qwenpaw.secret/auth.json"));
     if let Some(auth) = auth {
-        let bak = auth.with_extension("json.bak-reset");
-        if !auth.exists() && bak.exists() {
-            kernel.stop_sync();
-            match std::fs::rename(&bak, &auth) {
-                Ok(()) => logf("recovery: 从 bak-reset 还原管理员认证文件"),
-                Err(e) => {
-                    let reason = format!("认证恢复失败: {e}");
-                    logf(&reason);
-                    install.block_recovery(reason);
+        let transaction = auth_reset::AuthReset::new(&auth, std::path::Path::new(&cfg.var_dir));
+        let recovered = transaction.pending().and_then(|pending| {
+            if pending {
+                kernel.stop_sync();
+                if !kernel.last_stop_clean() {
+                    return Err(std::io::Error::other("认证恢复前无法安全停止内核"));
                 }
+                transaction.recover()?;
+                logf("recovery: 认证重置记录已恢复");
             }
+            Ok(())
+        });
+        if let Err(error) = recovered {
+            let reason = format!("认证恢复失败: {error}");
+            logf(&reason);
+            install.block_recovery(reason);
+            kernel.stop_sync();
         }
     }
+
+    let proxy_port =
+        match settings_transaction::recover_web_proxy(std::path::Path::new(&cfg.var_dir)) {
+            Ok(_) => Config::load().web_proxy_port,
+            Err(error) => {
+                let reason = format!("反代配置恢复失败: {error}");
+                logf(&reason);
+                install.block_recovery(reason);
+                kernel.stop_sync();
+                None // Keep management available without exposing an ambiguous listener.
+            }
+        };
 
     if install.recovery_error().is_none() {
         if let Err(e) = api::sync_main_entry(
@@ -434,7 +453,7 @@ fn serve() {
         auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
         web_proxy: None,
     };
-    if let Some(port) = cfg.web_proxy_port {
+    if let Some(port) = proxy_port {
         let public = std::env::var("QWENPAW_WEB_PROXY_PUBLIC")
             .ok()
             .or_else(|| std::fs::read_to_string(format!("{}/web_proxy_public", cfg.var_dir)).ok())

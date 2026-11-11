@@ -474,7 +474,29 @@ fn secure_tree_node(
     private_files: bool,
     owner: Option<PlatformOwner>,
 ) -> io::Result<()> {
+    secure_tree_node_with_euid(
+        path,
+        directory_mode,
+        file_mode,
+        private_files,
+        owner,
+        unsafe { libc::geteuid() },
+    )
+}
+
+fn secure_tree_node_with_euid(
+    path: &Path,
+    directory_mode: u32,
+    file_mode: u32,
+    private_files: bool,
+    owner: Option<PlatformOwner>,
+    euid: libc::uid_t,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
+    if euid != 0 && std::os::unix::fs::MetadataExt::uid(&metadata) != euid {
+        // package 回调不能修改其他用户所有的数据；保留原状，由 root 初始化负责权限收敛。
+        return Ok(());
+    }
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return Ok(());
@@ -482,27 +504,34 @@ fn secure_tree_node(
     if file_type.is_dir() {
         let entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
         for entry in entries {
-            secure_tree_node(
+            secure_tree_node_with_euid(
                 &entry.path(),
                 directory_mode,
                 file_mode,
                 private_files,
                 owner,
+                euid,
             )?;
         }
         set_owner(path, owner)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(directory_mode))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(directory_mode)).map_err(|error| {
+            io::Error::new(error.kind(), format!("chmod {}: {error}", path.display()))
+        })?;
     } else if file_type.is_file() {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         if private_files && is_private_var_file(&name) {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+                io::Error::new(error.kind(), format!("chmod {}: {error}", path.display()))
+            })?;
         } else {
             let mode = if directory_mode == 0o750 && metadata.permissions().mode() & 0o111 != 0 {
                 0o750
             } else {
                 file_mode
             };
-            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
+                io::Error::new(error.kind(), format!("chmod {}: {error}", path.display()))
+            })?;
         }
         set_owner(path, owner)?;
     }
@@ -797,6 +826,31 @@ mod tests {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn non_root_permission_pass_preserves_foreign_files_and_secures_owned_files() {
+        let var = temp_var("foreign-permissions");
+        fs::create_dir_all(&var).unwrap();
+        let path = var.join("workspace-backup");
+        fs::write(&path, "preserve contents").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let caller = unsafe { libc::geteuid() };
+
+        secure_tree_node_with_euid(&path, 0o750, 0o600, true, None, caller + 1).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"preserve contents");
+
+        secure_tree_node_with_euid(&path, 0o750, 0o600, true, None, caller).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"preserve contents");
+        fs::remove_dir_all(var).unwrap();
     }
 
     #[test]

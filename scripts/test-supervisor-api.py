@@ -521,6 +521,123 @@ def test_settings_crash_recovery(fixture):
     print("PASS: SIGKILL during settings restart restores exact files and in-memory configuration before API startup")
 
 
+def test_disconnected_settings_finishes_rollback(fixture):
+    import struct
+
+    fixture.start()
+    assert fixture.request("/start", {})[0] == 200
+    wait_for(lambda: fixture.request("/status")[1]["running"])
+    files = [fixture.root / "var/service_port", fixture.root / "var/qwenpaw-log-level", fixture.ui]
+    original = [path.read_bytes() for path in files]
+    pause = fixture.root / "pause-kernel"
+    pause.touch()
+    journal = fixture.root / "var/settings-transaction.json"
+    body = json.dumps({"port": free_port(), "log_level": "debug"}).encode()
+    with socket.create_connection(("127.0.0.1", fixture.sup_port), timeout=5) as stream:
+        stream.sendall((
+            f"POST /settings HTTP/1.1\r\nHost: localhost\r\nX-Supervisor-Token: {TOKEN}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+        ).encode() + body)
+        wait_for(lambda: journal.exists() and (fixture.root / "kernel-paused").exists())
+        assert fixture.request("/mirror", {"mirror": ""})[0] == 409
+        stream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    # Let the old request's connection task observe RST before checking its gate.
+    time.sleep(0.1)
+    assert fixture.request("/mirror", {"mirror": ""})[0] == 409, "disconnect released the operation lock"
+    pause.unlink()
+    wait_for(lambda: not journal.exists(), timeout=25)
+    assert [path.read_bytes() for path in files] == original
+    wait_for(lambda: fixture.request("/mirror", {"mirror": ""})[0] == 200)
+    assert not fixture.request("/kernel/install-status")[1]["recovery_required"]
+    print("PASS: disconnected configuration retains the operation lock through rollback and restores files")
+
+
+def test_legacy_uninstall_pin_recovery(fixture):
+    pin = fixture.root / "var/qwenpaw-version"
+    backup = fixture.root / "var/.qwenpaw-version.uninstall.12.34"
+    pin.rename(backup)
+    fixture.start()
+    assert fixture.python.is_file()
+    assert pin.read_text() == "1.0.0\n"
+    assert not backup.exists()
+    assert not fixture.request("/kernel/install-status")[1]["recovery_required"]
+    print("PASS: legacy uninstall interrupted before venv move restores the exact version pin")
+
+
+def test_committed_uninstall_recovery(fixture):
+    var = fixture.root / "var"
+    home = fixture.root / "home"
+    (home / "venv").rename(home / ".venv.uninstall.12.34")
+    (var / "qwenpaw-version").rename(var / ".qwenpaw-version.uninstall.12.34")
+    (var / "kernel-uninstall.json").write_text(json.dumps({
+        "schema": 1, "id": "12.34", "committed": True, "had_runtime": True, "had_pin": True,
+    }))
+    fixture.start()
+    assert not (home / "venv").exists()
+    assert not (home / ".venv.uninstall.12.34").exists()
+    assert not (var / "qwenpaw-version").exists()
+    assert not (var / ".qwenpaw-version.uninstall.12.34").exists()
+    assert not (var / "kernel-uninstall.json").exists()
+    assert not fixture.request("/kernel/install-status")[1]["recovery_required"]
+    print("PASS: committed uninstall startup finishes cleanup without restoring removed runtime")
+
+
+def test_auth_reset_recovery(fixture):
+    secret = fixture.root / "share/.qwenpaw.secret"
+    secret.mkdir()
+    auth = secret / "auth.json"
+    backup = secret / "auth.json.bak-reset"
+    journal = fixture.root / "var/auth-reset.json"
+    auth.write_text("new-auth")
+    backup.write_text("old-auth")
+    fixture.start()
+    assert fixture.request("/kernel/install-status")[1]["recovery_required"]
+    assert fixture.request("/mirror", {"mirror": ""})[0] == 409
+    assert auth.read_text() == "new-auth" and backup.read_text() == "old-auth"
+    fixture.stop()
+    journal.write_text(json.dumps({"schema": 1, "committed": False}))
+    fixture.start()
+    assert auth.read_text() == "old-auth"
+    assert not backup.exists() and not journal.exists()
+    assert not fixture.request("/kernel/install-status")[1]["recovery_required"]
+    fixture.stop()
+    auth.rename(backup)
+    auth.write_text("committed-new-auth")
+    journal.write_text(json.dumps({"schema": 1, "committed": True}))
+    fixture.start()
+    assert auth.read_text() == "committed-new-auth"
+    assert not backup.exists() and not journal.exists()
+    assert not fixture.request("/kernel/install-status")[1]["recovery_required"]
+    print("PASS: auth reset blocks ambiguous legacy state, restores prepared state, and keeps committed credentials")
+
+
+def test_proxy_settings_recovery(fixture):
+    var = fixture.root / "var"
+    port = free_port()
+    journal = var / "web-proxy-transaction.json"
+    journal.write_text(json.dumps({
+        "schema": 1,
+        "port": {"bytes": list(f"{port}\n".encode()), "mode": 0o600},
+        "public": {"bytes": list(b"0\n"), "mode": 0o600},
+    }))
+    (var / "web_proxy_port").write_text(f"{free_port()}\n")
+    (var / "web_proxy_public").write_text("1\n")
+    fixture.env.pop("QWENPAW_WEB_PROXY_PORT", None)
+    fixture.env.pop("QWENPAW_WEB_PROXY_PUBLIC", None)
+    fixture.start()
+    result = fixture.request("/web-proxy/port")[1]
+    assert result["port"] == port and result["public"] is False, result
+    assert not journal.exists()
+    assert (var / "web_proxy_public").read_text() == "0\n"
+    fixture.stop()
+    journal.write_text("broken")
+    fixture.start()
+    assert fixture.request("/kernel/install-status")[1]["recovery_required"]
+    assert fixture.request("/web-proxy/port")[0] == 404
+    assert journal.read_text() == "broken"
+    print("PASS: proxy port and access recover together; corrupt state disables proxy while management remains available")
+
+
 def main():
     if not BIN.is_file():
         raise SystemExit(f"test supervisor binary not found: {BIN}")
@@ -538,6 +655,11 @@ def main():
                 ("settings", test_settings),
                 ("auth-methods", test_authentication_and_methods),
                 ("settings-crash", test_settings_crash_recovery),
+                ("settings-disconnect", test_disconnected_settings_finishes_rollback),
+                ("legacy-uninstall", test_legacy_uninstall_pin_recovery),
+                ("uninstall-committed", test_committed_uninstall_recovery),
+                ("auth-reset-recovery", test_auth_reset_recovery),
+                ("proxy-recovery", test_proxy_settings_recovery),
                 ("gate", test_recovery_gate),
                 ("shutdown", test_shutdown),
                 ("process-tree", test_process_tree_shutdown),

@@ -1,4 +1,13 @@
-import { renderStatusCard, renderLogLines, renderMirrorOptions, renderVersionCards, renderHistoryItems } from "./components";
+import {
+  renderStatusCard,
+  renderLogLines,
+  renderMirrorOptions,
+  renderVersionCards,
+  renderHistoryItems,
+  renderInstallSteps,
+  type InstallStep,
+  type InstallStepsState,
+} from "./components";
 import { formatUptime } from "./statusStore";
 import {
   createInstallTask,
@@ -90,16 +99,16 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       const sun = document.getElementById("themeIconSun");
       const moon = document.getElementById("themeIconMoon");
       const txt = document.getElementById("themeText");
+      const toggle = document.getElementById("themeToggleBtn");
+      const light = t === "light";
 
-      if (t === "light") {
-        if (sun) sun.style.display = "inline-block";
-        if (moon) moon.style.display = "none";
-        if (txt) txt.innerText = "白天";
-      } else {
-        if (sun) sun.style.display = "none";
-        if (moon) moon.style.display = "inline-block";
-        if (txt) txt.innerText = "暗夜";
-      }
+      if (sun) sun.style.display = light ? "inline-block" : "none";
+      if (moon) moon.style.display = light ? "none" : "inline-block";
+      if (txt) txt.innerText = light ? "白天" : "暗夜";
+      // 按钮文字是当前模式,可访问名称同时说明点击后的动作
+      const label = light ? "白天模式，切换到暗夜模式" : "暗夜模式，切换到白天模式";
+      toggle?.setAttribute("aria-label", label);
+      toggle?.setAttribute("title", label);
     }
 
     function initTheme(): void {
@@ -320,6 +329,27 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         btn.disabled = degraded;
         btn.title = degraded ? "控制台无法连接监督者，暂不可操作" : "";
       }
+      const install = document.getElementById("statusInstallLink");
+      if (install) install.hidden = installed || degraded;
+      const entry = document.getElementById("btnWebConsole") as HTMLAnchorElement | null;
+      const label = document.getElementById("webConsoleText");
+      if (entry) entry.href = degraded || (installed && !running) ? "#overview"
+        : !installed ? "#version" : "/app/qwenpaw/web/";
+      if (label) label.innerText = degraded ? "检查服务状态" : !installed ? "安装并开始使用"
+        : running ? "进入 Web 对话" : "先启动服务";
+    }
+
+    async function refreshDashboard(): Promise<void> {
+      const button = document.getElementById("refreshDashboardBtn") as HTMLButtonElement | null;
+      if (!button || button.disabled) return;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      try {
+        await Promise.all([fetchStatus(), fetchLogs()]);
+      } finally {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+      }
     }
 
     function setStatusUptime(text: string): void {
@@ -346,6 +376,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     // 就会把已经恢复的"运行中"翻回"不可达"(约 5s 后自愈,但用户看到闪跳)。
     // 只允许最新一次发起的请求写入 UI。
     let statusReqSeq = 0;
+    let supervisorReachable: boolean | null = null;
     async function fetchStatus() {
       if (document.hidden) return;
       const mySeq = ++statusReqSeq;
@@ -373,12 +404,9 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           }, cardMount);
         }
         setServiceActions(Boolean(data.running), data.installed !== false, false);
-        // 从降级态恢复时必须解禁,否则一次断连后按钮永久禁用
-        const upBtnOk = document.getElementById("btnUpgradeAction") as HTMLButtonElement | null;
-        if (upBtnOk) {
-          upBtnOk.disabled = !selectedVersion;
-          upBtnOk.title = "";
-        }
+        const checkedAt = document.getElementById("statusCheckedAt");
+        if (checkedAt) checkedAt.innerText = `最近同步 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+        supervisorReachable = true;
 
         if (notInstalled) {
           // 未安装提前返回,必须复位鉴权区颜色:
@@ -394,14 +422,11 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           }
           if (valVersion) valVersion.innerText = "未安装";
           currentRunningVersion = "";
-          const tip = document.getElementById("kernelInstallTip");
-          if (tip) tip.style.display = "block";
-        } else {
-          const tip = document.getElementById("kernelInstallTip");
-          if (tip) tip.style.display = "none";
         }
+        const installTip = document.getElementById("kernelInstallTip");
+        if (installTip) installTip.hidden = !notInstalled;
         const uninstallBtn = document.getElementById("btnUninstallKernel");
-        if (uninstallBtn) uninstallBtn.style.display = notInstalled ? "none" : "inline-block";
+        if (uninstallBtn) uninstallBtn.hidden = notInstalled;
         updateUpgradeButtonText();
 
         // 后端安装任务进行中(重开控制台/换设备):恢复现场入口。
@@ -409,7 +434,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         const runTip = document.getElementById("installRunningTip");
         if (runTip) {
           const modalOpen = document.getElementById("upgradeModal")?.classList.contains("active");
-          runTip.style.display = (data.install && data.install.running && !modalOpen) ? "block" : "none";
+          runTip.hidden = !(data.install && data.install.running && !modalOpen);
         }
 
         if (!notInstalled && data.running) {
@@ -490,6 +515,8 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       } catch (e) {
         console.error("fetchStatus err:", e);
         if (mySeq !== statusReqSeq) return; // 过期的失败响应不覆盖新状态
+        const checkedAt = document.getElementById("statusCheckedAt");
+        if (checkedAt) checkedAt.innerText = "同步失败 · 自动重试中";
         // 无法连接后端(502/网络错误/会话过期)时必须把徽章切到未知态。
         // 否则徽章保留 index.html 里的初始红色/上一次的绿色,用户会以为服务在跑。
         const badge = document.getElementById("statusBadge");
@@ -515,18 +542,13 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         setStatusUptime("—"); // 保持 meta 位稳定,与卡内"状态不可达"呼应
         setServiceActions(false, false, true); // 不可达时不给操作入口
 
-        // degraded 不变量必须覆盖全部入口,不能只收三个服务按钮 ——
-        // 否则会出现"状态不可达"与"可发起安装/卸载"同屏的矛盾
-        const upBtn = document.getElementById("btnUpgradeAction") as HTMLButtonElement | null;
-        if (upBtn) {
-          upBtn.disabled = true;
-          upBtn.title = "控制台无法连接监督者，暂不可操作";
-        }
+        supervisorReachable = false;
+        updateUpgradeButtonText();
         const unBtn = document.getElementById("btnUninstallKernel");
-        if (unBtn) unBtn.style.display = "none";
+        if (unBtn) unBtn.hidden = true;
         for (const tipId of ["kernelInstallTip", "installRunningTip"]) {
           const tip = document.getElementById(tipId);
-          if (tip) tip.style.display = "none";
+          if (tip) tip.hidden = true;
         }
         // 鉴权区的颜色也是状态派生的,不可达时要复位,否则残留上一次的绿/红
         for (const id of ["valAuthStatus", "valAdminStatus"]) {
@@ -534,7 +556,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           if (el) el.style.color = "var(--text-muted)";
         }
         const downWarn = document.getElementById("downgradeWarnBar");
-        if (downWarn) downWarn.style.display = "none";
+        if (downWarn) downWarn.hidden = true;
         const valVersion = document.getElementById("valVersion");
         if (valVersion) valVersion.innerText = "无法获取";
         const valAuth = document.getElementById("valAuthStatus");
@@ -598,21 +620,46 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       }
     }
 
+    let webProxyPublic: boolean | null = null;
+    let webProxyReadSeq = 0;
+
+    function setWebProxyScope(value: boolean | null): void {
+      webProxyPublic = value;
+      const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
+      if (!toggle) return;
+      toggle.indeterminate = value === null;
+      toggle.disabled = value === null;
+      if (value !== null) toggle.checked = value;
+      toggle.title = value === null ? "无法确认反代访问范围，请重试" : "";
+    }
+
     async function fetchWebProxyPort() {
+      const seq = ++webProxyReadSeq;
       try {
-        const { data } = await api.webProxyPort();
+        const result = await api.webProxyPort();
+        if (seq !== webProxyReadSeq) return;
+        const { data } = result;
+        if (!result.ok || !data) {
+          setWebProxyScope(null);
+          return;
+        }
         const element = document.getElementById("valWebProxyPort");
         if (element && Number.isInteger(data.port) && data.port > 0) {
           element.innerText = String(data.port);
         }
-        const publicToggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
-        if (publicToggle) publicToggle.checked = data.public === true;
+        setWebProxyScope(typeof data.public === "boolean" ? data.public : null);
       } catch (e) {
+        if (seq === webProxyReadSeq) setWebProxyScope(null);
         console.error("fetchWebProxyPort err:", e);
       }
     }
 
     async function changeWebProxyPort() {
+      if (webProxyPublic === null) {
+        showToast("无法确认反代访问范围，请重试");
+        void fetchWebProxyPort();
+        return;
+      }
       const currentPort = document.getElementById("valWebProxyPort")?.innerText || "自动分配";
       const raw = await showModal({
         title: "修改 Web 反代端口",
@@ -640,24 +687,34 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         confirmText: "确认切换",
       });
       if (!ok) return;
+      const publicAccess = webProxyPublic;
+      if (publicAccess === null) {
+        showToast("无法确认反代访问范围，请重试");
+        return;
+      }
+      ++webProxyReadSeq;
+      setWebProxyScope(null);
       try {
-        const publicAccess = (document.getElementById("webProxyPublic") as HTMLInputElement | null)?.checked === true;
         const data = operationSucceeded(await api.changeWebProxyPort(newPort, publicAccess));
-        if (data.success === false) {
-          showToast("修改反代端口失败: " + (data.message || "未知错误"));
-          return;
-        }
         const element = document.getElementById("valWebProxyPort");
         if (element) element.innerText = String(data.port);
+        setWebProxyScope(publicAccess);
         showToast(`Web 反代端口已切换为 ${data.port}`);
       } catch (e) {
         showToast("修改反代端口失败: " + errorMessage(e));
+        void fetchWebProxyPort();
       }
     }
 
     async function setWebProxyPublic() {
       const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
       if (!toggle) return;
+      const previous = webProxyPublic;
+      if (previous === null) {
+        setWebProxyScope(null);
+        void fetchWebProxyPort();
+        return;
+      }
       const publicAccess = toggle.checked;
       if (publicAccess) {
         const ok = await showModal({
@@ -667,17 +724,21 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           confirmText: "允许外部访问",
         });
         if (!ok) {
-          toggle.checked = false;
+          setWebProxyScope(previous);
           return;
         }
       }
+      if (webProxyPublic !== previous) return;
       const port = Number(document.getElementById("valWebProxyPort")?.innerText) || 0;
+      ++webProxyReadSeq;
+      setWebProxyScope(null);
       try {
         operationSucceeded(await api.changeWebProxyPort(port, publicAccess));
+        setWebProxyScope(publicAccess);
         showToast(publicAccess ? "已允许外部访问 Web 反代" : "Web 反代已改为仅本机访问");
       } catch (e) {
-        toggle.checked = !publicAccess;
         showToast("切换访问范围失败: " + errorMessage(e));
+        void fetchWebProxyPort();
       }
     }
 
@@ -826,7 +887,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       const alert = document.getElementById("versionSourceStatus");
       const message = "当前下载源不可用，无法获取版本列表。请更换下载源，或检查 NAS 网络、DNS 与代理设置后重试。";
       if (alert) alert.innerText = detail ? `${message}（${detail}）` : message;
-      if (alert) alert.style.display = "block";
+      if (alert) alert.hidden = false;
       showToast(message);
       return false;
     }
@@ -844,7 +905,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
             selectedVersion = latestStableVer;
           }
           const alert = document.getElementById("versionSourceStatus");
-          if (alert) alert.style.display = "none";
+          if (alert) alert.hidden = true;
           refreshVersionCards();
           return true;
         }
@@ -886,11 +947,14 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       refreshVersionCards();
       const drop = document.getElementById("historyDropdown");
       if (drop) drop.classList.remove("show");
+      document.querySelector(".history-versions-toggle")?.setAttribute("aria-expanded", "false");
     }
 
     function toggleHistoryDropdown() {
       const drop = document.getElementById("historyDropdown");
-      if (drop) drop.classList.toggle("show");
+      if (!drop) return;
+      const expanded = drop.classList.toggle("show");
+      document.querySelector(".history-versions-toggle")?.setAttribute("aria-expanded", String(expanded));
     }
 
     let currentRunningVersion = "";
@@ -937,25 +1001,25 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       const warnBar = document.getElementById("downgradeWarnBar");
       if (!btn) return;
 
+      btn.disabled = !selectedVersion || supervisorReachable !== true;
+      btn.title = supervisorReachable === false ? "控制台无法连接监督者，暂不可操作" : "";
       if (!selectedVersion) {
-        btn.disabled = true;
         btn.innerText = "正在加载可用版本...";
         return;
       }
-      btn.disabled = false;
       const activeSelected = selectedVersion;
       // 内核未安装：按钮语义是「安装」而非「更新/降级」
       if (!currentRunningVersion) {
         btn.innerText = `安装内核 v${activeSelected}`;
         btn.className = "btn btn-primary btn-sm";
-        if (warnBar) warnBar.style.display = "none";
+        if (warnBar) warnBar.hidden = true;
         return;
       }
 
       if (isSameVersion(currentRunningVersion, selectedVersion)) {
         btn.innerText = `重新安装 v${selectedVersion}`;
         btn.className = "btn btn-primary btn-sm";
-        if (warnBar) warnBar.style.display = "none";
+        if (warnBar) warnBar.hidden = true;
         return;
       }
 
@@ -963,11 +1027,11 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       if (isDowngrade) {
         btn.innerText = `降级至 v${selectedVersion}`;
         btn.className = "btn btn-danger btn-sm";
-        if (warnBar) warnBar.style.display = "block";
+        if (warnBar) warnBar.hidden = false;
       } else {
         btn.innerText = `执行更新至 v${selectedVersion}`;
         btn.className = "btn btn-primary btn-sm";
-        if (warnBar) warnBar.style.display = "none";
+        if (warnBar) warnBar.hidden = true;
       }
     }
 
@@ -977,6 +1041,12 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         showToast("可用版本尚未加载，请检查下载源后重试");
         return;
       }
+      if (supervisorReachable !== true) {
+        showToast("控制台无法确认监督者状态，暂不可安装");
+        return;
+      }
+      const requestedVersion = selectedVersion;
+      const requestedMirror = currentMirror();
       let ok = false;
 
       if (!currentRunningVersion) {
@@ -1022,6 +1092,11 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         return;
       }
 
+      if (supervisorReachable !== true) {
+        pendingInstallAction = "";
+        showToast("控制台无法确认监督者状态，暂不可安装");
+        return;
+      }
       // 触发前确认是否已有任务在跑:已有任务直接附加查看,禁止重复创建。
       // 基线 seq 不参与归属 —— 未拿到受理身份(seq + instance)时宁可
       // "无法确认",也不认领后端残留终态或其他设备的任务。
@@ -1036,14 +1111,21 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           }
         }
       } catch (e) { /* 基线不可用不阻断触发:受理响应会给出归属身份 */ }
+      if (supervisorReachable !== true) {
+        pendingInstallAction = "";
+        showToast("控制台无法确认监督者状态，暂不可安装");
+        return;
+      }
 
       pollFailureStreak = 0;
       openUpgradeModal(false);
+      const requestRunId = upgradeRunId;
 
       // fetch(keepalive) 直接受理；网络错误只重连后端任务，不另行重放写请求。
-      // 后端任务与页面生命周期分离，页面重建后按实例身份恢复。
+      // 迟到的受理、拒绝和网络错误都不能改写后来选择的任务。
       try {
-        const result = await api.upgrade(selectedVersion, currentMirror());
+        const result = await api.upgrade(requestedVersion, requestedMirror);
+        if (requestRunId !== upgradeRunId) return;
         const d = result.data;
         if (d.success === false) {
           if (d.running) {
@@ -1060,10 +1142,12 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           throw new Error(d.message || `安装受理失败（HTTP ${result.status}）`);
         }
         if (typeof d.seq === "number") {
-          installTask = acceptInstallTask(installTask, d.seq, d.instance); // 受理确认:后端已接单
+          installTask = acceptInstallTask(installTask, d.seq, d.instance);
           persistInstallTask(installTaskStorage(), installTask);
+          updateTaskCenterButton();
         }
       } catch (e) {
+        if (requestRunId !== upgradeRunId) return;
         if (!(e instanceof ApiClientError) || e.kind !== "network") {
           showToast("安装请求失败: " + errorMessage(e));
           closeUpgradeModal();
@@ -1117,7 +1201,133 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         element.style.display = "inline-block";
         element.style.color = "var(--danger-text)";
       });
-      updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
+      updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
+    }
+
+    // 安装步骤条只反映已归属任务的 phase;终态冻结在最后观察到的步骤上
+    const INSTALL_STEP_NAMES: InstallStep[] = ["downloading", "installing", "starting"];
+    let installSteps: InstallStepsState = { current: null, outcome: null };
+
+    function installStepOf(phase: unknown): InstallStep | null {
+      return INSTALL_STEP_NAMES.find(step => step === phase) ?? null;
+    }
+
+    function setInstallSteps(next: InstallStepsState): void {
+      installSteps = next;
+      updateUpgradeElement("upSteps", element => renderInstallSteps(installSteps, element));
+    }
+
+    let upgradeRunId = 0;
+    let upgradeTerminal = false;
+    let upgradePreviousFocus: HTMLElement | null = null;
+    let upgradeModalOpenedAt = 0;
+
+    function hasOwnedInstallTask(): boolean {
+      return installTask.taskSeq !== null && installTask.taskInstance !== null && installTask.claimedBy !== null;
+    }
+
+    function updateTaskCenterButton(): void {
+      const button = document.getElementById("taskCenterButton") as HTMLButtonElement | null;
+      if (!button) return;
+      const available = hasOwnedInstallTask();
+      button.hidden = !available;
+      button.style.display = available ? "" : "none";
+      button.setAttribute("aria-label", "查看安装任务详情");
+      button.setAttribute("aria-controls", "upgradeModal");
+      button.setAttribute("aria-haspopup", "dialog");
+      button.setAttribute("aria-expanded", String(Boolean(document.getElementById("upgradeModal")?.classList.contains("active"))));
+    }
+
+    function dismissUpgradeDialog(): void {
+      const minimize = document.getElementById("btnUpMinimize");
+      if (minimize && minimize.style.display !== "none") minimizeUpgradeModal();
+      else closeUpgradeModal();
+    }
+
+    function upgradeDialogKeydown(event: KeyboardEvent): void {
+      const modal = document.getElementById("upgradeModal");
+      const box = modal?.querySelector<HTMLElement>(".modal-box");
+      if (!modal?.classList.contains("active") || !box) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismissUpgradeDialog();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusables = Array.from(box.querySelectorAll<HTMLElement>('button, input, [href], select, textarea, [tabindex]:not([tabindex="-1"])'))
+        .filter(el => !("disabled" in el && el.disabled) && el.offsetParent !== null);
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        box.focus();
+      } else if (!box.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    function upgradeDialogBackdrop(event: MouseEvent): void {
+      if (event.target === event.currentTarget && Date.now() - upgradeModalOpenedAt > 250) dismissUpgradeDialog();
+    }
+
+    function showUpgradeDialog(): void {
+      const modal = document.getElementById("upgradeModal");
+      const box = modal?.querySelector<HTMLElement>(".modal-box");
+      if (!modal || !box || modal.classList.contains("active")) return;
+      upgradePreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      upgradeModalOpenedAt = Date.now();
+      box.setAttribute("tabindex", "-1");
+      box.setAttribute("aria-describedby", "upSubTitle");
+      modal.classList.add("active");
+      updateTaskCenterButton();
+      modal.addEventListener("click", upgradeDialogBackdrop);
+      document.addEventListener("keydown", upgradeDialogKeydown, true);
+      const focusDialog = () => {
+        if (!modal.classList.contains("active") || box.contains(document.activeElement)) return;
+        const minimize = document.getElementById("btnUpMinimize");
+        const close = document.getElementById("btnUpClose");
+        (minimize && minimize.style.display !== "none" ? minimize : close || box).focus();
+      };
+      focusDialog();
+      requestAnimationFrame(focusDialog);
+      modal.addEventListener("transitionend", focusDialog, { once: true });
+      setTimeout(focusDialog, 300);
+    }
+
+    function hideUpgradeDialog(): void {
+      const modal = document.getElementById("upgradeModal");
+      if (!modal?.classList.contains("active")) return;
+      modal.classList.remove("active");
+      updateTaskCenterButton();
+      modal.removeEventListener("click", upgradeDialogBackdrop);
+      document.removeEventListener("keydown", upgradeDialogKeydown, true);
+      upgradePreviousFocus?.focus();
+      upgradePreviousFocus = null;
+    }
+
+    function showTaskDetails(): void {
+      if (!hasOwnedInstallTask()) return;
+      const modal = document.getElementById("upgradeModal");
+      if (!modal || modal.classList.contains("active")) return;
+      if (!upgradeTerminal && upgradePollTimer === null) {
+        pollFailureStreak = 0;
+        upgradeStartedAt = Date.now();
+        updateUpgradeElement("upTitle", element => { element.innerText = "正在查看已归属的安装任务..."; });
+        updateUpgradeElement("upSubTitle", element => { element.innerText = "正在重新读取任务状态"; });
+        updateUpgradeElement("upSpinner", element => { element.style.display = "inline-block"; });
+        updateUpgradeElement("upDoneIcon", element => { element.style.display = "none"; });
+        updateUpgradeElement("btnUpMinimize", element => { element.style.display = ""; });
+        updateUpgradeElement("btnUpClose", element => { element.style.display = "none"; });
+        void pollUpgradeLogs(true);
+        upgradePollTimer = setInterval(pollUpgradeLogs, 800);
+      } else if (upgradeTerminal) {
+        void pollUpgradeLogs(true);
+      }
+      showUpgradeDialog();
     }
 
     function openUpgradeModal(
@@ -1125,28 +1335,20 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       attachSeq: number | null = null,
       attachInstance: string | null = null,
     ): void {
-      // 重新打开时复位:minimize 可见、close 隐藏
-      const minBtnReset = document.getElementById("btnUpMinimize");
-      if (minBtnReset) minBtnReset.style.display = "block";
-      const closeBtnReset = document.getElementById("btnUpClose");
-      if (closeBtnReset) closeBtnReset.style.display = "none";
       const modal = document.getElementById("upgradeModal");
-      if (!modal) return;
       const title = document.getElementById("upTitle");
       const subtitle = document.getElementById("upSubTitle");
       const spinner = document.getElementById("upSpinner");
       const doneIcon = document.getElementById("upDoneIcon");
       const closeButton = document.getElementById("btnUpClose");
       const terminal = document.getElementById("upTerminal");
-      if (!title || !subtitle || !spinner || !doneIcon || !closeButton || !terminal) return;
-      // 跟踪状态统一在此初始化(先于首次轮询,避免竞态):
-      // 新任务此刻还没有身份,必须等受理响应;附加模式只跟随已选的 seq + instance。
+      if (!modal || !title || !subtitle || !spinner || !doneIcon || !closeButton || !terminal) return;
+      ++upgradeRunId;
+      upgradeTerminal = false;
       installTask = createInstallTask({ attach, attachSeq, attachInstance });
-      if (installTask.taskSeq !== null && installTask.taskInstance !== null) {
-        persistInstallTask(installTaskStorage(), installTask);
-      } else {
-        clearStoredInstallTask(installTaskStorage());
-      }
+      if (hasOwnedInstallTask()) persistInstallTask(installTaskStorage(), installTask);
+      else clearStoredInstallTask(installTaskStorage());
+      updateTaskCenterButton();
       upgradeStartedAt = Date.now();
       title.innerText = installTask.attach
         ? "正在查看进行中的安装任务..."
@@ -1157,30 +1359,32 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       spinner.style.display = "inline-block";
       doneIcon.style.display = "none";
       closeButton.style.display = "none";
+      updateUpgradeElement("btnUpMinimize", element => { element.style.display = ""; });
       upgradeLogsRendered = false;
+      setInstallSteps({ current: null, outcome: null });
       terminal.innerHTML = "正在获取实时安装状态...\n";
-      modal.classList.add("active");
-
+      showUpgradeDialog();
       stopUpgradePolling();
-      pollUpgradeLogs();
+      void pollUpgradeLogs();
       upgradePollTimer = setInterval(pollUpgradeLogs, 800);
     }
 
     function closeUpgradeModal() {
-      const modal = document.getElementById("upgradeModal");
-      if (modal) modal.classList.remove("active");
+      hideUpgradeDialog();
       stopUpgradePolling();
-      clearStoredInstallTask(installTaskStorage());
-      installTask = createInstallTask({ attach: false });
+      if (!hasOwnedInstallTask()) {
+        ++upgradeRunId;
+        clearStoredInstallTask(installTaskStorage());
+        installTask = createInstallTask({ attach: false });
+      }
+      updateTaskCenterButton();
       fetchStatus();
       fetchLogs();
     }
 
-    // 后台运行:关闭弹窗但**不中断**任务,轮询继续,回到控制台可通过
-    // installRunningTip 重新进入。与 closeUpgradeModal 的区别就在这里。
+    // 最小化只隐藏窗口，保留任务与轮询。
     function minimizeUpgradeModal() {
-      const modal = document.getElementById("upgradeModal");
-      if (modal) modal.classList.remove("active");
+      hideUpgradeDialog();
       showToast("已转入后台运行，可在控制台查看进度");
       fetchStatus();
     }
@@ -1192,11 +1396,14 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       if (!immediate && now - upPollLastAt < 1200) return;
       if (document.hidden) return;
       upPollLastAt = now;
+      const runId = upgradeRunId;
+      const taskSeq = installTask.taskSeq;
+      const taskInstance = installTask.taskInstance;
 
-      if (!upLogsPollInFlight && installTask.taskSeq !== null && installTask.taskInstance !== null) {
+      if (!upLogsPollInFlight && taskSeq !== null && taskInstance !== null) {
         upLogsPollInFlight = true;
-        void api.upgradeLogs(installTask.taskSeq, installTask.taskInstance).then(logsRes => {
-          if (!logsRes.ok) return;
+        void api.upgradeLogs(taskSeq, taskInstance).then(logsRes => {
+          if (runId !== upgradeRunId || installTask.taskSeq !== taskSeq || installTask.taskInstance !== taskInstance || !logsRes.ok) return;
           const ldata = logsRes.data;
           if (!ldata.success || !Array.isArray(ldata.logs)) return;
           const terminal = document.getElementById("upTerminal");
@@ -1215,6 +1422,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       upStatusPollInFlight = true;
       try {
         const statusRes = await api.upgradeStatus();
+        if (runId !== upgradeRunId) return;
         if (!statusRes.ok) {
           recordUpgradeStatusFailure();
           return;
@@ -1230,7 +1438,20 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
         if (installTask.taskSeq !== previousTask.taskSeq || installTask.taskInstance !== previousTask.taskInstance) {
           persistInstallTask(installTaskStorage(), installTask);
         }
-        if (observed.terminal) clearStoredInstallTask(installTaskStorage());
+        if (observed.terminal) {
+          upgradeTerminal = true;
+          void pollUpgradeLogs(true);
+          stopUpgradePolling();
+          updateTaskCenterButton();
+          clearStoredInstallTask(installTaskStorage());
+        } else if (observed.owned && installTask.taskSeq !== null && installTask.taskInstance !== null) {
+          updateTaskCenterButton();
+        }
+
+        const observedStep = observed.owned && !observed.terminal ? installStepOf(sdata.phase) : null;
+        if (observedStep && observedStep !== installSteps.current) {
+          setInstallSteps({ current: observedStep, outcome: null });
+        }
 
         if (observed.owned && sdata.upgrading && !upgradeLogsRendered) {
           const phase = typeof sdata.phase === "string" ? sdata.phase : "";
@@ -1258,18 +1479,23 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
               ? "触发请求可能已送达并完成；请关闭本窗口后在控制台查看当前版本与安装日志确认"
               : "后端任务与本次操作不匹配，请关闭本窗口后在控制台查看安装日志";
           });
-          updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
+          updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
+          const minimizeWasFocused = document.activeElement === document.getElementById("btnUpMinimize");
           updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
+          if (minimizeWasFocused) document.getElementById("btnUpClose")?.focus();
           return;
         }
 
         if (observed.terminal) {
           stopUpgradePolling();
+          setInstallSteps({ current: installSteps.current, outcome: observed.outcome });
 
           updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
           updateUpgradeElement("upDoneIcon", element => { element.style.display = "inline-block"; });
-          updateUpgradeElement("btnUpClose", element => { element.style.display = "block"; });
+          updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
+          const minimizeWasFocused = document.activeElement === document.getElementById("btnUpMinimize");
           updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
+          if (minimizeWasFocused) document.getElementById("btnUpClose")?.focus();
 
           // 终态必须用"操作发起时"的动作,不能重算:
           // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
@@ -1307,6 +1533,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           }
         }
       } catch (error) {
+        if (runId !== upgradeRunId) return;
         console.error("pollUpgradeStatus err:", error);
         recordUpgradeStatusFailure();
       } finally {
@@ -1332,6 +1559,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     const LOG_WINDOW_MAX = 2000;
     let logLines: LogEntry[] = [];
     let logFetchSeq = 0; // 日志拉取序号:乱序响应丢弃
+    let logClearGeneration = 0;
     let logPageFromEnd = 0; // 距末页的页数(0 = 实时)
 
     function renderLogPage() {
@@ -1352,10 +1580,12 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       if (indicator) indicator.innerText = logLines.length ? `第 ${displayPage} / ${totalPages} 页` : "暂无日志";
       const prev = document.getElementById("logPrevBtn") as HTMLButtonElement | null;
       const next = document.getElementById("logNextBtn") as HTMLButtonElement | null;
-      if (prev) prev.disabled = displayPage <= 1;
+      if (prev) prev.disabled = displayPage <= 1 && (
+        logLines.length < (logPageFromEnd + 1) * LOG_PAGE_SIZE || logLines.length >= LOG_WINDOW_MAX
+      );
       if (next) next.disabled = logPageFromEnd <= 0;
       const hint = document.getElementById("logWindowHint");
-      if (hint) hint.style.display = (logLines.length >= LOG_WINDOW_MAX && displayPage <= 1) ? "inline" : "none";
+      if (hint) hint.hidden = !(logLines.length >= LOG_WINDOW_MAX && displayPage <= 1);
 
       if (logPageFromEnd === 0) {
         const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
@@ -1365,12 +1595,16 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       }
     }
 
+    let liveLogFetchSeq = 0;
     async function fetchLogs() {
       if (document.hidden) return;    // 后台标签页暂停轮询
       if (logPageFromEnd > 0) return; // 回看模式:暂停实时刷新
+      const generation = logClearGeneration;
+      const pageSeq = logFetchSeq;
+      const mySeq = ++liveLogFetchSeq;
       try {
         const result = await api.logs(LOG_PAGE_SIZE);
-        if (!result.ok) return;
+        if (!result.ok || generation !== logClearGeneration || pageSeq !== logFetchSeq || mySeq !== liveLogFetchSeq) return;
         const data = result.data;
         // 回看守卫必须在到达后复查:发起时不在回看,不代表返回时不在 ——
         // 在途的实时响应会覆盖用户刚点开的历史页并跳回末页(审查 P1-1)
@@ -1386,7 +1620,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
 
     async function loadLogPage(fromEnd: number): Promise<void> {
       const mySeq = ++logFetchSeq; // 乱序守卫:小响应后到不得覆盖新结果
-      const target = Math.max(0, fromEnd);
+      const target = Math.min(Math.max(0, fromEnd), Math.ceil(LOG_WINDOW_MAX / LOG_PAGE_SIZE) - 1);
       const needed = (target + 1) * LOG_PAGE_SIZE;
       if (needed > logLines.length) {
         try {
@@ -1399,6 +1633,7 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
           return;
         }
       }
+      if (mySeq !== logFetchSeq) return;
       logPageFromEnd = target;
       renderLogPage();
     }
@@ -1408,13 +1643,23 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     function logGoLatest() { loadLogPage(0); }
 
     async function clearTerminalLogs() {
-      logLines = [];
-      logPageFromEnd = 0;
-      renderLogPage();
+      const ok = await showModal({
+        title: "删除服务日志",
+        message: "这将删除后端保存的服务日志，而不仅仅清空当前显示。删除后无法恢复，确认继续？",
+        type: "danger",
+        confirmText: "确认删除日志",
+      });
+      if (!ok) return;
       try {
-        await api.clearLogs();
+        operationSucceeded(await api.clearLogs());
+        ++logClearGeneration;
+        ++logFetchSeq;
+        logLines = [];
+        logPageFromEnd = 0;
+        renderLogPage();
+        showToast("已请求清理服务日志");
       } catch (e) {
-        console.error("clear_logs error:", e);
+        showToast("删除日志失败: " + errorMessage(e));
       }
     }
 
@@ -1426,6 +1671,81 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       }
     }
 
+
+    function initMobileNavigation(): void {
+      const sections = ["overview", "version", "configuration", "logs"];
+      const nav = document.getElementById("mobileSectionNav");
+      const buttons = Array.from(nav?.querySelectorAll<HTMLButtonElement>("button[data-section]") || []);
+      if (buttons.length !== sections.length || sections.some(section =>
+        !buttons.some(button => button.dataset.section === section && button.getAttribute("aria-controls") === section)
+        || document.getElementById(section)?.dataset.mobilePanel !== section
+      )) return;
+
+      function setMobileSection(section: string, updateHistory = false): void {
+        const valid = sections.includes(section);
+        const selected = valid ? section : "overview";
+        const hash = `#${selected}`;
+        if (updateHistory && window.location.hash !== hash) {
+          history.pushState(history.state, "", hash);
+        } else if (!updateHistory && !valid) {
+          history.replaceState(history.state, "", hash);
+        }
+        for (const button of buttons) {
+          if (button.dataset.section === selected) button.setAttribute("aria-current", "page");
+          else button.removeAttribute("aria-current");
+        }
+        for (const link of document.querySelectorAll<HTMLAnchorElement>(".section-nav a[href^='#']")) {
+          if (link.getAttribute("href") === hash) link.setAttribute("aria-current", "page");
+          else link.removeAttribute("aria-current");
+        }
+        document.documentElement.setAttribute("data-mobile-section", selected);
+      }
+
+      const handlers = buttons.map(button => ({
+        button,
+        click: () => {
+          const section = button.dataset.section || "overview";
+          setMobileSection(section, true);
+          document.getElementById(section)?.scrollIntoView({ block: "start" });
+        },
+      }));
+      const syncSection = () => setMobileSection(window.location.hash.slice(1));
+      try {
+        syncSection();
+        for (const { button, click } of handlers) button.addEventListener("click", click);
+        window.addEventListener("hashchange", syncSection);
+        window.addEventListener("popstate", syncSection);
+      } catch (error) {
+        for (const { button, click } of handlers) button.removeEventListener("click", click);
+        window.removeEventListener("hashchange", syncSection);
+        window.removeEventListener("popstate", syncSection);
+        document.documentElement.removeAttribute("data-mobile-section");
+        // 导航降级为完整页面后，仍须继续注册管理按钮。
+        console.error("initMobileNavigation err:", error);
+      }
+    }
+
+    function makeKeyboardClickable(element: HTMLElement | null): void {
+      if (!element || element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement) return;
+      element.tabIndex = 0;
+      element.setAttribute("role", "button");
+      element.addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        element.click();
+      });
+    }
+
+    const historyToggle = document.querySelector<HTMLElement>(".history-versions-toggle");
+    makeKeyboardClickable(historyToggle);
+    historyToggle?.setAttribute("aria-controls", "historyDropdown");
+    historyToggle?.setAttribute("aria-expanded", "false");
+    const runningTip = document.getElementById("installRunningTip");
+    makeKeyboardClickable(runningTip);
+    runningTip?.setAttribute("aria-haspopup", "dialog");
+    document.getElementById("taskCenterButton")?.addEventListener("click", showTaskDetails);
+    updateTaskCenterButton();
+    setWebProxyScope(null);
 
     // 初始执行全套自愈
     initTheme();
@@ -1451,9 +1771,11 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       openUpgradeModal(true, installTask.taskSeq, installTask.taskInstance);
     }
 
+    initMobileNavigation();
+
     // 内联 onclick/onchange 处理器需全局可见 —— esbuild IIFE 会封住顶层作用域
     Object.assign(window, {
-      fetchStatus, fetchLogs, controlService, changeServicePort, changeWebProxyPort, setWebProxyPublic, resetAuth,
+      fetchStatus, fetchLogs, refreshDashboard, controlService, changeServicePort, changeWebProxyPort, setWebProxyPublic, resetAuth,
       checkOrUpgrade, checkOnlineVersions, pickVersion, toggleHistoryDropdown,
       saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
       closeUpgradeModal, minimizeUpgradeModal, logGoPrev, logGoNext, logGoLatest,

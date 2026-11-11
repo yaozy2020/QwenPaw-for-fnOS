@@ -6,7 +6,6 @@ use tokio::{
 };
 
 use super::{web_tcp_router_with_access, AppState};
-use crate::install::atomic_write_0600;
 
 #[derive(Clone)]
 pub struct WebProxyManager {
@@ -61,7 +60,6 @@ impl WebProxyManager {
         };
         if let Err(error) = persist_state(&app, port, public) {
             drop(listener);
-            let _ = persist_state(&app, previous_port, previous_public);
             if same_port_access_change {
                 restore_previous(&app, &mut inner, previous_port, previous_public).await?;
             }
@@ -136,14 +134,17 @@ async fn restore_previous(
 }
 
 fn persist_state(app: &AppState, port: u16, public: bool) -> io::Result<()> {
-    atomic_write_0600(
-        &format!("{}/web_proxy_port", app.var_dir),
-        &format!("{port}\n"),
-    )?;
-    atomic_write_0600(
-        &format!("{}/web_proxy_public", app.var_dir),
-        if public { "1\n" } else { "0\n" },
-    )
+    let var = std::path::Path::new(&app.var_dir);
+    let result = crate::settings_transaction::persist_web_proxy(var, port, public);
+    if result.is_err()
+        && var
+            .join("web-proxy-transaction.json")
+            .try_exists()
+            .unwrap_or(true)
+    {
+        app.install.block_recovery("反代配置事务尚待恢复".into());
+    }
+    result
 }
 
 fn spawn(app: AppState, listener: TcpListener, mut stopped: watch::Receiver<bool>, public: bool) {

@@ -8,21 +8,26 @@ export function StatusCardView({ data }: { data: StatusData }) {
   const running = !degraded && !notInstalled && data.running;
   // degraded(后端不可达)必须如实显示,不得伪装成"内核未安装"
   const stateText = degraded ? "状态不可达" : notInstalled ? "内核未安装" : running ? "运行中" : "已停止";
-  const stateColor = degraded ? "var(--text-muted)"
-    : notInstalled ? "var(--text-sub)"
-    : running ? "var(--success)" : "var(--danger-text)";
+  const state = degraded ? "degraded" : notInstalled ? "uninstalled" : running ? "running" : "stopped";
   const stats: [string, string][] = [
     ["进程 PID", running ? String(data.pid || "-") : "-"],
     ["CPU 占用", running && typeof data.cpu === "number" ? data.cpu.toFixed(1) + "%" : "-"],
     ["内存占用", running ? formatMem(data.memKB) : "-"],
   ];
+  const description = degraded ? "暂时无法获取服务状态，请检查网络或重新登录飞牛后重试。"
+    : notInstalled ? "先安装 QwenPaw 内核，即可开始使用 AI 对话。"
+    : running ? "服务已就绪，可以进入对话；运行指标会自动更新。"
+    : "内核已安装，启动服务后即可继续对话。";
   return (
     <>
-      <div class="status-head">
-        <span class="status-dot" style={{ background: stateColor }}></span>
-        <span class="status-text" style={{ color: stateColor }}>{stateText}</span>
+      <div class="status-summary">
+        <div class="status-head" data-state={state}>
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-text">{stateText}</span>
+        </div>
+        <p class="status-description">{description}</p>
       </div>
-      <div class="stat-grid">
+      <div class="stat-grid" aria-label="运行指标">
         {stats.map(([label, val]) => (
           <div class="stat" key={label}>
             <div class="stat-value">{val}</div>
@@ -36,7 +41,7 @@ export function StatusCardView({ data }: { data: StatusData }) {
 
 export function LogLines({ lines, empty, success = false }: { lines: (string | { message?: string })[]; empty: string; success?: boolean }) {
   const items = lines.map(item => (typeof item === "string" ? item : (item.message || JSON.stringify(item))));
-  if (!items.length) return <span style="color:var(--text-muted);">{empty}</span>;
+  if (!items.length) return <span class="log-empty">{empty}</span>;
   return (
     <>
       {items.map((msg, i) => {
@@ -50,6 +55,13 @@ export function LogLines({ lines, empty, success = false }: { lines: (string | {
   );
 }
 
+function activateWithKeyboard(event: KeyboardEvent): void {
+  if ((event.key === "Enter" || event.key === " ") && event.currentTarget instanceof HTMLElement) {
+    event.preventDefault();
+    event.currentTarget.click();
+  }
+}
+
 export function MirrorOptions({ options, value, onPick }: {
   options: { value: string; label: string }[];
   value: string;
@@ -58,11 +70,11 @@ export function MirrorOptions({ options, value, onPick }: {
   return (
     <>
       {options.map(m => (
-        <div class="history-item" key={m.value || "official"}
-          style={m.value === value ? "color:var(--primary-text);" : ""}
+        <div class="history-item" key={m.value || "official"} role="button" tabIndex={0}
+          aria-pressed={m.value === value} onKeyDown={activateWithKeyboard}
           onClick={() => onPick(m.value)}>
           <span>{m.label}</span>
-          {m.value === value ? <span style="color:var(--primary-text);">✓</span> : ""}
+          {m.value === value ? <span aria-hidden="true">✓</span> : ""}
         </div>
       ))}
     </>
@@ -74,7 +86,8 @@ export function VersionCardsView({ beta, stable, selected, onPick }: {
 }) {
   const historySelected = selected !== beta && selected !== stable;
   const Card = ({ ver, tag, cls, active }: { ver: string; tag: string; cls: string; active: boolean }) => (
-    <div class={`ver-card-item ${active ? "active" : ""}`} onClick={() => onPick(ver)}>
+    <div class={`ver-card-item ${active ? "active" : ""}`} role="button" tabIndex={0}
+      aria-pressed={active} onKeyDown={activateWithKeyboard} onClick={() => onPick(ver)}>
       <div class="ver-info-left">
         <span class="ver-number">v{ver}</span>
         <span class={`ver-tag-pill ${cls}`}>{tag}</span>
@@ -98,11 +111,40 @@ export function HistoryItems({ items, onPick }: {
   return (
     <>
       {items.map(item => (
-        <div class="history-item" key={item.version} onClick={() => onPick(item.version)}>
-          <span style="font-family:monospace; font-weight:600;">v{item.version}</span>
-          <span class={`ver-tag-pill ${item.is_beta ? "beta" : "stable"}`} style="font-size:10px;">{item.is_beta ? "Beta" : "稳定版"}</span>
+        <div class="history-item" key={item.version} role="button" tabIndex={0}
+          onKeyDown={activateWithKeyboard} onClick={() => onPick(item.version)}>
+          <span class="history-version">v{item.version}</span>
+          <span class={`ver-tag-pill ${item.is_beta ? "beta" : "stable"}`}>{item.is_beta ? "Beta" : "稳定版"}</span>
         </div>
       ))}
+    </>
+  );
+}
+
+export type InstallStep = "downloading" | "installing" | "starting";
+export type InstallStepsState = { current: InstallStep | null; outcome: "done" | "failed" | null };
+
+const INSTALL_STEPS: [InstallStep, string][] = [
+  ["downloading", "下载依赖"],
+  ["installing", "安装内核"],
+  ["starting", "启动检查"],
+];
+
+export function InstallSteps({ current, outcome }: InstallStepsState) {
+  const reached = current ? INSTALL_STEPS.findIndex(([step]) => step === current) : -1;
+  return (
+    <>
+      {INSTALL_STEPS.map(([step, label], index) => {
+        const status = outcome === "done" || index < reached ? "done"
+          : index === reached ? (outcome === "failed" ? "failed" : "active")
+            : "pending";
+        return (
+          <li key={step} data-step={step} data-status={status} aria-current={status === "active" ? "step" : undefined}>
+            <span class="step-mark" aria-hidden="true"></span>
+            {label}
+          </li>
+        );
+      })}
     </>
   );
 }
@@ -128,4 +170,8 @@ export function renderVersionCards(beta: string, stable: string, selected: strin
 
 export function renderHistoryItems(items: { version: string; is_beta: boolean }[], onPick: (v: string) => void, el: HTMLElement) {
   render(<HistoryItems items={items} onPick={onPick} />, el);
+}
+
+export function renderInstallSteps(state: InstallStepsState, el: HTMLElement) {
+  render(<InstallSteps current={state.current} outcome={state.outcome} />, el);
 }

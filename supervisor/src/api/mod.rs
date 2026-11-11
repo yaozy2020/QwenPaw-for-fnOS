@@ -80,7 +80,60 @@ pub fn build_router(state: AppState) -> Router {
             "/mirror",
             get(settings::mirror_get).post(settings::mirror_set),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            finish_mutation,
+        ))
         .with_state(state)
+}
+
+// Once a complete, authenticated write request is accepted, its handler owns the
+// operation until commit/rollback finishes. Dropping an HTTP connection (or the
+// Gateway's response deadline) only drops this waiter, never the operation task.
+async fn finish_mutation(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request.method() != axum::http::Method::POST {
+        return next.run(request).await;
+    }
+    if !check_token(&state.token, &request) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let (parts, body) = request.into_parts();
+    let body = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        axum::body::to_bytes(body, 64 * 1024),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return err_json(StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
+        Err(_) => return err_json(StatusCode::REQUEST_TIMEOUT, "request body timed out"),
+    };
+    let request = Request::from_parts(parts, axum::body::Body::from(body));
+    let (finished, response) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        // The observer also survives disconnect, so a task panic cannot silently
+        // release the gate without marking the manager as requiring recovery.
+        let result = match tokio::spawn(async move { next.run(request).await }).await {
+            Ok(response) => response,
+            Err(error) => {
+                state
+                    .install
+                    .block_recovery(format!("管理任务异常退出: {error}"));
+                err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "管理任务异常退出，请检查恢复状态",
+                )
+            }
+        };
+        let _ = finished.send(result);
+    });
+    response
+        .await
+        .unwrap_or_else(|_| err_json(StatusCode::INTERNAL_SERVER_ERROR, "管理任务结果不可用"))
 }
 
 fn check_token(token: &str, req: &Request<axum::body::Body>) -> bool {

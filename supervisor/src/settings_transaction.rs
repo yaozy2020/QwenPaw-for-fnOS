@@ -166,6 +166,74 @@ pub fn recover(var_dir: &Path, ui_config: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebProxyJournal {
+    schema: u32,
+    port: FileImage,
+    public: FileImage,
+}
+
+const WEB_PROXY_JOURNAL: &str = "web-proxy-transaction.json";
+
+pub(crate) fn recover_web_proxy(var: &Path) -> io::Result<bool> {
+    let path = var.join(WEB_PROXY_JOURNAL);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let journal: WebProxyJournal = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if journal.schema != 1 {
+        return Err(io::Error::other("不支持的反代配置事务版本"));
+    }
+    journal.port.restore(&var.join("web_proxy_port"))?;
+    journal.public.restore(&var.join("web_proxy_public"))?;
+    std::fs::remove_file(&path)?;
+    sync_parent(&path)?;
+    Ok(true)
+}
+
+pub(crate) fn persist_web_proxy(var: &Path, port: u16, public: bool) -> io::Result<()> {
+    let path = var.join(WEB_PROXY_JOURNAL);
+    if path.try_exists()? {
+        return Err(io::Error::other("反代配置事务尚待恢复"));
+    }
+    let journal = WebProxyJournal {
+        schema: 1,
+        port: FileImage::read(&var.join("web_proxy_port"))?,
+        public: FileImage::read(&var.join("web_proxy_public"))?,
+    };
+    let content = serde_json::to_string(&journal).map_err(io::Error::other)?;
+    crate::install::atomic_write_0600(&path.to_string_lossy(), &content)?;
+    let result = (|| {
+        crate::install::atomic_write_0600(
+            &var.join("web_proxy_port").to_string_lossy(),
+            &format!("{port}\n"),
+        )?;
+        crate::install::atomic_write_0600(
+            &var.join("web_proxy_public").to_string_lossy(),
+            if public { "1\n" } else { "0\n" },
+        )?;
+        std::fs::remove_file(&path)?;
+        sync_parent(&path)
+    })();
+    if let Err(error) = result {
+        // A directory-sync failure may have removed the journal already. Restore
+        // the original decision before attempting rollback, as SettingsTransaction does.
+        if !path.try_exists()? {
+            crate::install::atomic_write_0600(&path.to_string_lossy(), &content)?;
+        }
+        return match recover_web_proxy(var) {
+            Ok(_) => Err(error),
+            Err(restore) => Err(io::Error::other(format!(
+                "{error}; 反代配置恢复失败: {restore}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +318,46 @@ mod tests {
         assert!(recover(&root, &ui).unwrap());
         assert_eq!(std::fs::read(&ui).unwrap(), b"original desktop\n");
         assert!(!root.join("settings-transaction.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn web_proxy_recovery_restores_port_and_access_together() {
+        let (root, _) = fixture("web-proxy-recovery");
+        std::fs::write(root.join("web_proxy_port"), "43210\n").unwrap();
+        std::fs::write(root.join("web_proxy_public"), "0\n").unwrap();
+        let journal = WebProxyJournal {
+            schema: 1,
+            port: FileImage::read(&root.join("web_proxy_port")).unwrap(),
+            public: FileImage::read(&root.join("web_proxy_public")).unwrap(),
+        };
+        std::fs::write(
+            root.join(WEB_PROXY_JOURNAL),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("web_proxy_port"), "43211\n").unwrap();
+        std::fs::write(root.join("web_proxy_public"), "1\n").unwrap();
+        assert!(recover_web_proxy(&root).unwrap());
+        assert!(!recover_web_proxy(&root).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("web_proxy_port")).unwrap(),
+            "43210\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("web_proxy_public")).unwrap(),
+            "0\n"
+        );
+        persist_web_proxy(&root, 43212, true).unwrap();
+        assert!(!recover_web_proxy(&root).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("web_proxy_public")).unwrap(),
+            "1\n"
+        );
+        std::fs::write(root.join(WEB_PROXY_JOURNAL), "broken").unwrap();
+        assert!(recover_web_proxy(&root).is_err());
+        assert!(persist_web_proxy(&root, 0, false).is_err());
+        assert!(root.join(WEB_PROXY_JOURNAL).exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

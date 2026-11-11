@@ -2290,6 +2290,169 @@ async fn tcp_root_forwards_assets_without_rewriting() {
 }
 
 #[tokio::test]
+async fn mounted_console_compresses_rewritten_resources_and_honors_encoding_negotiation() {
+    let (dir, state, router) = fixture("mounted-console-compression");
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    for path in [
+        "/",
+        "/assets/index-BpFaGbCq.js",
+        "/assets/chat-vendor-DmgPIszx.css",
+    ] {
+        let mounted = format!("{PREFIX}/web{path}");
+        let mut identity_body = Vec::new();
+        for accept in ["identity", "gzip", "gzip;q=0, identity;q=1"] {
+            let mut headers = admin_headers();
+            headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_str(accept).unwrap(),
+            );
+            let response = router
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    &mounted,
+                    headers,
+                    Body::empty(),
+                    Some(peer()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path} {accept}");
+            assert!(!response.headers().contains_key(header::ETAG));
+            assert!(!response.headers().contains_key(header::ACCEPT_RANGES));
+            let received = captured.recv().await.unwrap();
+            assert_eq!(received.uri, path);
+            assert_eq!(received.headers[header::ACCEPT_ENCODING], "identity");
+            if accept == "gzip" {
+                assert_eq!(
+                    response.headers()[header::CONTENT_ENCODING],
+                    "gzip",
+                    "{path}"
+                );
+                assert!(response.headers()[header::VARY]
+                    .to_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("accept-encoding"));
+                assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+                let bytes = to_bytes(response.into_body(), 8 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                assert!(bytes.len() < identity_body.len(), "{path} did not shrink");
+                let gzip_file = dir.0.join("mounted-response.gz");
+                fs::write(&gzip_file, bytes).unwrap();
+                let decoded = std::process::Command::new("gzip")
+                    .args(["-d", "-c"])
+                    .arg(gzip_file)
+                    .output()
+                    .unwrap();
+                assert!(decoded.status.success());
+                assert_eq!(
+                    decoded.stdout, identity_body,
+                    "{path} rewrite changed during compression"
+                );
+            } else {
+                assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+                let bytes = to_bytes(response.into_body(), 8 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                assert!(std::str::from_utf8(&bytes)
+                    .unwrap()
+                    .contains("/app/qwenpaw/web/"));
+                if accept == "identity" {
+                    identity_body = bytes.to_vec();
+                } else {
+                    assert_eq!(&bytes[..], identity_body);
+                }
+            }
+        }
+        let mut headers = admin_headers();
+        headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let head = router
+            .clone()
+            .oneshot(request(
+                "HEAD",
+                &mounted,
+                headers,
+                Body::empty(),
+                Some(peer()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(!head.headers().contains_key(header::CONTENT_ENCODING));
+        assert_eq!(
+            head.headers()[header::CONTENT_LENGTH],
+            identity_body.len().to_string()
+        );
+        assert!(to_bytes(head.into_body(), 4096).await.unwrap().is_empty());
+        assert_eq!(captured.recv().await.unwrap().method, Method::GET);
+    }
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn mounted_console_sse_with_gzip_accepted_delivers_before_upstream_closes() {
+    use http_body_util::BodyExt;
+
+    let (_dir, state, router) = fixture("mounted-console-compression-sse");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    state
+        .core
+        .kernel
+        .set_port(listener.local_addr().unwrap().port());
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<&'static str, io::Error>>(1);
+    sender.send(Ok("data: first\n\n")).await.unwrap();
+    let body = Arc::new(Mutex::new(Some(Body::from_stream(
+        tokio_stream::wrappers::ReceiverStream::new(receiver),
+    ))));
+    let app = Router::new().fallback(move || {
+        let body = Arc::clone(&body);
+        async move {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(body.lock().await.take().unwrap())
+                .unwrap()
+        }
+    });
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut headers = admin_headers();
+    headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let mut response = router
+        .oneshot(request(
+            "GET",
+            "/app/qwenpaw/web/sse",
+            headers,
+            Body::empty(),
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+    let first = tokio::time::timeout(Duration::from_secs(3), response.body_mut().frame())
+        .await
+        .expect("first SSE event was buffered")
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    assert_eq!(&first[..], b"data: first\n\n");
+    sender.send(Ok("data: second\n\n")).await.unwrap();
+    drop(sender);
+    let rest = tokio::time::timeout(Duration::from_secs(3), to_bytes(response.into_body(), 4096))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&rest[..], b"data: second\n\n");
+    upstream.abort();
+}
+
+#[tokio::test]
 async fn tcp_root_compresses_uncompressed_upstream_javascript_as_gzip() {
     let (dir, state, _) = fixture("tcp-web-root-gzip-js");
     let (mut captured, upstream) = start_web_upstream(&state).await;
@@ -3200,6 +3363,15 @@ fn shutdown_timeout_stops_kernel_even_while_an_operation_is_unsettled() {
         assert!(Instant::now() < deadline, "start did not launch kernel");
         std::thread::sleep(Duration::from_millis(20));
     };
+    // A partial request no longer owns the operation gate. Block an actual
+    // settings snapshot on isolated fixture I/O to exercise unsettled shutdown.
+    let ui = target.join("ui/config");
+    fs::create_dir_all(ui.parent().unwrap()).unwrap();
+    if ui.exists() {
+        fs::remove_file(&ui).unwrap();
+    }
+    let fifo = std::ffi::CString::new(ui.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     let operation_pending = |operation: &TcpStream| {
         let mut response = [0; 1024];
         match operation.peek(&mut response) {
@@ -3219,7 +3391,8 @@ fn shutdown_timeout_stops_kernel_even_while_an_operation_is_unsettled() {
     let operation = loop {
         assert!(Instant::now() < deadline, "operation did not hold lock");
         let mut operation = TcpStream::connect(address).unwrap();
-        write!(operation, "POST /settings HTTP/1.1\r\nHost: localhost\r\nX-Supervisor-Token: {token}\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{{").unwrap();
+        let body = r#"{"log_level":"debug"}"#;
+        write!(operation, "POST /settings HTTP/1.1\r\nHost: localhost\r\nX-Supervisor-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         operation.set_nonblocking(true).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         if !operation_pending(&operation) {

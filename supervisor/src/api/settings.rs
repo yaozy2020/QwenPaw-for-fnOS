@@ -38,14 +38,27 @@ pub(super) async fn kernel_reset_auth(
             .into_response();
     }
     let backup = auth.with_extension("json.bak-reset");
-    // 删除会影响运行中内核的登录态,先备份而非直接删;重命名失败即中止
-    if let Err(e) = std::fs::rename(&auth, &backup) {
+    state.kernel.stop().await;
+    if let Some(error) = super::lifecycle::stop_verification_error(&state.kernel) {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    let transaction = Arc::new(crate::auth_reset::AuthReset::new(
+        &auth,
+        std::path::Path::new(&state.var_dir),
+    ));
+    let tx = Arc::clone(&transaction);
+    let begin = tokio::task::spawn_blocking(move || tx.begin())
+        .await
+        .unwrap_or_else(|error| Err(std::io::Error::other(error)));
+    if let Err(error) = begin {
+        state
+            .install
+            .block_recovery(format!("认证重置准备失败: {error}"));
         return err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("认证文件备份失败: {e}"),
+            &format!("认证文件备份失败: {error}"),
         );
     }
-    state.kernel.stop().await;
     let kernel = Arc::clone(&state.kernel);
     let spawn_result = tokio::task::spawn_blocking(move || kernel.spawn())
         .await
@@ -55,27 +68,36 @@ pub(super) async fn kernel_reset_auth(
         healthy = wait_healthy_blocking(&state).await;
     }
     if healthy {
-        let backup_c = backup.clone();
-        let backup_removed = tokio::task::spawn_blocking(move || std::fs::remove_file(&backup_c))
+        let committed = tokio::task::spawn_blocking(move || transaction.commit())
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        if let Err(error) = committed {
+            state
+                .install
+                .block_recovery(format!("认证重置提交或清理待恢复: {error}"));
+            state.kernel.stop().await;
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("认证重置尚待恢复: {error}"),
+            );
+        }
+        *state
+            .auth_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = AuthCache::default();
         let snap_state = state.clone();
         tokio::task::spawn_blocking(move || {
             snap_state.events.publish(render_snapshot(&snap_state));
         });
-        let msg = match backup_removed {
-            Ok(_) => "管理员密码已重置,服务已重启".to_string(),
-            Err(e) => format!(
-                "管理员密码已重置,服务已重启;但备份删除失败({e}),残留于 {}",
-                backup.display()
-            ),
-        };
-        Json(json!({"ok": true, "success": true, "message": msg})).into_response()
+        Json(json!({"ok": true, "success": true, "message": "管理员密码已重置,服务已重启"}))
+            .into_response()
     } else {
         state.kernel.stop().await;
-        let backup_c = backup.clone();
-        let auth_c = auth.clone();
-        let restore = tokio::task::spawn_blocking(move || std::fs::rename(&backup_c, &auth_c))
+        if let Some(error) = super::lifecycle::stop_verification_error(&state.kernel) {
+            state.install.block_recovery(error.clone());
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
+        }
+        let restore = tokio::task::spawn_blocking(move || transaction.recover())
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(e)));
         let respawn = if let Err(error) = &restore {

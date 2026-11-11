@@ -14,7 +14,8 @@ const webEntryPath = `${gatewayPrefix}/web/`;
 test("console entry stays same-origin and does not open a port-based popup", () => {
   const button = html.match(/<a\b[^>]*\bid="btnWebConsole"[^>]*>/)?.[0];
   assert.ok(button, "Web console entry anchor exists");
-  assert.match(button, /href="\/app\/qwenpaw\/web\/"/);
+  assert.match(button, /href="#overview"/);
+  assert.ok(main.includes(`"${webEntryPath}"`), "running services use the same-origin Gateway entry");
   assert.doesNotMatch(button, /\btarget=/);
   assert.doesNotMatch(main, /btnConsole\.href\s*=\s*`http:\/\/\$\{host\}:\$\{activePort\}`/);
 });

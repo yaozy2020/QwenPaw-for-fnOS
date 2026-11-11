@@ -1034,6 +1034,77 @@ class GatewayUDSTests(unittest.TestCase):
             for connection in streams:
                 connection.close()
 
+    def test_console_large_assets_compress_over_uds_without_changing_content(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        f = self.fixture
+        f.start()
+        large_js = b'const endpoint="/api";\n/*' + b"console-size-fixture " * 320000 + b"*/"
+        rewritten = large_js.replace(b'"/api"', b'"/app/qwenpaw/web/api"')
+        precompressed = gzip.compress(b"existing upstream encoding " * 100, mtime=0)
+        requests = []
+
+        class Upstream(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append((self.path, self.headers.get("Accept-Encoding")))
+                if self.path == "/assets/too-large.js":
+                    body, mime = b"x" * (8 * 1024 * 1024 + 1), "text/javascript"
+                elif self.path == "/assets/encoded.bin":
+                    body, mime = precompressed, "application/octet-stream"
+                else:
+                    body, mime = large_js, "text/javascript"
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(body)))
+                if self.path == "/assets/encoded.bin":
+                    self.send_header("Content-Encoding", "gzip")
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # The bounded proxy can close an oversized upstream response.
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", f.port), Upstream) as upstream:
+            worker = threading.Thread(target=upstream.serve_forever, daemon=True)
+            worker.start()
+            try:
+                path = PREFIX + "/web/assets/large.js"
+                for accept in ("gzip", "gzip;q=0, identity;q=1"):
+                    with self.subTest(accept=accept):
+                        response = f.request(path, headers={"Accept-Encoding": accept})
+                        self.assertEqual(response[0], 200)
+                        self.assertEqual(requests[-1], ("/assets/large.js", "identity"))
+                        if accept == "gzip":
+                            self.assertEqual(header(response, "Content-Encoding"), "gzip")
+                            self.assertIn("accept-encoding", header(response, "Vary").lower())
+                            self.assertIsNone(header(response, "Content-Length"))
+                            self.assertLess(len(response[2]), len(rewritten))
+                            self.assertEqual(gzip.decompress(response[2]), rewritten)
+                        else:
+                            self.assertIsNone(header(response, "Content-Encoding"))
+                            self.assertEqual(response[2], rewritten)
+                head = f.request(path, method="HEAD", headers={"Accept-Encoding": "gzip"})
+                self.assertEqual(head[0], 200)
+                self.assertEqual(head[2], b"")
+                self.assertEqual(header(head, "Content-Length"), str(len(rewritten)))
+                self.assertIsNone(header(head, "Content-Encoding"))
+                encoded = f.request(PREFIX + "/web/assets/encoded.bin",
+                                    headers={"Accept-Encoding": "gzip"})
+                self.assertEqual(encoded[0], 200)
+                self.assertEqual(header(encoded, "Content-Encoding"), "gzip")
+                self.assertEqual(encoded[2], precompressed, "upstream was compressed twice")
+                oversized = f.request(PREFIX + "/web/assets/too-large.js",
+                                      headers={"Accept-Encoding": "gzip"})
+                self.assertEqual(oversized[0], 502, "oversized rewrite must fail explicitly")
+                self.assertTrue(response_json(f.request(API + "/status"))["success"])
+            finally:
+                upstream.shutdown()
+                worker.join(timeout=3)
+                self.assertFalse(worker.is_alive(), "isolated upstream did not stop")
+
     def test_no_kernel_page_status_and_private_socket(self):
         f = self.fixture
         f.start()
@@ -1068,6 +1139,40 @@ class GatewayUDSTests(unittest.TestCase):
         with self.assertRaises(OSError):
             socket.create_connection(("127.0.0.1", f.port), timeout=1)
         self.assertEqual(f.request(PREFIX + "/")[2], PAGE)
+        f.check_private()
+
+    def test_disconnected_configuration_retains_gate_until_rollback(self):
+        import struct
+
+        f = self.fixture
+        f.install_runtime()
+        f.start()
+        csrf = f.csrf()
+        self.assertTrue(response_json(f.request(API + "/start", "POST", csrf, {}))["success"])
+        wait_for(lambda: response_json(f.request(API + "/status"))["running"], "kernel ready before cancellation")
+        originals = {path: path.read_bytes() for path in [f.root / "var/service_port", f.root / "var/qwenpaw-log-level", f.ui]}
+        pause = f.root / "pause-kernel"
+        pause.touch()
+        journal = f.root / "var/settings-transaction.json"
+        body = json.dumps({"log_level": "debug"}).encode()
+        headers = {**ADMIN, **csrf, "Content-Type": "application/json", "Content-Length": str(len(body))}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+            stream.settimeout(5)
+            stream.connect(str(f.gateway))
+            request = "POST " + API + "/settings HTTP/1.1\r\n"
+            request += "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+            stream.sendall((request + "\r\n").encode() + body)
+            wait_for(lambda: journal.exists() and (f.root / "kernel-paused").exists(), "configuration holding operation gate")
+            self.assertEqual(f.request(API + "/mirror", "POST", csrf, {"mirror": ""})[0], 409)
+            stream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        time.sleep(0.1)
+        self.assertEqual(f.request(API + "/mirror", "POST", csrf, {"mirror": ""})[0], 409)
+        pause.unlink()
+        wait_for(lambda: not journal.exists(), "configuration rollback after disconnect", timeout=25)
+        wait_for(lambda: f.request(API + "/mirror", "POST", csrf, {"mirror": ""})[0] == 200, "operation cleanup completes")
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(response_json(f.request(API + "/kernel/install-status"))["recovery_required"])
         f.check_private()
 
     def test_mirror_api_roundtrip_and_rejections_are_side_effect_free(self):
