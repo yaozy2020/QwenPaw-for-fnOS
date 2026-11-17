@@ -104,7 +104,6 @@ export function createStatusPanel({ api, versionPanel, errorMessage, updateOverv
         data = result.data;
       }
       if (mySeq !== statusReqSeq) return;
-
       const badge = document.getElementById("statusBadge");
       const valVersion = document.getElementById("valVersion");
       const valAuth = document.getElementById("valAuthStatus");

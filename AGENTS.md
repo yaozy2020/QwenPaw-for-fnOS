@@ -16,11 +16,11 @@ fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台�
 
 进行后续管理层工作前，先阅读 `docs/session-handoff-2026-11-04.md`、`docs/management-contract-inventory.md` 和 `docs/management-refactor-plan.md`，再核对当前工作树与相关源码。基线包含大量前序未提交实现和文档；必须按当前工作树判断，保留已有改动，不能只依据 HEAD。
 
-**当前性能与重装修复候选（2026-11-17）：**manifest 版本为 `1.2.7-7`；候选 `build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,773,890 字节，SHA256 `382684beadb7c61349d14fe8bea1e5bb63edeb0ce4a2163e8777185d84f57e6c`，包内 musl supervisor SHA256 `d3b0ca12241369a73bb5219d0baa6f2fd7f65e069523bf64c5ce3660f64b91e2`。
+**当前性能与重装修复候选（2026-11-17）：**manifest 版本为 `1.2.7-7`；候选 `build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,773,553 字节，SHA256 `5218b74df94c2426ecc7e48f5bd57dff66cb86e5d1917d9af7f5b6eed93bf2e7`，包内 musl supervisor SHA256 `9d9ec7bc00f28b18b258dfc2704df2b84aecd7f974b308b2cf3df3a8e45cfcf6`。
 
-Console 以官方 v2.3.0 `0a21644e90d8ba37e20035b3bfb63880872cc2a2` 为基线，源码补丁 SHA256 `b0ba1b6e48df72f6c3f7188dbee23a33ce282ef605f2f46401c64356f92d8c2f`，动态预加载并发限制为 16，保留运行时 base-path 和浏览器 Cookie 清理。安装仅接受完整预构建载荷，不再回退下载其他版本源码。历史哈希与 `/proc/exe` 权限回退保持；全新安装还会安全停止已登记实例或唯一的受管 orphan supervisor，多实例或身份不明仍失败关闭。
+Console 以官方 v2.3.0 `0a21644e90d8ba37e20035b3bfb63880872cc2a2` 为基线，源码补丁 SHA256 `b0ba1b6e48df72f6c3f7188dbee23a33ce282ef605f2f46401c64356f92d8c2f`，动态预加载并发限制为 16，保留运行时 base-path 和浏览器 Cookie 清理。安装仅接受完整预构建载荷，不再回退下载其他版本源码。历史哈希与 `/proc/exe` 权限回退保持；已登记且与当前目标一致的 supervisor 直接复用，路径变化才停止旧实例；无登记时仅在存在历史安装证据且目标可执行文件一致时接管唯一 orphan，健康内核不因重装被停止，多实例或身份不明仍失败关闭。
 
-当前验证：Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项、Rust 388+13 项及严格 Clippy 通过；preflight、build/FPK audit 通过，915 个补丁文件哈希一致。首屏 2.921 MiB raw、0.792 MiB Brotli。无旧 PID 登记的隔离重装 8.9 秒完成。远程应用中心已安装 `-7 running`，内核 2.3.0 正常运行且 recovery_required=false；主 Web 聊天输入与设置深链刷新通过，资源/API/页面错误均为 0，资源峰值 18（不写成严格 16）。这是测试候选，不是生产发布。
+当前验证：Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项、Rust 388+13 项及严格 Clippy 通过；前端 128 项与类型检查通过，Gateway E2E 9 通过、1 跳过；平台回调全量通过。preflight、build/FPK audit 通过，915 个补丁文件哈希一致。首屏 2.921 MiB raw、0.792 MiB Brotli。无旧 PID 登记的隔离重装 8.9 秒完成。远程应用中心已安装 `-7 running`，内核 2.3.0 正常运行且 recovery_required=false；主 Web 聊天输入与设置深链刷新通过，资源/API/页面错误均为 0，资源峰值 18（不写成严格 16）。这是测试候选，不是生产发布。
 
 历史平台证据保留在 `docs/platform-validation-2026-11-03.md` 和 `docs/unified-gateway-migration-plan.md`。历史文档中的旧 FPK 路径和摘要只用于审计，不表示对应本地产物仍然保留或可在当前源码上复现。
 

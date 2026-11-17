@@ -1428,7 +1428,7 @@ browserTest("late status success and failure cannot overwrite a newer snapshot",
   await expect(page.locator("#statusBadge")).toContainText("运行中");
 });
 
-browserTest("status snapshots arrive over SSE without waiting for the polling interval", async t => {
+browserTest("initial SSE refreshes status and later snapshots arrive without polling", async t => {
   const { page, state } = await fixture(t, {
     status: runningStatus,
     initScript: () => {
@@ -1451,6 +1451,7 @@ browserTest("status snapshots arrive over SSE without waiting for the polling in
   const stream = await page.evaluate(() => window.EventSource.instances[0]?.url);
   assert.equal(stream, "/app/qwenpaw/api/events");
   const stopped = { ...state.status, running: false, pid: "0", startAt: 0, cpu: 0, memKB: 0 };
+  state.status = stopped;
   await page.evaluate(data => {
     window.EventSource.instances[0].snapshotListener({ data: JSON.stringify(data) });
   }, stopped);

@@ -13,7 +13,7 @@
 | `cmd/*_callback` | install、upgrade、configure、uninstall 等 fnOS 回调转发固定 `platform` 子命令；向导环境变量由 Rust 校验与处理。平台回调时序/重试语义须按平台证据描述。 |
 | `supervisor/src/main.rs`、`cli.rs` | 启动装配共享 `ManagementCore`；提供常驻 `serve`、`service`、`platform`、`doctor --json` 等原生子命令。生产 CGI 子命令 `web api-cgi` / `web index-cgi` 已删除。 |
 | `supervisor/src/management.rs` | HTTP、Gateway 与私有平台控制通道共用管理核心，集中操作互斥、恢复门禁、安装提交、运行时健康与初始化等管理规则。 |
-| `supervisor/src/platform.rs`、`service.rs` | 分别承接平台生命周期/回调与服务管理；Shell 入口不保留安装、配置、停止或删除策略。服务身份仍先核对 PID 与 starttime；`/proc/<pid>/exe` 权限受限时回退读取完整 `cmdline` 可执行路径，两侧路径规范化后比较，读取失败或身份不匹配仍拒绝。全新安装先停止已登记实例；无登记时仅接受唯一受管 orphan supervisor，二次核验后 SIGTERM，多个或身份不明失败关闭。 |
+| `supervisor/src/platform.rs`、`service.rs` | 分别承接平台生命周期/回调与服务管理；Shell 入口不保留安装、配置、停止或删除策略。服务身份仍先核对 PID 与 starttime；`/proc/<pid>/exe` 权限受限时回退读取完整 `cmdline` 可执行路径，两侧路径规范化后比较，读取失败或身份不匹配仍拒绝。一致 supervisor 直接复用，路径变化才停止；orphan 接管需历史安装证据且仅接受唯一当前目标，健康内核不因重装被停止，多实例或身份不明失败关闭。 |
 
 ## Gateway、HTTP 与 UDS 边界
 

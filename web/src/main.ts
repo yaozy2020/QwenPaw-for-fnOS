@@ -429,11 +429,9 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       if (statusEvents) return;
       const stream = new EventSource(`${api.base}/events`);
       statusEvents = stream;
-      stream.addEventListener("snapshot", event => {
+      stream.addEventListener("snapshot", () => {
         if (statusEvents !== stream) return;
-        try {
-          void fetchStatus(JSON.parse((event as MessageEvent).data) as StatusResponse);
-        } catch {}
+        void fetchStatus();
       });
     }
 

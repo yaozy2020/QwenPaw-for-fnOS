@@ -473,7 +473,7 @@ fn registered_reinstall_executable(cfg: &Config) -> Result<Option<PathBuf>, Stri
     };
     let executable = proc_cmdline_executable(pid)
         .map_err(|error| format!("read registered supervisor command line: {error}"))?;
-    if !managed_supervisor_path(&executable) {
+    if !managed_supervisor_path(&executable) && executable != cfg.supervisor_binary {
         return Err(format!(
             "registered supervisor executable is outside the managed application: {}",
             executable.display()
@@ -487,7 +487,7 @@ fn registered_reinstall_executable(cfg: &Config) -> Result<Option<PathBuf>, Stri
     }
 }
 
-fn orphan_supervisor() -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf)>, String> {
+fn orphan_supervisor(cfg: &Config) -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf)>, String> {
     let expected_pid = std::env::var("QWENPAW_TEST_REINSTALL_PID")
         .ok()
         .and_then(|value| value.parse::<i32>().ok());
@@ -499,7 +499,9 @@ fn orphan_supervisor() -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf
         let Ok(executable) = proc_cmdline_executable(identity.pid) else {
             continue;
         };
-        if !managed_supervisor_path(&executable) {
+        if !managed_supervisor_path(&executable)
+            || !executable_matches(&cfg.supervisor_binary, &executable)
+        {
             continue;
         }
         let command = fs::read(format!("/proc/{}/cmdline", identity.pid))
@@ -520,9 +522,9 @@ fn orphan_supervisor() -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf
     }
 }
 
-fn stop_orphan_supervisor() -> Result<(), String> {
-    let Some((identity, executable)) = orphan_supervisor()? else {
-        return Ok(());
+fn stop_orphan_supervisor(cfg: &Config) -> Result<bool, String> {
+    let Some((identity, executable)) = orphan_supervisor(cfg)? else {
+        return Ok(false);
     };
     if check_identity(identity.pid, identity.starttime, &executable) != IdentityState::Match {
         return Err("orphan supervisor identity changed before SIGTERM".into());
@@ -533,7 +535,7 @@ fn stop_orphan_supervisor() -> Result<(), String> {
     let deadline = Instant::now() + STOP_GRACE;
     loop {
         match crate::procfs::identity_status(identity) {
-            crate::procfs::IdentityStatus::Gone => return Ok(()),
+            crate::procfs::IdentityStatus::Gone => return Ok(true),
             crate::procfs::IdentityStatus::Reused => {
                 return Err("orphan supervisor PID was reused during shutdown".into());
             }
@@ -550,10 +552,18 @@ fn stop_orphan_supervisor() -> Result<(), String> {
 
 pub(crate) fn stop_for_reinstall(cfg: &Config) -> Result<(), String> {
     let executable = registered_reinstall_executable(cfg)?;
-    if executable.is_none() {
-        stop_orphan_supervisor()?;
+    let has_previous_install = Path::new(&cfg.kernel_venv).exists()
+        || cfg.gateway_socket.as_ref().is_some_and(|path| path.exists());
+    if let Some(executable) = executable {
+        if executable_matches(&cfg.supervisor_binary, &executable) {
+            return Ok(());
+        }
+        return stop_locked(cfg, &executable);
     }
-    stop_for_uninstall(cfg, executable.as_deref().unwrap_or(&cfg.supervisor_binary))
+    if has_previous_install && stop_orphan_supervisor(cfg)? {
+        return stop_locked(cfg, &cfg.supervisor_binary);
+    }
+    Ok(())
 }
 
 pub(crate) fn stop_for_uninstall(cfg: &Config, expected_exe: &Path) -> Result<(), String> {

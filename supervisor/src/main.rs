@@ -155,6 +155,7 @@ fn serve() {
         cfg.kernel_port,
     ));
     let events = Events::new();
+    let events_for_install = events.clone();
     let kernel_for_install = Arc::clone(&kernel);
     let ui_config_for_install = cfg.ui_config_file.clone();
     let install = InstallState::with_lifecycle(
@@ -166,6 +167,7 @@ fn serve() {
                     install::Phase::Done | install::Phase::Failed | install::Phase::Cancelled
                 ) {
                     kernel_for_install.invalidate_version();
+                    events_for_install.invalidate();
                     if let Err(e) = api::sync_main_entry(
                         std::path::Path::new(&ui_config_for_install),
                         kernel_for_install.installed(),

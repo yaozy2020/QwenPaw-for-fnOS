@@ -8,9 +8,9 @@
 - manifest：`1.2.7-7`。
 - FPK：`build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`。
 - 稳定路径：`build/candidates/latest/qwenpaw-latest-x86.fpk`。
-- 大小：23,773,890 字节。
-- FPK SHA256：`382684beadb7c61349d14fe8bea1e5bb63edeb0ce4a2163e8777185d84f57e6c`。
-- 包内 musl supervisor SHA256：`d3b0ca12241369a73bb5219d0baa6f2fd7f65e069523bf64c5ce3660f64b91e2`。
+- 大小：23,773,553 字节。
+- FPK SHA256：`5218b74df94c2426ecc7e48f5bd57dff66cb86e5d1917d9af7f5b6eed93bf2e7`。
+- 包内 musl supervisor SHA256：`9d9ec7bc00f28b18b258dfc2704df2b84aecd7f974b308b2cf3df3a8e45cfcf6`。
 - 这是测试候选，不是生产发布。旧候选和重复输出已清理，历史文档中的旧路径仅作审计记录。
 
 ## 当前实现
@@ -22,7 +22,7 @@
 - manifest 按官方 JS SDK 要求声明 `micro_app=true`，打开目录使用 `TrimApp.ready() → openFileManager(path)`。此前 `1.2.6-5` 的双端原生打开验收保持，不自动扩展到本候选手机 App。
 - Console 以官方 v2.3.0 `0a21644e90d8ba37e20035b3bfb63880872cc2a2` 为基线，源码补丁 SHA256 `b0ba1b6e48df72f6c3f7188dbee23a33ce282ef605f2f46401c64356f92d8c2f`，动态预加载并发为 16，保留运行时 base-path 与浏览器 Cookie 清理；不再回退下载其他版本源码。
 - 历史补丁清单合并各版本 `sha256` 与 `previous_sha256`，覆盖现场旧 venv。`/proc/exe` 权限受限时回退完整 `cmdline` 并规范化两侧路径，PID、starttime 和不匹配拒绝规则不变。
-- 全新安装先停止已登记实例；没有登记时，仅接受唯一、路径与 `serve` 参数均匹配的受管 orphan supervisor，二次核验后 SIGTERM。多个实例或身份不明失败关闭，不放宽普通启动规则。
+- 已登记且与当前目标一致的 supervisor 直接复用，路径变化才停止旧实例；没有登记时，需存在 venv 或 Gateway socket 等历史安装证据，且只接受唯一、当前目标路径与 `serve` 参数均匹配的 orphan，二次核验后 SIGTERM。健康内核不因重装被停止，多实例或身份不明失败关闭。
 - QwenPaw 2.3.0 使用原生 base-path 补丁与完整预构建 Console，代理保留配置前缀。WebSocket 仍返回 501，不宣称完整支持。
 
 当前管理契约见 `management-contract-inventory.md`，事务与测试设计见 `management-refactor-plan.md`。
