@@ -663,6 +663,35 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
         try:
             connection.request(self.command, self.path, body=body or None, headers=headers)
             upstream = connection.getresponse()
+            if parsed.path == API + "events" and upstream.status == 200:
+                response_headers = upstream.getheaders()
+                require(TOKEN not in str(response_headers),
+                        "private supervisor token was disclosed in SSE headers")
+                record.update({"status": upstream.status, "success": True})
+                with fixture.lock:
+                    fixture.forwarded.append(record)
+                fixture.remember_descendants()
+                self.send_response(upstream.status)
+                for name, value in response_headers:
+                    if name.lower() not in ("connection", "content-length", "transfer-encoding", "server", "date"):
+                        self.send_header(name, value)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                upstream.fp.raw._sock.settimeout(30)
+                try:
+                    while True:
+                        chunk = upstream.read1(8192)
+                        if not chunk:
+                            break
+                        require(TOKEN.encode() not in chunk,
+                                "private supervisor token was disclosed in SSE body")
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                    pass
+                finally:
+                    self.close_connection = True
+                return
             response_body = upstream.read(MAX_RESPONSE + 1)
             require(len(response_body) <= MAX_RESPONSE, "gateway response exceeded fixture limit")
             response_headers = upstream.getheaders()

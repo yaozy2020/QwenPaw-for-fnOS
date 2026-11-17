@@ -191,18 +191,14 @@ def inspect_platform_entry(repo_root, entry, subcommand):
     active = [line.strip() for line in code.splitlines() if line.strip()]
     if entry in {"upgrade_callback", "uninstall_callback"}:
         expected = [
-            'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then',
-            f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {subcommand}',
-            "fi",
-            'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
-            f'exec "${{0%/*}}/qwenpaw-supervisor" platform {subcommand}',
-            "fi",
-            "exit 127",
+            line.strip()
+            for line in shell_code(valid_platform_entry(subcommand)).splitlines()
+            if line.strip()
         ]
-        if len(execs) != 2 or active != expected:
+        if len(execs) != 1 or active != expected:
             offset = execs[0].start() if execs else 0
             errors.append(
-                f"{rel}:{line_number(code, offset)}: must use TRIM_PKGVAR helper then sibling for fixed platform {subcommand}"
+                f"{rel}:{line_number(code, offset)}: must use only the packaged cmd supervisor for fixed platform {subcommand}"
             )
     elif entry == "upgrade_init":
         expected = [
@@ -366,11 +362,8 @@ def valid_platform_entry(subcommand):
     if subcommand in {"upgrade", "uninstall"}:
         return (
             "#!/bin/sh\n"
-            'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then\n'
-            f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {subcommand}\n'
-            "fi\n"
             'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then\n'
-            f'exec "${{0%/*}}/qwenpaw-supervisor" platform {subcommand}\n'
+            f'    exec "${{0%/*}}/qwenpaw-supervisor" platform {subcommand}\n'
             "fi\n"
             "exit 127\n"
         )
@@ -500,9 +493,9 @@ def callback_layout_self_test():
         ("uninstall_callback", "uninstall", ". ./lib.sh\n", "sources files"),
         ("upgrade_callback", "upgrade", "source ./helper.sh\n", "sources files"),
         ("install_callback", "install", 'case "$1" in install) : ;; esac\n', "case business logic"),
-        ("upgrade_callback", "upgrade", 'exec "$candidate" platform install\n', "TRIM_PKGVAR helper then sibling"),
-        ("uninstall_callback", "uninstall", 'candidate="$TRIM_PKGVAR/qwenpaw-supervisor-helper"\n', "TRIM_PKGVAR helper then sibling"),
-        ("upgrade_callback", "upgrade", 'true\n', "TRIM_PKGVAR helper then sibling"),
+        ("upgrade_callback", "upgrade", 'exec "$candidate" platform install\n', "single cmd supervisor"),
+        ("uninstall_callback", "uninstall", 'candidate="$TRIM_PKGVAR/qwenpaw-supervisor-helper"\n', "single cmd supervisor"),
+        ("upgrade_callback", "upgrade", 'true\n', "single cmd supervisor"),
     ]
     for entry, subcommand, injected, expected in callback_violations:
         with tempfile.TemporaryDirectory(prefix="management-p3-callback-negative-") as temp:

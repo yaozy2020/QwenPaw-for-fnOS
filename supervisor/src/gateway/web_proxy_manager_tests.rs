@@ -81,6 +81,19 @@ async fn manager_start_auto_assigns_and_persists_a_loopback_port() {
 }
 
 #[tokio::test]
+async fn previously_retired_ports_bind_successfully() {
+    for port in [19090, 19091] {
+        let dir = TestDir::new("web-proxy-formerly-retired");
+        let state = dir.state(free_port());
+        let manager = WebProxyManager::start(state, port, false).await.unwrap();
+        assert_eq!(manager.state().await, (port, false));
+        assert!(accepts_connections(port).await);
+        drop(manager);
+        assert!(wait_until_bindable(port).await);
+    }
+}
+
+#[tokio::test]
 async fn manager_start_public_binds_all_interfaces_and_persists_public() {
     let dir = TestDir::new("web-proxy-manager-public");
     let state = dir.state(free_port());
@@ -216,13 +229,13 @@ async fn manager_reconfigure_persist_failure_keeps_the_previous_listener_and_con
 async fn manager_reconfigure_public_persist_failure_restores_the_previous_port() {
     let dir = TestDir::new("web-proxy-manager-public-persist-failure");
     let state = dir.state(free_port());
-    let manager = WebProxyManager::start(state.clone(), 0, false)
+    let mut manager = WebProxyManager::start(state.clone(), 0, false)
         .await
         .unwrap();
     let (previous_port, _) = manager.state().await;
-    let blocker = std::path::Path::new(&state.core.var_dir)
-        .join(format!("web_proxy_public.tmp.{}", std::process::id()));
-    std::fs::write(blocker, b"block public persistence").unwrap();
+    let blocked_parent = dir.0.join("not-a-directory");
+    std::fs::write(&blocked_parent, b"block public persistence").unwrap();
+    manager.app.core.var_dir = blocked_parent.to_string_lossy().into_owned();
 
     assert!(manager.reconfigure(0, true).await.is_err());
 
@@ -380,6 +393,7 @@ async fn web_proxy_port_api_changes_access_and_preserves_it_when_omitted() {
         .unwrap();
     let (mut previous_port, _) = manager.state().await;
     state.web_proxy = Some(Arc::new(manager.clone()));
+    let mut events = state.events.subscribe();
     let router = api::build_router(state.clone());
 
     for (body, expected_public) in [
@@ -395,6 +409,7 @@ async fn web_proxy_port_api_changes_access_and_preserves_it_when_omitted() {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(events.try_recv().unwrap(), "");
         let new_port = response_json(response).await["port"].as_u64().unwrap() as u16;
         assert_ne!(new_port, previous_port);
         assert_eq!(manager.state().await, (new_port, expected_public));

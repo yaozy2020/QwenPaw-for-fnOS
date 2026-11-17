@@ -1,90 +1,17 @@
-import {
-  renderStatusCard,
-  renderLogLines,
-  renderMirrorOptions,
-  renderVersionCards,
-  renderHistoryItems,
-  renderInstallSteps,
-  type InstallStep,
-  type InstallStepsState,
-} from "./components";
-import { formatUptime } from "./statusStore";
-import {
-  createInstallTask,
-  acceptInstallTask,
-  observeInstallStatus,
-  persistInstallTask,
-  restoreInstallTask,
-  clearStoredInstallTask,
-} from "./installTask.mjs";
-import { ApiClientError, createApiClient, type LogEntry, type VersionItem } from "./api";
+import { createApiClient, type StatusResponse } from "./api";
+import { createAuthorizedDirsPanel } from "./authorizedDirsPanel";
+import { createInstallCoordinator } from "./installCoordinator";
+import { createInstallProgressPanel } from "./installProgressPanel";
+import { createLogPanel } from "./logPanel";
+import { createPollingLifecycle } from "./pollingLifecycle";
+import { createMobileNavigation } from "./navigation";
+import { operationSucceeded } from "./apiResult";
+import type { ModalOptions, ModalOptionsWithInput, ModalOptionsWithoutInput } from "./modal";
+import { createSettingsPanel } from "./settingsPanel";
+import { createStatusPanel } from "./statusPanel";
+import { createVersionPanel } from "./versionPanel";
 
 const api = createApiClient({ pathname: window.location.pathname, cookie: () => document.cookie });
-
-    function installTaskStorage(): Storage | null {
-      try { return window.sessionStorage; } catch { return null; }
-    }
-
-    let refreshTimer: ReturnType<typeof setInterval> | null = null;
-    let upgradePollTimer: ReturnType<typeof setInterval> | null = null;
-    let upgradeStartedAt = 0;
-    // 轮询总超时:任务真挂起(upgrading 恒 true / 后端失联)时给用户一条逃逸路径
-    const UPGRADE_POLL_MAX_MS = 10 * 60 * 1000;
-    // 连续失败达到阈值后切换到"连接中断"终态
-    const UPGRADE_POLL_FAIL_MAX = 6; // 1200ms 节流后 ≈1.6s/拍,到终态 ≈9.6s
-    let pollFailureStreak = 0;
-    let upPollLastAt = 0;
-    let upStatusPollInFlight = false;
-    let upLogsPollInFlight = false;
-    // 任务跟踪:归属只看明确受理/附加的 seq + instance(installTask.mjs),
-    // 不靠 phase 跳变或全局 seq 变化猜结果。
-    let installTask = restoreInstallTask(installTaskStorage()) || createInstallTask({ attach: false });
-
-    let rawVersionList: VersionItem[] = [];
-    let userPickedVersion = false;
-    let selectedVersion = "";
-    let latestStableVer = "";
-    let latestBetaVer = "";
-
-    
-    // 语义化版本比对函数:分级权重 [major, minor, patch, stage, num]
-    // 严格对齐 dev(0) < a(1) < b(2) < rc(3) < formal(4) < post(5),数字段按整数比对
-    function compareVersion(v1: string, v2: string): number {
-      function parse(v: string) {
-        if (!v) return [0, 0, 0, 0, 0];
-        const clean = v.replace(/^v/, "").trim();
-        const m = clean.match(/^(\d+)\.(\d+)(?:\.(\d+))?(.*)$/);
-        if (!m) return [0, 0, 0, 0, 0];
-        const major = parseInt(m[1], 10);
-        const minor = parseInt(m[2], 10);
-        const patch = parseInt(m[3] || "0", 10);
-        const extra = m[4] || "";
-        let stage = 4; // 4 = 正式发版(无后缀)
-        let num = 0;
-        if (!extra) {
-          stage = 4;
-          num = 0;
-        } else if (extra.includes(".post")) {
-          stage = 5; // 5 = post 发版(高于正式版)
-          num = parseInt(extra.replace(/\D/g, "") || "0", 10);
-        } else {
-          const c = extra.replace(/^[.-]/, "").toLowerCase();
-          if (c.startsWith("dev")) stage = 0;
-          else if (c.startsWith("a") || c.startsWith("alpha")) stage = 1;
-          else if (c.startsWith("b") || c.startsWith("beta")) stage = 2;
-          else if (c.startsWith("rc") || c.startsWith("c") || c.startsWith("pre")) stage = 3;
-          num = parseInt(c.replace(/\D/g, "") || "0", 10);
-        }
-        return [major, minor, patch, stage, num];
-      }
-      const a = parse(v1);
-      const b = parse(v2);
-      for (let i = 0; i < 5; i++) {
-        if (a[i] > b[i]) return 1;
-        if (a[i] < b[i]) return -1;
-      }
-      return 0;
-    }
 
     // 核心主题管理:默认跟随系统(prefers-color-scheme),仅用户点切换时才落盘。
     // 存储键 v2 —— 旧版曾把默认 dark 自动写入旧键,无法与用户显式选择区分。
@@ -148,26 +75,6 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     // 样式不可控、阻断渲染,且无法做校验反馈。
     // 无障碍:role=dialog + aria-modal 已在模板上,Esc 关闭、Tab 焦点陷阱、
     // 关闭后把焦点还给触发元素。
-    type ModalInput = {
-      label?: string;
-      value?: string;
-      type?: string;
-      inputMode?: HTMLInputElement["inputMode"];
-      placeholder?: string;
-      pattern?: string;
-      validate?: (value: string) => boolean;
-    };
-    type ModalOptions = {
-      title?: string;
-      message?: string;
-      type?: "primary" | "warn" | "danger";
-      confirmText?: string;
-      cancelText?: string;
-      input?: ModalInput | null;
-    };
-    type ModalOptionsWithInput = ModalOptions & { input: ModalInput };
-    type ModalOptionsWithoutInput = ModalOptions & { input?: null };
-
     function showModal(options: ModalOptionsWithInput): Promise<string | null | false>;
     function showModal(options?: ModalOptionsWithoutInput): Promise<boolean>;
     function showModal({
@@ -309,34 +216,16 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     }
 
     // 卡片标题 meta 位(运行时长)的唯一写入点:正常/降级两分支共用,防口径漂移
-    // 服务操作区按运行态切换。
-    // 停止态必须给出"启动"入口 —— 否则用户只能点"重启"来恢复,
-    // 虽然结果正确,但语义误导(用户以为在重启,实则是启动)。
-    // degraded(后端不可达)时全部禁用:此时点任何操作都会失败,不如不给入口。
-    function setServiceActions(running: boolean, installed: boolean, degraded: boolean): void {
-      const start = document.getElementById("btnStartService") as HTMLButtonElement | null;
-      const restart = document.getElementById("btnRestartService") as HTMLButtonElement | null;
-      const stop = document.getElementById("btnStopService") as HTMLButtonElement | null;
-      if (!start || !restart || !stop) return;
+    function showAbout(): void {
+      const dialog = document.getElementById("aboutDialog") as HTMLDialogElement | null;
+      if (!dialog || dialog.open) return;
+      dialog.showModal();
+    }
 
-      // 未安装内核时没有任何可执行的操作
-      const usable = installed && !degraded;
-      start.hidden = !(usable && !running);
-      restart.hidden = !(usable && running);
-      stop.hidden = !(usable && running);
-
-      for (const btn of [start, restart, stop]) {
-        btn.disabled = degraded;
-        btn.title = degraded ? "控制台无法连接监督者，暂不可操作" : "";
-      }
-      const install = document.getElementById("statusInstallLink");
-      if (install) install.hidden = installed || degraded;
-      const entry = document.getElementById("btnWebConsole") as HTMLAnchorElement | null;
-      const label = document.getElementById("webConsoleText");
-      if (entry) entry.href = degraded || (installed && !running) ? "#overview"
-        : !installed ? "#version" : "/app/qwenpaw/web/";
-      if (label) label.innerText = degraded ? "检查服务状态" : !installed ? "安装并开始使用"
-        : running ? "进入 Web 对话" : "先启动服务";
+    function updateOverviewInstaller(): void {
+      const version = versionPanel.selectedVersion() || versionPanel.latestStableVersion();
+      const versionElement = document.getElementById("overviewInstallVersion");
+      if (versionElement) versionElement.innerText = version ? `v${version}` : "推荐 Stable";
     }
 
     async function refreshDashboard(): Promise<void> {
@@ -352,438 +241,36 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       }
     }
 
-    function setStatusUptime(text: string): void {
-      const el = document.getElementById("statusUptime");
-      if (el) el.innerText = text;
-    }
-
     function errorMessage(error: unknown): string {
       return error instanceof Error ? error.message : String(error);
     }
 
-    function operationSucceeded<T extends { success?: boolean; message?: string }>(
-      result: { ok: boolean; status: number; data: T },
-    ): T {
-      if (!result.ok || result.data.success !== true) {
-        throw new Error(result.data.message || `操作失败（HTTP ${result.status}）`);
-      }
-      return result.data;
-    }
 
-    // 服务状态监控 (全空值保护，稳健守护)
-    // 轮询请求的序号守卫。fetch 的完成顺序不保证与发起顺序一致:
-    // 后端短暂 502/超时后,旧请求可能晚于新请求返回,此时若直接渲染,
-    // 就会把已经恢复的"运行中"翻回"不可达"(约 5s 后自愈,但用户看到闪跳)。
-    // 只允许最新一次发起的请求写入 UI。
-    let statusReqSeq = 0;
-    let supervisorReachable: boolean | null = null;
-    async function fetchStatus() {
-      if (document.hidden) return;
-      const mySeq = ++statusReqSeq;
-      try {
-        const result = await api.status();
-        if (!result.ok) throw new Error("HTTP " + result.status);
-        const data = result.data;
-        if (mySeq !== statusReqSeq) return; // 已有更新的请求在途,丢弃过期结果
-
-        const badge = document.getElementById("statusBadge");
-        const valVersion = document.getElementById("valVersion");
-        const valAuth = document.getElementById("valAuthStatus");
-
-        const notInstalled = data.installed === false;
-        // 每拍重渲染:服务状态/PID/运行时长/CPU/内存 由 StatusCardView 声明式渲染
-        const cardMount = document.getElementById("statusCardMount");
-        if (cardMount) {
-          renderStatusCard({
-            installed: data.installed,
-            running: Boolean(data.running),
-            pid: String(data.pid ?? "-"),
-            startAt: data.running && data.startAt ? data.startAt : null,
-            cpu: typeof data.cpu === "number" ? data.cpu : null,
-            memKB: typeof data.memKB === "number" ? data.memKB : null,
-          }, cardMount);
-        }
-        setServiceActions(Boolean(data.running), data.installed !== false, false);
-        const checkedAt = document.getElementById("statusCheckedAt");
-        if (checkedAt) checkedAt.innerText = `最近同步 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
-        supervisorReachable = true;
-
-        if (notInstalled) {
-          // 未安装提前返回,必须复位鉴权区颜色:
-          // 否则上一次的绿色"已开启"会粘在"内核未安装"的状态上
-          for (const id of ["valAuthStatus", "valAdminStatus"]) {
-            const el = document.getElementById(id);
-            if (el) el.style.color = "var(--text-muted)";
-          }
-          // 内核未安装（首次安装模式）：提示去版本管理安装
-          if (badge) {
-            badge.className = "badge badge-warning";
-            badge.innerHTML = `<span class="pulse-dot"></span> 内核未安装`;
-          }
-          if (valVersion) valVersion.innerText = "未安装";
-          currentRunningVersion = "";
-        }
-        const installTip = document.getElementById("kernelInstallTip");
-        if (installTip) installTip.hidden = !notInstalled;
-        const uninstallBtn = document.getElementById("btnUninstallKernel");
-        if (uninstallBtn) uninstallBtn.hidden = notInstalled;
-        updateUpgradeButtonText();
-
-        // 后端安装任务进行中(重开控制台/换设备):恢复现场入口。
-        // 弹窗已打开时不重复提示;点击进入附加模式而非再次创建任务
-        const runTip = document.getElementById("installRunningTip");
-        if (runTip) {
-          const modalOpen = document.getElementById("upgradeModal")?.classList.contains("active");
-          runTip.hidden = !(data.install && data.install.running && !modalOpen);
-        }
-
-        if (!notInstalled && data.running) {
-          if (badge) {
-            badge.className = "badge badge-success";
-            badge.innerHTML = `<span class="pulse-dot"></span> 运行中`;
-          }
-        } else if (!notInstalled) {
-          if (badge) {
-            badge.className = "badge badge-danger";
-            badge.innerHTML = `<span class="pulse-dot"></span> 已停止`;
-          }
-        }
-
-        if (valVersion && data.version) { valVersion.innerText = data.version; currentRunningVersion = data.version; updateUpgradeButtonText(); }
-        const valAdmin = document.getElementById("valAdminStatus");
-        const valDesc = document.getElementById("valAuthDesc");
-        const statusType = data.authStatus || (data.authEnabled ? "protected" : "disabled");
-
-        if (statusType === "uninitialized") {
-          if (valAuth) {
-            valAuth.innerText = "已开启（待设置密码）";
-            valAuth.style.color = "var(--warning)";
-          }
-          if (valAdmin) {
-            valAdmin.innerText = "尚未创建管理员";
-            valAdmin.style.color = "var(--warning)";
-          }
-          if (valDesc) {
-            valDesc.innerText = "对话端已要求登录验证，但还没有管理员。请进入对话端完成初始设置；该账号独立于飞牛账号。";
-          }
-        } else if (statusType === "protected") {
-          if (valAuth) {
-            valAuth.innerText = "已开启（需要密码）";
-            valAuth.style.color = "var(--success)";
-          }
-          if (valAdmin) {
-            valAdmin.innerText = "管理员已创建";
-            valAdmin.style.color = "var(--success)";
-          }
-          if (valDesc) {
-            valDesc.innerText = "对话端需要 QwenPaw 独立管理员密码。重置只清除此密码，不影响飞牛账号、用户配置或记忆。";
-          }
-        } else if (statusType === "disabled") {
-          if (valAuth) {
-            valAuth.innerText = "未开启（公开访问）";
-            valAuth.style.color = "var(--danger-text)";
-          }
-          if (valAdmin) {
-            valAdmin.innerText = "未启用账号验证";
-            valAdmin.style.color = "var(--danger-text)";
-          }
-          if (valDesc) {
-            valDesc.innerText = "任何能访问该端口的人无需密码即可使用对话端。如需保护，请在对话端设置 QwenPaw 管理员。";
-          }
-        } else {
-          if (valAuth) {
-            valAuth.innerText = "无法确认";
-            valAuth.style.color = "var(--text-muted)";
-          }
-          if (valAdmin) {
-            valAdmin.innerText = "无法读取";
-            valAdmin.style.color = "var(--text-muted)";
-          }
-          if (valDesc) {
-            valDesc.innerText = "内核未运行或状态接口不可达，暂时无法确认密码状态；这不代表验证已关闭。请启动内核后再确认。";
-          }
-        }
-
-        setStatusUptime((!notInstalled && data.running && data.startAt)
-          ? "已运行 " + formatUptime(Math.floor(Date.now() / 1000) - data.startAt)
-          : "");
-
-        const portEl = document.getElementById("valPort");
-        const activePort = data.port || "18088";
-        if (portEl) portEl.innerText = String(activePort);
-
-      } catch (e) {
-        console.error("fetchStatus err:", e);
-        if (mySeq !== statusReqSeq) return; // 过期的失败响应不覆盖新状态
-        const checkedAt = document.getElementById("statusCheckedAt");
-        if (checkedAt) checkedAt.innerText = "同步失败 · 自动重试中";
-        // 无法连接后端(502/网络错误/会话过期)时必须把徽章切到未知态。
-        // 否则徽章保留 index.html 里的初始红色/上一次的绿色,用户会以为服务在跑。
-        const badge = document.getElementById("statusBadge");
-        if (badge) {
-          badge.className = "badge badge-warning";
-          badge.innerHTML = `<span class="pulse-dot"></span> 状态不可达`;
-        }
-        const cardMount = document.getElementById("statusCardMount");
-        if (cardMount) {
-          renderStatusCard({
-            // 不可达时安装状态"未知",不能写 false。
-            // false 的语义是"确定未安装",会被下游当作事实派生逻辑,
-            // 造成"状态不可达"与"内核未安装"同时出现的矛盾提示。
-            installed: null,
-            running: false,
-            pid: "-",
-            startAt: null,
-            cpu: null,
-            memKB: null,
-            degraded: true, // 如实显示"状态不可达",不得伪装成"内核未安装"
-          }, cardMount);
-        }
-        setStatusUptime("—"); // 保持 meta 位稳定,与卡内"状态不可达"呼应
-        setServiceActions(false, false, true); // 不可达时不给操作入口
-
-        supervisorReachable = false;
-        updateUpgradeButtonText();
-        const unBtn = document.getElementById("btnUninstallKernel");
-        if (unBtn) unBtn.hidden = true;
-        for (const tipId of ["kernelInstallTip", "installRunningTip"]) {
-          const tip = document.getElementById(tipId);
-          if (tip) tip.hidden = true;
-        }
-        // 鉴权区的颜色也是状态派生的,不可达时要复位,否则残留上一次的绿/红
-        for (const id of ["valAuthStatus", "valAdminStatus"]) {
-          const el = document.getElementById(id);
-          if (el) el.style.color = "var(--text-muted)";
-        }
-        const downWarn = document.getElementById("downgradeWarnBar");
-        if (downWarn) downWarn.hidden = true;
-        const valVersion = document.getElementById("valVersion");
-        if (valVersion) valVersion.innerText = "无法获取";
-        const valAuth = document.getElementById("valAuthStatus");
-        if (valAuth) valAuth.innerText = "无法获取";
-        const valDesc = document.getElementById("valAuthDesc");
-        if (valDesc) {
-          valDesc.innerText = "控制台无法连接监督者（可能服务重启中或会话已过期）。这不代表内核已停止，稍后会自动重试。";
-        }
-      }
-    }
-
-    
-    // 修改 Web 服务端口
-    async function changeServicePort() {
-      const currentPort = document.getElementById("valPort")?.innerText || "18088";
-      // 用站内弹窗替代原生 prompt():样式统一、可校验、不阻断渲染。
-      // 校验在弹窗内完成,非法输入不关闭弹窗也不触发后端。
-      const raw = await showModal({
-        title: "修改服务端口",
-        message: "请输入新的 QwenPaw Web 访问端口（范围 1024~65535）。保存后服务将自动重启以应用新端口。",
-        type: "warn",
-        confirmText: "确认修改并重启",
-        input: {
-          label: "新端口",
-          value: currentPort,
-          inputMode: "numeric",
-          placeholder: "1024-65535",
-          validate: (v) => /^[0-9]+$/.test(v) && Number(v) >= 1024 && Number(v) <= 65535,
-        },
-      });
-      if (raw === null || raw === false) return;
-      if (raw === currentPort) return;
-
-      const newPort = parseInt(raw, 10);
-      if (isNaN(newPort) || newPort < 1024 || newPort > 65535) {
-        showToast("端口无效！必须为 1024~65535 之间的纯数字");
-        return;
-      }
-
-      const ok = await showModal({
-        title: "修改服务端口确认",
-        message: `确定要将 QwenPaw Web 端口修改为 ${newPort} 吗？\n\n保存后服务将自动重启以应用新端口。`,
-        type: "warn",
-        confirmText: "确认修改并重启"
-      });
-      if (!ok) return;
-
-      try {
-        showToast(`正在保存新端口 ${newPort}...`);
-        const data = operationSucceeded(await api.changePort(newPort));
-        if (data.success === false) {
-          // 后端事务失败(端口冲突/回滚完成)必须如实呈现,不提示"已更改"
-          showToast("修改端口失败: " + (data.message || "未知错误"));
-          setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
-          return;
-        }
-        showToast(data.message || `端口已变更为 ${newPort}，正在重启...`);
-        setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
-      } catch (e) {
-        showToast("修改端口失败: " + errorMessage(e));
-      }
-    }
-
-    let webProxyPublic: boolean | null = null;
-    let webProxyPort: number | null = null;
-    let webProxyReadSeq = 0;
-
-    function setWebProxyScope(value: boolean | null): void {
-      webProxyPublic = value;
-      const available = value !== null && webProxyPort !== null;
-      const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
-      if (!toggle) return;
-      toggle.indeterminate = !available;
-      toggle.disabled = !available;
-      if (value !== null) toggle.checked = value;
-      toggle.title = available ? "" : "无法确认反代端口或访问范围，请重试";
-    }
-
-    async function fetchWebProxyPort() {
-      const seq = ++webProxyReadSeq;
-      try {
-        const result = await api.webProxyPort();
-        if (seq !== webProxyReadSeq) return;
-        const { data } = result;
-        if (!result.ok || !data) {
-          webProxyPort = null;
-          setWebProxyScope(null);
-          return;
-        }
-        const validPort = Number.isInteger(data.port) && data.port > 0 && data.port <= 65535;
-        webProxyPort = validPort ? data.port : null;
-        const element = document.getElementById("valWebProxyPort");
-        if (element && webProxyPort !== null) element.innerText = String(webProxyPort);
-        setWebProxyScope(typeof data.public === "boolean" ? data.public : null);
-      } catch (e) {
-        if (seq === webProxyReadSeq) {
-          webProxyPort = null;
-          setWebProxyScope(null);
-        }
-        console.error("fetchWebProxyPort err:", e);
-      }
-    }
-
-    async function changeWebProxyPort() {
-      if (webProxyPublic === null || webProxyPort === null) {
-        showToast("无法确认反代端口或访问范围，请重试");
-        void fetchWebProxyPort();
-        return;
-      }
-      const currentPort = String(webProxyPort);
-      const raw = await showModal({
-        title: "修改 Web 反代端口",
-        message: "输入 0 自动选择空闲端口，或输入 1024~65535 的指定端口。新端口绑定成功后才会切换，失败保留原端口。",
-        type: "warn",
-        confirmText: "保存并切换",
-        input: {
-          label: "反代端口",
-          value: currentPort,
-          inputMode: "numeric",
-          placeholder: "0 表示自动分配",
-          validate: (value) => /^[0-9]+$/.test(value) && Number(value) <= 65535,
-        },
-      });
-      if (raw === null || raw === false) return;
-      const newPort = Number(raw);
-      if (!Number.isInteger(newPort) || newPort < 0 || newPort > 65535 || (newPort > 0 && newPort < 1024)) {
-        showToast("端口无效！请输入 0 或 1024~65535");
-        return;
-      }
-      const ok = await showModal({
-        title: "切换 Web 反代端口",
-        message: newPort === 0 ? "确定自动选择空闲端口并切换 Web 反代吗？" : `确定将 Web 反代端口切换为 ${newPort} 吗？`,
-        type: "warn",
-        confirmText: "确认切换",
-      });
-      if (!ok) return;
-      const publicAccess = webProxyPublic;
-      if (publicAccess === null) {
-        showToast("无法确认反代访问范围，请重试");
-        return;
-      }
-      ++webProxyReadSeq;
-      setWebProxyScope(null);
-      try {
-        const data = operationSucceeded(await api.changeWebProxyPort(newPort, publicAccess));
-        if (!Number.isInteger(data.port) || data.port <= 0 || data.port > 65535) {
-          throw new Error("后端未返回有效的反代端口");
-        }
-        webProxyPort = data.port;
-        const element = document.getElementById("valWebProxyPort");
-        if (element) element.innerText = String(data.port);
-        setWebProxyScope(publicAccess);
-        showToast(`Web 反代端口已切换为 ${data.port}`);
-      } catch (e) {
-        showToast("修改反代端口失败: " + errorMessage(e));
-        void fetchWebProxyPort();
-      }
-    }
-
-    async function setWebProxyPublic() {
-      const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
-      if (!toggle) return;
-      const previous = webProxyPublic;
-      const port = webProxyPort;
-      if (previous === null || port === null) {
-        setWebProxyScope(null);
-        void fetchWebProxyPort();
-        return;
-      }
-      const publicAccess = toggle.checked;
-      if (publicAccess) {
-        const ok = await showModal({
-          title: "允许外部访问 Web 反代",
-          message: "开启后，同一网络中的其他设备可通过该端口访问 QwenPaw 主 Web。请确认已设置 QwenPaw 管理员密码。",
-          type: "warn",
-          confirmText: "允许外部访问",
-        });
-        if (!ok) {
-          setWebProxyScope(previous);
-          return;
-        }
-      }
-      if (webProxyPublic !== previous) return;
-      ++webProxyReadSeq;
-      setWebProxyScope(null);
-      try {
-        operationSucceeded(await api.changeWebProxyPort(port, publicAccess));
-        setWebProxyScope(publicAccess);
-        showToast(publicAccess ? "已允许外部访问 Web 反代" : "Web 反代已改为仅本机访问");
-      } catch (e) {
-        showToast("切换访问范围失败: " + errorMessage(e));
-        void fetchWebProxyPort();
-      }
-    }
-
-    // 鉴权管理
-    async function resetAuth() {
-      const ok = await showModal({
-        title: "重置 QwenPaw 管理员密码",
-        message: "这将清除 QwenPaw 对话端的管理员密码并使现有会话失效，下次进入对话端时需要重新设置。\n\n飞牛账号及其密码不受影响，用户配置与记忆也不会删除。确认继续？",
-        type: "warn",
-        confirmText: "确认重置"
-      });
-      if (!ok) return;
-
-      try {
-        showToast("正在请求重置...");
-        const data = operationSucceeded(await api.resetAuth());
-        if (data.success === false) {
-          showToast("重置失败: " + (data.message || "服务重启异常,请查看日志"));
-        } else {
-          showToast(data.message || "密码已重置成功！");
-        }
-        setTimeout(fetchStatus, 1200);
-      } catch (e) {
-        showToast("请求失败: " + errorMessage(e));
-      }
-    }
+    const settingsPanel = createSettingsPanel({
+      api, showModal, showToast, errorMessage,
+      supervisorReachable,
+      fetchStatus, fetchLogs: () => fetchLogs(), fetchVersionList,
+    });
+    const setWebProxyScope = settingsPanel.setScope;
+    const changeServicePort = settingsPanel.changeServicePort;
+    const fetchWebProxyPort = settingsPanel.fetchWebProxyPort;
+    const changeWebProxyPort = settingsPanel.changeWebProxyPort;
+    const setWebProxyPublic = settingsPanel.setWebProxyPublic;
+    const resetAuth = settingsPanel.resetAuth;
+    const loadMirror = settingsPanel.loadMirror;
+    const saveMirror = settingsPanel.saveMirror;
+    const toggleMirrorDropdown = settingsPanel.toggleMirrorDropdown;
+    const pickMirror = settingsPanel.pickMirror;
+    const currentMirror = settingsPanel.currentMirror;
 
     async function uninstallKernel() {
-      if (!currentRunningVersion) {
+      if (!versionPanel.currentRunningVersion()) {
         showToast("当前未安装 QwenPaw 内核");
         return;
       }
       const ok = await showModal({
         title: "仅卸载 QwenPaw 内核",
-        message: `将停止服务并删除 QwenPaw v${currentRunningVersion} 的运行环境与版本钉。\n\n• 用户配置、会话记忆与管理员认证均完整保留，之后可随时重新安装。\n• 注意：受飞牛 fnOS 桌面会话缓存限制，桌面图标隐藏可能需刷新浏览器页面生效。确认继续？`,
+        message: `将停止服务并删除 QwenPaw v${versionPanel.currentRunningVersion()} 的运行环境与版本钉。\n\n• 用户配置、会话记忆与管理员认证均完整保留，之后可随时重新安装。\n• 注意：受飞牛 fnOS 桌面会话缓存限制，桌面图标隐藏可能需刷新浏览器页面生效。确认继续？`,
         type: "danger",
         confirmText: "仅卸载内核，保留数据"
       });
@@ -800,7 +287,6 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       }
     }
 
-    // 启停控制
     async function controlService(act: "start" | "stop" | "restart"): Promise<void> {
       const actionName = act === "restart" ? "重启" : (act === "stop" ? "停止" : "启动");
       const ok = await showModal({
@@ -821,915 +307,94 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
       }
     }
 
-    // 版本管理与在线检查
-    // ── 下载源:自定义下拉(原生 select 在移动端弹系统白框,与主题割裂) ──
-    // 值落盘服务端(VAR_DIR/pip-mirror)全设备共享;控制台每次升级显式携带
-    const MIRRORS = [
-      { value: "https://mirrors.aliyun.com/pypi/simple/", label: "阿里云镜像源（推荐 - 兼容公网/云机）" },
-      { value: "https://pypi.tuna.tsinghua.edu.cn/simple", label: "清华大学镜像源" },
-      { value: "https://pypi.mirrors.ustc.edu.cn/simple/", label: "中科大镜像源" },
-      { value: "https://mirrors.cloud.tencent.com/pypi/simple", label: "腾讯云镜像源" },
-      { value: "", label: "官方 PyPI（国内较慢）" },
-    ];
-    let mirrorValue = "";
-
-    function renderMirrorUI() {
-      const label = document.getElementById("mirrorLabel");
-      if (label) label.innerText = (MIRRORS.find(m => m.value === mirrorValue) || MIRRORS[0]).label;
-      const drop = document.getElementById("mirrorDropdown");
-      if (drop) {
-        renderMirrorOptions(MIRRORS, mirrorValue, pickMirror, drop);
-      }
-    }
-
-    function toggleMirrorDropdown() {
-      const drop = document.getElementById("mirrorDropdown");
-      if (drop) drop.classList.toggle("show");
-    }
-
-    function pickMirror(v: string): void {
-      mirrorValue = v;
-      renderMirrorUI();
-      const drop = document.getElementById("mirrorDropdown");
-      if (drop) drop.classList.remove("show");
-      saveMirror();
-    }
-
-    async function loadMirror() {
-      try {
-        const { data: d } = await api.getMirror();
-        if (d.success) {
-          mirrorValue = d.mirror || "";
-          renderMirrorUI();
-        }
-      } catch (e) { console.warn("loadMirror err:", e); }
-    }
-
-    async function saveMirror() {
-      try {
-        operationSucceeded(await api.setMirror(mirrorValue));
-        showToast("下载源已保存，版本查询与内核安装将共用此源");
-        await fetchVersionList();
-      } catch (e) {
-        showToast("下载源保存失败: " + errorMessage(e));
-      }
-    }
-
-    function currentMirror() {
-      return mirrorValue;
-    }
-
-    // 点击触发器与面板之外自动收起(触发器内部子元素点击也算触发器)
-    document.addEventListener("click", (e: MouseEvent) => {
-      const drop = document.getElementById("mirrorDropdown");
-      const btn = document.getElementById("mirrorToggleBtn");
-      if (drop && drop.classList.contains("show") && e.target instanceof Node
-        && !drop.contains(e.target) && !(btn && btn.contains(e.target))) {
-        drop.classList.remove("show");
-      }
+    const versionPanel = createVersionPanel({
+      api, showToast, supervisorReachable, updateOverviewInstaller,
     });
+    function fetchVersionList(): Promise<boolean> { return versionPanel.fetchVersionList(); }
+    const checkOnlineVersions = versionPanel.checkOnlineVersions;
+    const refreshVersionCards = versionPanel.refreshVersionCards;
+    const pickVersion = versionPanel.pickVersion;
+    const toggleHistoryDropdown = versionPanel.toggleHistoryDropdown;
+    const currentInstallAction = versionPanel.currentInstallAction;
 
-    function showVersionSourceError(detail = "") {
-      const alert = document.getElementById("versionSourceStatus");
-      const message = "当前下载源不可用，无法获取版本列表。请更换下载源，或检查 NAS 网络、DNS 与代理设置后重试。";
-      if (alert) alert.innerText = detail ? `${message}（${detail}）` : message;
-      if (alert) alert.hidden = false;
-      showToast(message);
-      return false;
+    const statusPanel = createStatusPanel({ api, versionPanel, errorMessage, updateOverviewInstaller });
+    function fetchStatus(snapshot?: StatusResponse): Promise<void> { return statusPanel.refresh(snapshot); }
+    function supervisorReachable(): boolean | null { return statusPanel.reachable(); }
+
+    const installProgress = createInstallProgressPanel({
+      api, showToast, errorMessage, fetchStatus, fetchLogs: () => fetchLogs(),
+      currentInstallAction,
+      selectedVersion: versionPanel.selectedVersion,
+      pendingInstallAction: versionPanel.pendingInstallAction,
+    });
+    const installCoordinator = createInstallCoordinator({
+      api, progress: installProgress, versionPanel, currentMirror,
+      supervisorReachable, showModal, showToast, errorMessage,
+    });
+    const checkOrUpgrade = installCoordinator.checkOrUpgrade;
+    const attachRunningInstall = installProgress.attachRunning;
+    const closeUpgradeModal = installProgress.close;
+    const minimizeUpgradeModal = installProgress.minimize;
+    const showTaskDetails = installProgress.showTaskDetails;
+    const updateTaskCenterButton = installProgress.updateTaskCenterButton;
+
+
+    const logPanel = createLogPanel({ api, showToast, confirm: showModal, errorMessage });
+    const fetchLogs = logPanel.refresh;
+    const clearTerminalLogs = logPanel.clear;
+    const toggleAutoRefresh = logPanel.setAutoRefresh;
+
+
+    const mobileNavigation = createMobileNavigation();
+
+    let webEntryHistoryPushed = false;
+
+    function isFnosApp(): boolean {
+      return /FNAppType\//.test(navigator.userAgent || "");
     }
 
-    async function fetchVersionList(): Promise<boolean> {
-      try {
-        const result = await api.versionList();
-        const { data } = result;
-        if (result.ok && data.success && Array.isArray(data.versions)) {
-          rawVersionList = data.versions;
-          latestStableVer = data.latest_stable || "";
-          const firstBeta = rawVersionList.find(v => v.is_beta);
-          if (firstBeta) latestBetaVer = firstBeta.version;
-          if (!userPickedVersion) {
-            selectedVersion = latestStableVer;
-          }
-          const alert = document.getElementById("versionSourceStatus");
-          if (alert) alert.hidden = true;
-          refreshVersionCards();
-          return true;
-        }
-        return showVersionSourceError(data.message || `HTTP ${result.status}`);
-      } catch (e) {
-        console.warn("fetchVersionList err:", e);
-        return showVersionSourceError((e as Error).message);
-      }
+    function closeWebEntryOverlay(): void {
+      const overlay = document.getElementById("webEntryOverlay");
+      const frame = document.getElementById("webEntryFrame") as HTMLIFrameElement | null;
+      if (!overlay || overlay.hidden) return;
+      overlay.hidden = true;
+      document.documentElement.classList.remove("web-entry-open");
+      if (frame) frame.src = "about:blank";
+      webEntryHistoryPushed = false;
     }
 
-    async function checkOnlineVersions() {
-      showToast("正在在线检查 PyPI 最新版本...");
-      // 检查失败必须如实提示,不伪装"检查完成"(历史版本恒报成功)
-      const ok = await fetchVersionList();
-      if (ok) {
-        showToast(`检查完成！最新稳定: v${latestStableVer}，最新测试: v${latestBetaVer}`);
-      }
-    }
-
-    function refreshVersionCards() {
-      const container = document.getElementById("versionCardsContainer");
-      const historyDrop = document.getElementById("historyDropdown");
-      if (!container) return;
-
-
-      renderVersionCards(latestBetaVer, latestStableVer, selectedVersion, pickVersion, container);
-
-      if (historyDrop) {
-        const historyList = rawVersionList.filter(v => v.version !== latestBetaVer && v.version !== latestStableVer);
-        renderHistoryItems(historyList.slice(0, 10), pickVersion, historyDrop);
-      }
-
-      updateUpgradeButtonText();
-    }
-
-    function pickVersion(ver: string): void {
-      userPickedVersion = true;
-      selectedVersion = ver;
-      refreshVersionCards();
-      const drop = document.getElementById("historyDropdown");
-      if (drop) drop.classList.remove("show");
-      document.querySelector(".history-versions-toggle")?.setAttribute("aria-expanded", "false");
-    }
-
-    function toggleHistoryDropdown() {
-      const drop = document.getElementById("historyDropdown");
-      if (!drop) return;
-      const expanded = drop.classList.toggle("show");
-      document.querySelector(".history-versions-toggle")?.setAttribute("aria-expanded", String(expanded));
-    }
-
-    let currentRunningVersion = "";
-    // 操作发起时的动作快照("安装"/"重新安装"/"升级"/"降级")。
-    // 终态标题必须用它,不能在终态重算 —— 安装成功后当前版本已变成所选版本,
-    // 重算会把"安装"误判成"重新安装"。
-    let pendingInstallAction = "";
-
-    // 降级判定:优先读取后端权威 action (upgrade/downgrade/reinstall/install);
-    // 列表外版本退回索引与比较
-    function isDowngradeOf(current: string, selected: string): boolean {
-      const item = rawVersionList.find(v => v.version === selected);
-      if (item && item.action) {
-        return item.action === "downgrade";
-      }
-      const ci = rawVersionList.findIndex(v => v.version === current);
-      const si = rawVersionList.findIndex(v => v.version === selected);
-      if (ci >= 0 && si >= 0) return si > ci;
-      return compareVersion(current, selected) > 0;
-    }
-
-    function isSameVersion(current: string, selected: string): boolean {
-      if (!current || !selected) return false;
-      const item = rawVersionList.find(v => v.version === selected);
-      if (item && item.action === "reinstall") return true;
-      return current.replace(/^v/i, "").trim() === selected.replace(/^v/i, "").trim();
-    }
-
-    function currentInstallAction(): string {
-      if (!currentRunningVersion) return "安装";
-      const item = rawVersionList.find(v => v.version === selectedVersion);
-      if (item && item.action) {
-        if (item.action === "reinstall") return "重新安装";
-        if (item.action === "downgrade") return "降级";
-        if (item.action === "upgrade") return "升级";
-        if (item.action === "install") return "安装";
-      }
-      if (isSameVersion(currentRunningVersion, selectedVersion)) return "重新安装";
-      return isDowngradeOf(currentRunningVersion, selectedVersion) ? "降级" : "升级";
-    }
-
-    function updateUpgradeButtonText() {
-      const btn = document.getElementById("btnUpgradeAction") as HTMLButtonElement | null;
-      const warnBar = document.getElementById("downgradeWarnBar");
-      if (!btn) return;
-
-      btn.disabled = !selectedVersion || supervisorReachable !== true;
-      btn.title = supervisorReachable === false ? "控制台无法连接监督者，暂不可操作" : "";
-      if (!selectedVersion) {
-        btn.innerText = "正在加载可用版本...";
+    function openWebPage(url: string): void {
+      if (!isFnosApp()) {
+        window.open(url, "_blank", "noopener");
         return;
       }
-      const activeSelected = selectedVersion;
-      // 内核未安装：按钮语义是「安装」而非「更新/降级」
-      if (!currentRunningVersion) {
-        btn.innerText = `安装内核 v${activeSelected}`;
-        btn.className = "btn btn-primary btn-sm";
-        if (warnBar) warnBar.hidden = true;
-        return;
-      }
-
-      if (isSameVersion(currentRunningVersion, selectedVersion)) {
-        btn.innerText = `重新安装 v${selectedVersion}`;
-        btn.className = "btn btn-primary btn-sm";
-        if (warnBar) warnBar.hidden = true;
-        return;
-      }
-
-      const isDowngrade = isDowngradeOf(currentRunningVersion, selectedVersion);
-      if (isDowngrade) {
-        btn.innerText = `降级至 v${selectedVersion}`;
-        btn.className = "btn btn-danger btn-sm";
-        if (warnBar) warnBar.hidden = false;
-      } else {
-        btn.innerText = `执行更新至 v${selectedVersion}`;
-        btn.className = "btn btn-primary btn-sm";
-        if (warnBar) warnBar.hidden = true;
+      const overlay = document.getElementById("webEntryOverlay");
+      const frame = document.getElementById("webEntryFrame") as HTMLIFrameElement | null;
+      if (!overlay || !frame) return;
+      frame.src = url;
+      overlay.hidden = false;
+      document.documentElement.classList.add("web-entry-open");
+      if (!webEntryHistoryPushed) {
+        const state = history.state && typeof history.state === "object" ? history.state : {};
+        history.pushState({ ...state, qwenpawWebEntry: true }, "", location.href);
+        webEntryHistoryPushed = true;
       }
     }
 
-    // 升级执行与专属流式终端
-    async function checkOrUpgrade() {
-      if (!selectedVersion) {
-        showToast("可用版本尚未加载，请检查下载源后重试");
-        return;
-      }
-      if (supervisorReachable !== true) {
-        showToast("控制台无法确认监督者状态，暂不可安装");
-        return;
-      }
-      const requestedVersion = selectedVersion;
-      const requestedMirror = currentMirror();
-      let ok = false;
-
-      if (!currentRunningVersion) {
-        // 初装分支: 内核尚未安装,明确使用"安装"语义,绝不误提示为升级/降级
-        pendingInstallAction = "安装";
-        ok = await showModal({
-          title: "安装内核确认",
-          message: `即将为您下载并部署 QwenPaw v${selectedVersion} 核心运行环境，首次安装约需 1~3 分钟。确认开始？`,
-          type: "primary",
-          confirmText: "开始安装",
-          cancelText: "取消"
-        });
-      } else if (isSameVersion(currentRunningVersion, selectedVersion)) {
-        pendingInstallAction = "重新安装";
-        ok = await showModal({
-          title: "重新安装当前版本",
-          message: `将通过独立暂存环境重新安装 QwenPaw v${selectedVersion}，期间服务会短暂重启。用户配置与记忆保持不变，失败时自动恢复当前环境。确认继续？`,
-          type: "warn",
-          confirmText: "重新安装",
-          cancelText: "取消"
-        });
-      } else if (isDowngradeOf(currentRunningVersion, selectedVersion)) {
-        pendingInstallAction = "降级";
-        ok = await showModal({
-          title: "降级风险警告",
-          message: `你正准备将 QwenPaw 降级至旧版本 v${selectedVersion}（当前运行为 v${currentRunningVersion}）。\n\n【已知风险】跨版本反向降级可能导致新版配置文件、会话记忆结构不兼容或依赖库冲突，甚至引起服务启动异常！\n\n如无明确排障需求，建议保持现状或升级。是否确认强行降级？`,
-          type: "danger",
-          confirmText: "已知风险，强行降级",
-          cancelText: "取消并返回"
-        });
-      } else {
-        pendingInstallAction = "升级";
-        ok = await showModal({
-          title: "在线升级确认",
-          message: `即将安装 QwenPaw v${selectedVersion} 并重新构建环境，期间服务将短暂重启。确认继续？`,
-          type: "warn",
-          confirmText: "开始升级",
-          cancelText: "取消"
-        });
-      }
-      if (!ok) {
-        pendingInstallAction = "";
-        return;
-      }
-
-      if (supervisorReachable !== true) {
-        pendingInstallAction = "";
-        showToast("控制台无法确认监督者状态，暂不可安装");
-        return;
-      }
-      // 触发前确认是否已有任务在跑:已有任务直接附加查看,禁止重复创建。
-      // 基线 seq 不参与归属 —— 未拿到受理身份(seq + instance)时宁可
-      // "无法确认",也不认领后端残留终态或其他设备的任务。
-      try {
-        const status = await api.upgradeStatus();
-        if (status.ok) {
-          const s = status.data;
-          if (s.upgrading) {
-            showToast("已有安装任务正在进行中,已切换到进度查看");
-            attachRunningInstall();
-            return;
-          }
-        }
-      } catch (e) { /* 基线不可用不阻断触发:受理响应会给出归属身份 */ }
-      if (supervisorReachable !== true) {
-        pendingInstallAction = "";
-        showToast("控制台无法确认监督者状态，暂不可安装");
-        return;
-      }
-
-      pollFailureStreak = 0;
-      openUpgradeModal(false);
-      const requestRunId = upgradeRunId;
-
-      // fetch(keepalive) 直接受理；网络错误只重连后端任务，不另行重放写请求。
-      // 迟到的受理、拒绝和网络错误都不能改写后来选择的任务。
-      try {
-        const result = await api.upgrade(requestedVersion, requestedMirror);
-        if (requestRunId !== upgradeRunId) return;
-        const d = result.data;
-        if (d.success === false) {
-          if (d.running) {
-            // 触发瞬间别人已建任务:自动转入附加模式,不重复创建
-            showToast(d.message || "已有安装任务进行中,已切换到进度查看");
-            openUpgradeModal(true, d.seq, d.instance);
-            return;
-          }
-          showToast("安装未开始: " + (d.message || "后端拒绝"));
-          closeUpgradeModal();
-          return;
-        }
-        if (!result.ok || d.success !== true) {
-          throw new Error(d.message || `安装受理失败（HTTP ${result.status}）`);
-        }
-        if (typeof d.seq === "number") {
-          installTask = acceptInstallTask(installTask, d.seq, d.instance);
-          persistInstallTask(installTaskStorage(), installTask);
-          updateTaskCenterButton();
-        }
-      } catch (e) {
-        if (requestRunId !== upgradeRunId) return;
-        if (!(e instanceof ApiClientError) || e.kind !== "network") {
-          showToast("安装请求失败: " + errorMessage(e));
-          closeUpgradeModal();
-          return;
-        }
-        openUpgradeModal(true);
-      }
-    }
-
-    // 重开控制台/换设备进入时恢复现场:后端任务独立运行,直接附加查看
-    async function attachRunningInstall() {
-      try {
-        const result = await api.upgradeStatus();
-        if (!result.ok) { showToast("无法读取安装状态: HTTP " + result.status); return; }
-        const s = result.data;
-        if (!s.upgrading) {
-          showToast("当前没有进行中的安装任务");
-          fetchStatus();
-          return;
-        }
-        pollFailureStreak = 0; // 上次会话遗留的失败连击不得连坐到附加会话
-        openUpgradeModal(true, s.seq, s.instance);
-      } catch (e) {
-        showToast("无法连接后端: " + errorMessage(e));
-      }
-    }
-
-    function stopUpgradePolling(): void {
-      if (upgradePollTimer !== null) {
-        clearInterval(upgradePollTimer);
-        upgradePollTimer = null;
-      }
-    }
-
-    function updateUpgradeElement(id: string, update: (element: HTMLElement) => void): void {
-      const element = document.getElementById(id);
-      if (element) update(element);
-    }
-
-    function showUpgradePollingFailure(timedOut: boolean): void {
-      updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-      updateUpgradeElement("upTitle", element => {
-        element.innerText = timedOut ? "任务仍未结束" : "与控制台连接中断";
-      });
-      updateUpgradeElement("upSubTitle", element => {
-        element.innerText = timedOut
-          ? "安装任务仍在后台执行，可关闭本窗口；稍后在控制台查看进度或日志"
-          : "无法连接监督者。任务可能仍在后台执行，可关闭本窗口稍后重试";
-      });
-      updateUpgradeElement("upDoneIcon", element => {
-        element.style.display = "inline-block";
-        element.style.color = "var(--danger-text)";
-      });
-      updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
-    }
-
-    // 安装步骤条只反映已归属任务的 phase;终态冻结在最后观察到的步骤上
-    const INSTALL_STEP_NAMES: InstallStep[] = ["downloading", "installing", "starting"];
-    let installSteps: InstallStepsState = { current: null, outcome: null };
-
-    function installStepOf(phase: unknown): InstallStep | null {
-      return INSTALL_STEP_NAMES.find(step => step === phase) ?? null;
-    }
-
-    function setInstallSteps(next: InstallStepsState): void {
-      installSteps = next;
-      updateUpgradeElement("upSteps", element => renderInstallSteps(installSteps, element));
-    }
-
-    let upgradeRunId = 0;
-    let upgradeTerminal = false;
-    let upgradePreviousFocus: HTMLElement | null = null;
-    let upgradeModalOpenedAt = 0;
-
-    function hasOwnedInstallTask(): boolean {
-      return installTask.taskSeq !== null && installTask.taskInstance !== null && installTask.claimedBy !== null;
-    }
-
-    function updateTaskCenterButton(): void {
-      const button = document.getElementById("taskCenterButton") as HTMLButtonElement | null;
-      if (!button) return;
-      const available = hasOwnedInstallTask();
-      button.hidden = !available;
-      button.style.display = available ? "" : "none";
-      button.setAttribute("aria-label", "查看安装任务详情");
-      button.setAttribute("aria-controls", "upgradeModal");
-      button.setAttribute("aria-haspopup", "dialog");
-      button.setAttribute("aria-expanded", String(Boolean(document.getElementById("upgradeModal")?.classList.contains("active"))));
-    }
-
-    function dismissUpgradeDialog(): void {
-      const minimize = document.getElementById("btnUpMinimize");
-      if (minimize && minimize.style.display !== "none") minimizeUpgradeModal();
-      else closeUpgradeModal();
-    }
-
-    function upgradeDialogKeydown(event: KeyboardEvent): void {
-      const modal = document.getElementById("upgradeModal");
-      const box = modal?.querySelector<HTMLElement>(".modal-box");
-      if (!modal?.classList.contains("active") || !box) return;
-      if (event.key === "Escape") {
+    for (const entry of document.querySelectorAll<HTMLAnchorElement>("[data-web-console]")) {
+      entry.addEventListener("click", event => {
+        if (entry.getAttribute("href") !== "/app/qwenpaw/web/") return;
         event.preventDefault();
-        dismissUpgradeDialog();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusables = Array.from(box.querySelectorAll<HTMLElement>('button, input, [href], select, textarea, [tabindex]:not([tabindex="-1"])'))
-        .filter(el => !("disabled" in el && el.disabled) && el.offsetParent !== null);
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      if (!first || !last) {
-        event.preventDefault();
-        box.focus();
-      } else if (!box.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    function upgradeDialogBackdrop(event: MouseEvent): void {
-      if (event.target === event.currentTarget && Date.now() - upgradeModalOpenedAt > 250) dismissUpgradeDialog();
-    }
-
-    function showUpgradeDialog(): void {
-      const modal = document.getElementById("upgradeModal");
-      const box = modal?.querySelector<HTMLElement>(".modal-box");
-      if (!modal || !box || modal.classList.contains("active")) return;
-      upgradePreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      upgradeModalOpenedAt = Date.now();
-      box.setAttribute("tabindex", "-1");
-      box.setAttribute("aria-describedby", "upSubTitle");
-      modal.classList.add("active");
-      updateTaskCenterButton();
-      modal.addEventListener("click", upgradeDialogBackdrop);
-      document.addEventListener("keydown", upgradeDialogKeydown, true);
-      const focusDialog = () => {
-        if (!modal.classList.contains("active") || box.contains(document.activeElement)) return;
-        const minimize = document.getElementById("btnUpMinimize");
-        const close = document.getElementById("btnUpClose");
-        (minimize && minimize.style.display !== "none" ? minimize : close || box).focus();
-      };
-      focusDialog();
-      requestAnimationFrame(focusDialog);
-      modal.addEventListener("transitionend", focusDialog, { once: true });
-      setTimeout(focusDialog, 300);
-    }
-
-    function hideUpgradeDialog(): void {
-      const modal = document.getElementById("upgradeModal");
-      if (!modal?.classList.contains("active")) return;
-      modal.classList.remove("active");
-      updateTaskCenterButton();
-      modal.removeEventListener("click", upgradeDialogBackdrop);
-      document.removeEventListener("keydown", upgradeDialogKeydown, true);
-      upgradePreviousFocus?.focus();
-      upgradePreviousFocus = null;
-    }
-
-    function showTaskDetails(): void {
-      if (!hasOwnedInstallTask()) return;
-      const modal = document.getElementById("upgradeModal");
-      if (!modal || modal.classList.contains("active")) return;
-      if (!upgradeTerminal && upgradePollTimer === null) {
-        pollFailureStreak = 0;
-        upgradeStartedAt = Date.now();
-        updateUpgradeElement("upTitle", element => { element.innerText = "正在查看已归属的安装任务..."; });
-        updateUpgradeElement("upSubTitle", element => { element.innerText = "正在重新读取任务状态"; });
-        updateUpgradeElement("upSpinner", element => { element.style.display = "inline-block"; });
-        updateUpgradeElement("upDoneIcon", element => { element.style.display = "none"; });
-        updateUpgradeElement("btnUpMinimize", element => { element.style.display = ""; });
-        updateUpgradeElement("btnUpClose", element => { element.style.display = "none"; });
-        void pollUpgradeLogs(true);
-        upgradePollTimer = setInterval(pollUpgradeLogs, 800);
-      } else if (upgradeTerminal) {
-        void pollUpgradeLogs(true);
-      }
-      showUpgradeDialog();
-    }
-
-    function openUpgradeModal(
-      attach: boolean,
-      attachSeq: number | null = null,
-      attachInstance: string | null = null,
-    ): void {
-      const modal = document.getElementById("upgradeModal");
-      const title = document.getElementById("upTitle");
-      const subtitle = document.getElementById("upSubTitle");
-      const spinner = document.getElementById("upSpinner");
-      const doneIcon = document.getElementById("upDoneIcon");
-      const closeButton = document.getElementById("btnUpClose");
-      const terminal = document.getElementById("upTerminal");
-      if (!modal || !title || !subtitle || !spinner || !doneIcon || !closeButton || !terminal) return;
-      ++upgradeRunId;
-      upgradeTerminal = false;
-      installTask = createInstallTask({ attach, attachSeq, attachInstance });
-      if (hasOwnedInstallTask()) persistInstallTask(installTaskStorage(), installTask);
-      else clearStoredInstallTask(installTaskStorage());
-      updateTaskCenterButton();
-      upgradeStartedAt = Date.now();
-      title.innerText = installTask.attach
-        ? "正在查看进行中的安装任务..."
-        : `QwenPaw 正在${currentInstallAction()} v${selectedVersion}...`;
-      subtitle.innerText = installTask.attach
-        ? "NAS 后端独立执行中,与本页面是否在线无关"
-        : "正在执行 pip 下载与环境重构，期间服务将自动重启";
-      spinner.style.display = "inline-block";
-      doneIcon.style.display = "none";
-      closeButton.style.display = "none";
-      updateUpgradeElement("btnUpMinimize", element => { element.style.display = ""; });
-      upgradeLogsRendered = false;
-      setInstallSteps({ current: null, outcome: null });
-      terminal.innerHTML = "正在获取实时安装状态...\n";
-      showUpgradeDialog();
-      stopUpgradePolling();
-      void pollUpgradeLogs();
-      upgradePollTimer = setInterval(pollUpgradeLogs, 800);
-    }
-
-    function closeUpgradeModal() {
-      hideUpgradeDialog();
-      stopUpgradePolling();
-      if (!hasOwnedInstallTask()) {
-        ++upgradeRunId;
-        clearStoredInstallTask(installTaskStorage());
-        installTask = createInstallTask({ attach: false });
-      }
-      updateTaskCenterButton();
-      fetchStatus();
-      fetchLogs();
-    }
-
-    // 最小化只隐藏窗口，保留任务与轮询。
-    function minimizeUpgradeModal() {
-      hideUpgradeDialog();
-      showToast("已转入后台运行，可在控制台查看进度");
-      fetchStatus();
-    }
-
-    let upgradeLogsRendered = false;
-
-    async function pollUpgradeLogs(immediate = false) {
-      const now = Date.now();
-      if (!immediate && now - upPollLastAt < 1200) return;
-      if (document.hidden) return;
-      upPollLastAt = now;
-      const runId = upgradeRunId;
-      const taskSeq = installTask.taskSeq;
-      const taskInstance = installTask.taskInstance;
-
-      if (!upLogsPollInFlight && taskSeq !== null && taskInstance !== null) {
-        upLogsPollInFlight = true;
-        void api.upgradeLogs(taskSeq, taskInstance).then(logsRes => {
-          if (runId !== upgradeRunId || installTask.taskSeq !== taskSeq || installTask.taskInstance !== taskInstance || !logsRes.ok) return;
-          const ldata = logsRes.data;
-          if (!ldata.success || !Array.isArray(ldata.logs)) return;
-          const terminal = document.getElementById("upTerminal");
-          if (!terminal) return;
-          renderLogLines(ldata.logs, terminal, "正在等待 pip 安装输出...", true);
-          terminal.scrollTop = terminal.scrollHeight;
-          upgradeLogsRendered = true;
-        }).catch(error => {
-          console.warn("pollUpgradeLogs err:", error);
-        }).finally(() => {
-          upLogsPollInFlight = false;
-        });
-      }
-
-      if (upStatusPollInFlight) return;
-      upStatusPollInFlight = true;
-      try {
-        const statusRes = await api.upgradeStatus();
-        if (runId !== upgradeRunId) return;
-        if (!statusRes.ok) {
-          recordUpgradeStatusFailure();
-          return;
-        }
-
-        const sdata = statusRes.data;
-        pollFailureStreak = 0;
-        // 归属只看明确受理/附加的 seq + instance,且每拍都严格匹配:
-        // 残留 done、其他进程的 seq、phase 跳变都不收口(installTask.mjs)
-        const previousTask = installTask;
-        const observed = observeInstallStatus(installTask, sdata);
-        installTask = observed.state;
-        if (installTask.taskSeq !== previousTask.taskSeq || installTask.taskInstance !== previousTask.taskInstance) {
-          persistInstallTask(installTaskStorage(), installTask);
-        }
-        if (observed.terminal) {
-          upgradeTerminal = true;
-          void pollUpgradeLogs(true);
-          stopUpgradePolling();
-          updateTaskCenterButton();
-          clearStoredInstallTask(installTaskStorage());
-        } else if (observed.owned && installTask.taskSeq !== null && installTask.taskInstance !== null) {
-          updateTaskCenterButton();
-        }
-
-        const observedStep = observed.owned && !observed.terminal ? installStepOf(sdata.phase) : null;
-        if (observedStep && observedStep !== installSteps.current) {
-          setInstallSteps({ current: observedStep, outcome: null });
-        }
-
-        if (observed.owned && sdata.upgrading && !upgradeLogsRendered) {
-          const phase = typeof sdata.phase === "string" ? sdata.phase : "";
-          const progress = phase === "downloading" ? "正在下载依赖包..."
-            : phase === "installing" ? "正在安装内核..."
-              : phase === "starting" ? "正在启动并检查服务..."
-                : "安装任务正在执行...";
-          updateUpgradeElement("upTerminal", element => { element.innerText = progress; });
-        }
-
-        if (observed.owned && !observed.terminal && Date.now() - upgradeStartedAt > UPGRADE_POLL_MAX_MS) {
-          stopUpgradePolling();
-          showUpgradePollingFailure(true);
-          return;
-        }
-
-        // 未归属且后端已无任务:10s 后给出出口,不显示成功.
-        if (!observed.owned && !sdata.upgrading && Date.now() - upgradeStartedAt > 10000) {
-          stopUpgradePolling();
-          const noReceipt = !installTask.attach && installTask.taskSeq === null;
-          updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-          updateUpgradeElement("upTitle", element => { element.innerText = "无法确认安装任务结果"; });
-          updateUpgradeElement("upSubTitle", element => {
-            element.innerText = noReceipt
-              ? "触发请求可能已送达并完成；请关闭本窗口后在控制台查看当前版本与安装日志确认"
-              : "后端任务与本次操作不匹配，请关闭本窗口后在控制台查看安装日志";
-          });
-          updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
-          const minimizeWasFocused = document.activeElement === document.getElementById("btnUpMinimize");
-          updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
-          if (minimizeWasFocused) document.getElementById("btnUpClose")?.focus();
-          return;
-        }
-
-        if (observed.terminal) {
-          stopUpgradePolling();
-          setInstallSteps({ current: installSteps.current, outcome: observed.outcome });
-
-          updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-          updateUpgradeElement("upDoneIcon", element => { element.style.display = "inline-block"; });
-          updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
-          const minimizeWasFocused = document.activeElement === document.getElementById("btnUpMinimize");
-          updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
-          if (minimizeWasFocused) document.getElementById("btnUpClose")?.focus();
-
-          // 终态必须用"操作发起时"的动作,不能重算:
-          // 安装成功后当前版本已变成所选版本,currentInstallAction() 会返回"重新安装",
-          // 导致空环境首次安装也显示"重新安装已顺利完成"。
-          const doneAction = pendingInstallAction || currentInstallAction();
-          // 附加模式:任务可能是别的会话/设备发起的,动作名不得重算或沿用
-          const titleAction = installTask.attach ? "安装任务" : doneAction;
-          if (observed.outcome === "failed") {
-            updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}遇到问题`; });
-            // 恢复结果不猜测:后端有 error/recovery 字段就展示,否则提示自查日志
-            const detail = (typeof sdata.error === "string" && sdata.error.trim())
-              || (typeof sdata.message === "string" && sdata.message.trim())
-              || "";
-            const recoveryError = typeof sdata.recovery_error === "string" ? sdata.recovery_error.trim() : "";
-            const recoveryNote = sdata.recovery_required === true || recoveryError
-              ? (recoveryError
-                ? "环境恢复未完成：" + recoveryError
-                : "环境恢复未完成，请查看日志并按提示处理")
-              : "请查看日志确认环境恢复状态";
-            updateUpgradeElement("upSubTitle", element => {
-              element.innerText = detail ? `${detail}；${recoveryNote}` : recoveryNote;
-            });
-            updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--danger-text)"; });
-          } else {
-            updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}已顺利完成！`; });
-            updateUpgradeElement("upSubTitle", element => {
-              element.innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
-            });
-            updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--success)"; });
-          }
-          // 最小化期间错过终态:弹窗不可见时用 toast 补一条完成信号
-          const upModal = document.getElementById("upgradeModal");
-          if (upModal && !upModal.classList.contains("active")) {
-            showToast(observed.outcome === "failed" ? `${titleAction}失败,点击控制台查看详情` : `${titleAction}已完成`);
-          }
-        }
-      } catch (error) {
-        if (runId !== upgradeRunId) return;
-        console.error("pollUpgradeStatus err:", error);
-        recordUpgradeStatusFailure();
-      } finally {
-        upStatusPollInFlight = false;
-      }
-    }
-
-    function recordUpgradeStatusFailure(): void {
-      pollFailureStreak += 1;
-      const elapsed = Date.now() - upgradeStartedAt;
-      const timedOut = elapsed > UPGRADE_POLL_MAX_MS;
-      if (timedOut || pollFailureStreak >= UPGRADE_POLL_FAIL_MAX) {
-        stopUpgradePolling();
-        showUpgradePollingFailure(timedOut);
-      }
-    }
-
-    // ── 运行日志分页 ──
-    // 页号按阅读方向:第 1 页最旧,末页 = 最新 = 实时;翻离末页即进入回看模式,
-    // 实时轮询暂停,翻回末页自动恢复。回看窗口上限 2000 行(监督者 /logs tail
-    // 上限),到界提示;更早内容请直接查看服务器日志文件。
-    const LOG_PAGE_SIZE = 100;
-    const LOG_WINDOW_MAX = 2000;
-    let logLines: LogEntry[] = [];
-    let logFetchSeq = 0; // 日志拉取序号:乱序响应丢弃
-    let logClearGeneration = 0;
-    let logPageFromEnd = 0; // 距末页的页数(0 = 实时)
-
-    function renderLogPage() {
-      const terminal = document.getElementById("logTerminal");
-      if (!terminal) return;
-      const totalPages = Math.max(1, Math.ceil(logLines.length / LOG_PAGE_SIZE));
-      // 实时刷新与历史分页并发时 logLines 可能变短:先夹紧页偏移,
-      // 否则 end 为负、出现"第 0 页"(云端界面反馈)
-      if (logPageFromEnd > totalPages - 1) logPageFromEnd = totalPages - 1;
-      if (logPageFromEnd < 0) logPageFromEnd = 0;
-      const end = logLines.length - logPageFromEnd * LOG_PAGE_SIZE;
-      const start = Math.max(0, end - LOG_PAGE_SIZE);
-      const pageLines = logLines.slice(start, end);
-      renderLogLines(pageLines, terminal, "（当前无日志输出）");
-
-      const displayPage = totalPages - logPageFromEnd;
-      const indicator = document.getElementById("logPageIndicator");
-      if (indicator) indicator.innerText = logLines.length ? `第 ${displayPage} / ${totalPages} 页` : "暂无日志";
-      const prev = document.getElementById("logPrevBtn") as HTMLButtonElement | null;
-      const next = document.getElementById("logNextBtn") as HTMLButtonElement | null;
-      if (prev) prev.disabled = displayPage <= 1 && (
-        logLines.length < (logPageFromEnd + 1) * LOG_PAGE_SIZE || logLines.length >= LOG_WINDOW_MAX
-      );
-      if (next) next.disabled = logPageFromEnd <= 0;
-      const hint = document.getElementById("logWindowHint");
-      if (hint) hint.hidden = !(logLines.length >= LOG_WINDOW_MAX && displayPage <= 1);
-
-      if (logPageFromEnd === 0) {
-        const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
-        if (autoScroll && autoScroll.checked) terminal.scrollTop = terminal.scrollHeight;
-      } else {
-        terminal.scrollTop = 0;
-      }
-    }
-
-    let liveLogFetchSeq = 0;
-    async function fetchLogs() {
-      if (document.hidden) return;    // 后台标签页暂停轮询
-      if (logPageFromEnd > 0) return; // 回看模式:暂停实时刷新
-      const generation = logClearGeneration;
-      const pageSeq = logFetchSeq;
-      const mySeq = ++liveLogFetchSeq;
-      try {
-        const result = await api.logs(LOG_PAGE_SIZE);
-        if (!result.ok || generation !== logClearGeneration || pageSeq !== logFetchSeq || mySeq !== liveLogFetchSeq) return;
-        const data = result.data;
-        // 回看守卫必须在到达后复查:发起时不在回看,不代表返回时不在 ——
-        // 在途的实时响应会覆盖用户刚点开的历史页并跳回末页(审查 P1-1)
-        if (logPageFromEnd > 0) return;
-        if (data.success && Array.isArray(data.logs)) {
-          logLines = data.logs;
-          renderLogPage();
-        }
-      } catch (e) {
-        console.error("fetchLogs err:", e);
-      }
-    }
-
-    async function loadLogPage(fromEnd: number): Promise<void> {
-      const mySeq = ++logFetchSeq; // 乱序守卫:小响应后到不得覆盖新结果
-      const target = Math.min(Math.max(0, fromEnd), Math.ceil(LOG_WINDOW_MAX / LOG_PAGE_SIZE) - 1);
-      const needed = (target + 1) * LOG_PAGE_SIZE;
-      if (needed > logLines.length) {
-        try {
-          const result = await api.logs(Math.min(needed, LOG_WINDOW_MAX));
-          if (!result.ok) return;
-          const data = result.data;
-          if (data.success && Array.isArray(data.logs) && mySeq === logFetchSeq) logLines = data.logs;
-        } catch (e) {
-          console.error("loadLogPage err:", e);
-          return;
-        }
-      }
-      if (mySeq !== logFetchSeq) return;
-      logPageFromEnd = target;
-      renderLogPage();
-    }
-
-    function logGoPrev() { loadLogPage(logPageFromEnd + 1); }
-    function logGoNext() { loadLogPage(logPageFromEnd - 1); }
-    function logGoLatest() { loadLogPage(0); }
-
-    async function clearTerminalLogs() {
-      const ok = await showModal({
-        title: "删除服务日志",
-        message: "这将删除后端保存的服务日志，而不仅仅清空当前显示。删除后无法恢复，确认继续？",
-        type: "danger",
-        confirmText: "确认删除日志",
+        openWebPage("/app/qwenpaw/web/");
       });
-      if (!ok) return;
-      try {
-        operationSucceeded(await api.clearLogs());
-        ++logClearGeneration;
-        ++logFetchSeq;
-        logLines = [];
-        logPageFromEnd = 0;
-        renderLogPage();
-        showToast("已请求清理服务日志");
-      } catch (e) {
-        showToast("删除日志失败: " + errorMessage(e));
-      }
     }
-
-    function toggleAutoRefresh(enable: boolean): void {
-      if (enable) {
-        if (!refreshTimer) refreshTimer = setInterval(fetchLogs, 3500);
-      } else {
-        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-      }
-    }
-
-
-    function initMobileNavigation(): void {
-      const sections = ["overview", "version", "configuration", "logs"];
-      const nav = document.getElementById("mobileSectionNav");
-      const buttons = Array.from(nav?.querySelectorAll<HTMLButtonElement>("button[data-section]") || []);
-      if (buttons.length !== sections.length || sections.some(section =>
-        !buttons.some(button => button.dataset.section === section && button.getAttribute("aria-controls") === section)
-        || document.getElementById(section)?.dataset.mobilePanel !== section
-      )) return;
-
-      function setMobileSection(section: string, updateHistory = false): void {
-        const valid = sections.includes(section);
-        const selected = valid ? section : "overview";
-        const hash = `#${selected}`;
-        if (updateHistory && window.location.hash !== hash) {
-          history.pushState(history.state, "", hash);
-        } else if (!updateHistory && !valid) {
-          history.replaceState(history.state, "", hash);
-        }
-        for (const button of buttons) {
-          if (button.dataset.section === selected) button.setAttribute("aria-current", "page");
-          else button.removeAttribute("aria-current");
-        }
-        for (const link of document.querySelectorAll<HTMLAnchorElement>(".section-nav a[href^='#']")) {
-          if (link.getAttribute("href") === hash) link.setAttribute("aria-current", "page");
-          else link.removeAttribute("aria-current");
-        }
-        document.documentElement.setAttribute("data-mobile-section", selected);
-      }
-
-      const handlers = buttons.map(button => ({
-        button,
-        click: () => {
-          const section = button.dataset.section || "overview";
-          setMobileSection(section, true);
-          document.getElementById(section)?.scrollIntoView({ block: "start" });
-        },
-      }));
-      const syncSection = () => setMobileSection(window.location.hash.slice(1));
-      try {
-        syncSection();
-        for (const { button, click } of handlers) button.addEventListener("click", click);
-        window.addEventListener("hashchange", syncSection);
-        window.addEventListener("popstate", syncSection);
-      } catch (error) {
-        for (const { button, click } of handlers) button.removeEventListener("click", click);
-        window.removeEventListener("hashchange", syncSection);
-        window.removeEventListener("popstate", syncSection);
-        document.documentElement.removeAttribute("data-mobile-section");
-        // 导航降级为完整页面后，仍须继续注册管理按钮。
-        console.error("initMobileNavigation err:", error);
-      }
-    }
+    document.getElementById("openBackupBtn")?.addEventListener("click", () => {
+      openWebPage("/app/qwenpaw/web/backups");
+    });
+    window.addEventListener("popstate", closeWebEntryOverlay);
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") closeWebEntryOverlay();
+    });
 
     function makeKeyboardClickable(element: HTMLElement | null): void {
       if (!element || element instanceof HTMLButtonElement || element instanceof HTMLAnchorElement) return;
@@ -1753,38 +418,63 @@ const api = createApiClient({ pathname: window.location.pathname, cookie: () => 
     updateTaskCenterButton();
     setWebProxyScope(null);
 
+    let statusEvents: EventSource | null = null;
+
+    function syncStatusEvents(): void {
+      if (document.hidden) {
+        statusEvents?.close();
+        statusEvents = null;
+        return;
+      }
+      if (statusEvents) return;
+      const stream = new EventSource(`${api.base}/events`);
+      statusEvents = stream;
+      stream.addEventListener("snapshot", event => {
+        if (statusEvents !== stream) return;
+        try {
+          void fetchStatus(JSON.parse((event as MessageEvent).data) as StatusResponse);
+        } catch {}
+      });
+    }
+
+    const authorizedDirsPanel = createAuthorizedDirsPanel({ showToast, confirm: showModal });
+    const statusPolling = createPollingLifecycle({ refresh: fetchStatus, intervalMs: 30000 });
+
     // 初始执行全套自愈
     initTheme();
     refreshVersionCards(); // 立即按默认推荐稳定版初始化界面,杜绝空白与幽灵版本
     fetchStatus();
+    syncStatusEvents();
+
     fetchLogs();
     fetchVersionList();
     loadMirror();
     fetchWebProxyPort();
-    refreshTimer = setInterval(fetchLogs, 3500);
-    setInterval(fetchStatus, 5000);
+    void authorizedDirsPanel.restorePending().then(() => authorizedDirsPanel.refresh());
+    logPanel.start();
+    statusPolling.start();
 
     function resumeVisiblePage(): void {
-      if (document.hidden) return;
-      fetchStatus();
-      fetchLogs();
-      if (upgradePollTimer !== null) void pollUpgradeLogs(true);
+      if (document.hidden) {
+        syncStatusEvents();
+        return;
+      }
+      syncStatusEvents();
+      installProgress.resume();
     }
     document.addEventListener("visibilitychange", resumeVisiblePage);
     window.addEventListener("pageshow", resumeVisiblePage);
 
-    if (installTask.taskSeq !== null && installTask.taskInstance !== null) {
-      openUpgradeModal(true, installTask.taskSeq, installTask.taskInstance);
-    }
+    installProgress.restore();
 
-    initMobileNavigation();
+    mobileNavigation.start();
 
     // 内联 onclick/onchange 处理器需全局可见 —— esbuild IIFE 会封住顶层作用域
     Object.assign(window, {
       fetchStatus, fetchLogs, refreshDashboard, controlService, changeServicePort, changeWebProxyPort, setWebProxyPublic, resetAuth,
       checkOrUpgrade, checkOnlineVersions, pickVersion, toggleHistoryDropdown,
-      saveMirror, toggleTheme, toggleAutoRefresh, clearTerminalLogs,
-      closeUpgradeModal, minimizeUpgradeModal, logGoPrev, logGoNext, logGoLatest,
+      saveMirror, toggleTheme, showAbout, toggleAutoRefresh, clearTerminalLogs,
+      closeUpgradeModal, minimizeUpgradeModal,
       toggleMirrorDropdown, pickMirror, attachRunningInstall,
       // 遗漏会直接报 "uninstallKernel is not defined"(内联 onclick 找不到该符号)
       uninstallKernel,

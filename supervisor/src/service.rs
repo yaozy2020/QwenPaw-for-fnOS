@@ -1,8 +1,10 @@
 use std::{
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     net::{SocketAddr, TcpStream},
     os::unix::{
+        ffi::OsStringExt,
         fs::{OpenOptionsExt, PermissionsExt},
         io::AsRawFd,
     },
@@ -80,7 +82,7 @@ fn canonical_executable(path: &Path) -> PathBuf {
 pub fn executable_matches(expected: &Path, actual: &Path) -> bool {
     let actual = actual.to_string_lossy();
     let actual = actual.strip_suffix(" (deleted)").unwrap_or(&actual);
-    canonical_executable(expected) == Path::new(actual)
+    canonical_executable(expected) == canonical_executable(Path::new(actual))
 }
 
 fn check_identity(pid: i32, starttime: u64, expected_exe: &Path) -> IdentityState {
@@ -105,15 +107,31 @@ fn check_identity(pid: i32, starttime: u64, expected_exe: &Path) -> IdentityStat
     }
     let exe = match fs::read_link(format!("/proc/{pid}/exe")) {
         Ok(exe) => exe,
-        Err(error) => {
-            return IdentityState::Unverifiable(format!("read process executable: {error}"));
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return IdentityState::Gone,
+        Err(error) => match proc_cmdline_executable(pid) {
+            Ok(exe) => exe,
+            Err(_) => {
+                return IdentityState::Unverifiable(format!("read process executable: {error}"));
+            }
+        },
     };
     if executable_matches(expected_exe, &exe) {
         IdentityState::Match
     } else {
         IdentityState::Mismatch
     }
+}
+
+fn proc_cmdline_executable(pid: i32) -> io::Result<PathBuf> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline"))?;
+    let executable = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    if executable.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process command line has no executable",
+        ));
+    }
+    Ok(PathBuf::from(OsString::from_vec(executable.to_vec())))
 }
 
 pub fn acquire_lifecycle_lock(path: &Path, timeout: Duration) -> io::Result<LifecycleLock> {
@@ -442,8 +460,116 @@ pub(crate) fn with_lifecycle_lock<T>(
     Ok(operation(&cfg.supervisor_binary))
 }
 
+fn managed_supervisor_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path.file_name().is_some_and(|name| name == "qwenpaw-supervisor")
+        && path.parent().and_then(Path::file_name).is_some_and(|name| name == "bin")
+        && path.components().any(|component| component.as_os_str() == "qwenpaw")
+}
+
+fn registered_reinstall_executable(cfg: &Config) -> Result<Option<PathBuf>, String> {
+    let Some((pid, starttime)) = read_markers(cfg)? else {
+        return Ok(None);
+    };
+    let executable = proc_cmdline_executable(pid)
+        .map_err(|error| format!("read registered supervisor command line: {error}"))?;
+    if !managed_supervisor_path(&executable) {
+        return Err(format!(
+            "registered supervisor executable is outside the managed application: {}",
+            executable.display()
+        ));
+    }
+    match check_identity(pid, starttime, &executable) {
+        IdentityState::Match => Ok(Some(executable)),
+        IdentityState::Gone => Ok(None),
+        IdentityState::Mismatch => Err("registered supervisor identity changed before reinstall".into()),
+        IdentityState::Unverifiable(error) => Err(error),
+    }
+}
+
+fn orphan_supervisor() -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf)>, String> {
+    let expected_pid = std::env::var("QWENPAW_TEST_REINSTALL_PID")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok());
+    let mut matches = Vec::new();
+    for (identity, _) in crate::procfs::scan_processes()? {
+        if identity.pid <= 1 || expected_pid.is_some_and(|pid| pid != identity.pid) {
+            continue;
+        }
+        let Ok(executable) = proc_cmdline_executable(identity.pid) else {
+            continue;
+        };
+        if !managed_supervisor_path(&executable) {
+            continue;
+        }
+        let command = fs::read(format!("/proc/{}/cmdline", identity.pid))
+            .map_err(|error| format!("read supervisor arguments: {error}"))?;
+        if command.split(|byte| *byte == 0).nth(1) != Some(b"serve".as_slice()) {
+            continue;
+        }
+        match check_identity(identity.pid, identity.starttime, &executable) {
+            IdentityState::Match => matches.push((identity, executable)),
+            IdentityState::Gone | IdentityState::Mismatch => {}
+            IdentityState::Unverifiable(error) => return Err(error),
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err("multiple orphan QwenPaw supervisors found; refusing to choose one".into()),
+    }
+}
+
+fn stop_orphan_supervisor() -> Result<(), String> {
+    let Some((identity, executable)) = orphan_supervisor()? else {
+        return Ok(());
+    };
+    if check_identity(identity.pid, identity.starttime, &executable) != IdentityState::Match {
+        return Err("orphan supervisor identity changed before SIGTERM".into());
+    }
+    if unsafe { libc::kill(identity.pid, libc::SIGTERM) } != 0 {
+        return Err(format!("stop orphan supervisor: {}", io::Error::last_os_error()));
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    loop {
+        match crate::procfs::identity_status(identity) {
+            crate::procfs::IdentityStatus::Gone => return Ok(()),
+            crate::procfs::IdentityStatus::Reused => {
+                return Err("orphan supervisor PID was reused during shutdown".into());
+            }
+            crate::procfs::IdentityStatus::Unknown(error) => return Err(error),
+            crate::procfs::IdentityStatus::Alive if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            crate::procfs::IdentityStatus::Alive => {
+                return Err("orphan supervisor did not stop before the deadline".into());
+            }
+        }
+    }
+}
+
+pub(crate) fn stop_for_reinstall(cfg: &Config) -> Result<(), String> {
+    let executable = registered_reinstall_executable(cfg)?;
+    if executable.is_none() {
+        stop_orphan_supervisor()?;
+    }
+    stop_for_uninstall(cfg, executable.as_deref().unwrap_or(&cfg.supervisor_binary))
+}
+
 pub(crate) fn stop_for_uninstall(cfg: &Config, expected_exe: &Path) -> Result<(), String> {
-    stop_locked(cfg, expected_exe)
+    stop_locked(cfg, expected_exe)?;
+    let kernel = crate::kernel::KernelManager::new(
+        crate::kernel::KernelConfig {
+            venv_dir: cfg.kernel_venv.clone(),
+            pid_file: cfg.kernel_pid_file.clone(),
+            log_file: cfg.kernel_log.clone(),
+            share_dir: cfg.share_dir.clone(),
+            etc_dir: cfg.etc_dir.clone(),
+            log_level: cfg.kernel_log_level.clone(),
+        },
+        cfg.kernel_port,
+    );
+    kernel.stop_for_uninstall()
 }
 
 pub fn run(action: ServiceAction, cfg: &Config) -> i32 {
@@ -667,14 +793,8 @@ fn stop_locked(cfg: &Config, expected_exe: &Path) -> Result<(), String> {
         println!("management service is not running");
         return Ok(());
     };
-    let generation = read_shutdown_generation(cfg, pid, starttime)?;
     match check_identity(pid, starttime, expected_exe) {
         IdentityState::Gone => {
-            if generation.is_none() {
-                return Err(
-                    "shutdown generation is missing for stale supervisor registration".into(),
-                );
-            }
             remove_matching_markers(cfg, pid, starttime)?;
             remove_matching_shutdown_generation(cfg, pid, starttime)?;
             println!("management service is not running (stale registration cleared)");
@@ -924,6 +1044,16 @@ mod tests {
         assert!(!pid_path.exists());
         assert!(!starttime_path.exists());
         assert!(!shutdown_generation_path(&cfg).exists());
+
+        fs::write(&pid_path, format!("{pid}\n")).unwrap();
+        fs::write(&starttime_path, format!("{starttime}\n")).unwrap();
+        let without_generation = stop_locked(&cfg, &expected_exe);
+        assert!(
+            without_generation.is_ok(),
+            "a confirmed gone supervisor must not require a shutdown generation: {without_generation:?}"
+        );
+        assert!(!pid_path.exists());
+        assert!(!starttime_path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -965,6 +1095,60 @@ mod tests {
             check_identity(pid, starttime, Path::new("/tmp/unrelated-supervisor")),
             IdentityState::Mismatch
         );
+    }
+
+    #[test]
+    fn proc_cmdline_executable_identifies_the_running_process() {
+        let pid = std::process::id() as i32;
+        let actual = proc_cmdline_executable(pid).unwrap();
+        let expected = std::env::current_exe().unwrap();
+        assert!(executable_matches(&expected, &actual));
+    }
+
+    #[test]
+    fn check_identity_accepts_cmdline_when_another_users_exe_is_unreadable() {
+        let nonroot = unsafe { libc::geteuid() } != 0;
+        for entry in fs::read_dir("/proc").unwrap().flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+                .filter(|pid| *pid > 1)
+            else {
+                continue;
+            };
+            let exe = fs::read_link(format!("/proc/{pid}/exe"));
+            if nonroot
+                && !matches!(
+                    exe,
+                    Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied
+                )
+            {
+                continue;
+            }
+            let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some(starttime) = parse_starttime(&stat) else {
+                continue;
+            };
+            let Ok(expected) = proc_cmdline_executable(pid) else {
+                continue;
+            };
+            if !expected.is_absolute() {
+                continue;
+            }
+            assert_eq!(
+                check_identity(pid, starttime, &expected),
+                IdentityState::Match
+            );
+            assert_eq!(
+                check_identity(pid, starttime, Path::new("/tmp/unrelated-supervisor")),
+                IdentityState::Mismatch
+            );
+            return;
+        }
+        panic!("no suitable process for executable identity fallback test");
     }
 
     #[test]
@@ -1086,6 +1270,25 @@ mod tests {
         assert!(executable_matches(&expected, &deleted));
         let unrelated = PathBuf::from("/tmp").join(expected.file_name().unwrap());
         assert!(!executable_matches(&expected, &unrelated));
+    }
+
+    #[test]
+    fn reinstall_executable_paths_are_limited_to_the_managed_application() {
+        assert!(managed_supervisor_path(Path::new(
+            "/vol2/@appcenter/qwenpaw/bin/qwenpaw-supervisor"
+        )));
+        assert!(managed_supervisor_path(Path::new(
+            "/var/apps/qwenpaw/target/bin/qwenpaw-supervisor"
+        )));
+        assert!(!managed_supervisor_path(Path::new(
+            "/tmp/unrelated/bin/qwenpaw-supervisor"
+        )));
+        assert!(!managed_supervisor_path(Path::new(
+            "/vol2/@appcenter/qwenpaw/cmd/qwenpaw-supervisor"
+        )));
+        assert!(!managed_supervisor_path(Path::new(
+            "/vol2/@appcenter/qwenpaw/bin/other-process"
+        )));
     }
 
     #[test]

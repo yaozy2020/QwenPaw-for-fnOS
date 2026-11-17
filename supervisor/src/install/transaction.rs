@@ -412,15 +412,56 @@ impl VenvTransaction {
             return Err(write_error);
         }
         if let Some(content) = pin_content {
-            atomic_write_0600(&self.record.pin_path.to_string_lossy(), content)?;
+            atomic_write_0600(&self.record.pin_path.to_string_lossy(), content).map_err(
+                |error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "写入版本钉 {} 失败: {error}",
+                            self.record.pin_path.display()
+                        ),
+                    )
+                },
+            )?;
         }
         check_crash_point(CrashPoint::AfterPinWritten);
-        remove_tree(&self.record.staged)?;
-        remove_tree(&self.record.backup)?;
-        sync_dir(parent)?;
+        remove_tree(&self.record.staged).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "清理暂存环境 {} 失败: {error}",
+                    self.record.staged.display()
+                ),
+            )
+        })?;
+        remove_tree(&self.record.backup).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "清理旧环境备份 {} 失败: {error}",
+                    self.record.backup.display()
+                ),
+            )
+        })?;
+        sync_dir(parent).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("同步环境目录 {} 失败: {error}", parent.display()),
+            )
+        })?;
         check_crash_point(CrashPoint::AfterCommit);
-        remove_file(&self.tx_file)?;
-        sync_dir(parent)?;
+        remove_file(&self.tx_file).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("清理事务记录 {} 失败: {error}", self.tx_file.display()),
+            )
+        })?;
+        sync_dir(parent).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("同步环境目录 {} 失败: {error}", parent.display()),
+            )
+        })?;
         self.committed_or_rolled_back = true;
         Ok(())
     }

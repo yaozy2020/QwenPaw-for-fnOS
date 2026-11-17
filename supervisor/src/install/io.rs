@@ -207,7 +207,13 @@ pub(crate) fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()
     use std::os::unix::fs::OpenOptionsExt;
     // tmp 名带 pid:固定 "{path}.tmp" 在并发写(如变更端口与状态落盘同时发生)
     // 时会互相截断,rename 出空文件或对方的内容。
-    let tmp = format!("{}.tmp.{}", path, std::process::id());
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let tmp = format!(
+        "{}.tmp.{}.{}",
+        path,
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
     {
         let mut f = std::fs::OpenOptions::new()
             .create_new(true)

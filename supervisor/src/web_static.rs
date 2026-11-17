@@ -142,7 +142,7 @@ fn extract_resource(request_path: &str) -> Result<String, PathError> {
             Some("css" | "js" | "jpg" | "jpeg" | "png" | "gif" | "svg")
         )
     });
-    if decoded == "index.html" || allowed_asset {
+    if decoded == "index.html" || decoded == "auth-callback.html" || allowed_asset {
         Ok(decoded)
     } else {
         Err(PathError::NotFound)

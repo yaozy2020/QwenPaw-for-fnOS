@@ -45,7 +45,8 @@ use crate::{
 const PREFIX: &str = "/app/qwenpaw";
 const READY_PATH: &str = "/__qwenpaw_gateway_ready";
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
-const MAX_CONNECTIONS: usize = 32;
+const MAX_CONNECTIONS: usize = 128;
+const CONNECTION_SLOT_WAIT: Duration = Duration::from_secs(2);
 const MAX_SSE_CONNECTIONS: usize = 8;
 const OVERLOAD_MESSAGE: &str = "Gateway is busy; retry shortly";
 const CSRF_COOKIE: &str = "qwenpaw_csrf";
@@ -149,7 +150,6 @@ pub(crate) fn start(
     state: AppState,
     supervisor_executable: &Path,
     helper_executable: &Path,
-    persistent_helper_executable: &Path,
 ) -> io::Result<RunningGateway> {
     if !bound.cleanup.identity.matches_path(&bound.cleanup.path)? {
         return Err(io::Error::new(
@@ -176,7 +176,6 @@ pub(crate) fn start(
         vec![
             supervisor_executable.to_path_buf(),
             helper_executable.to_path_buf(),
-            persistent_helper_executable.to_path_buf(),
         ],
     );
     let (shutdown, shutdown_rx) = watch::channel(false);
@@ -321,7 +320,11 @@ async fn serve(
                         continue;
                     }
                 };
-                if connections.len() >= MAX_CONNECTIONS {
+                if connections.len() >= MAX_CONNECTIONS
+                    && tokio::time::timeout(CONNECTION_SLOT_WAIT, connections.join_next())
+                        .await
+                        .is_err()
+                {
                     reject_overloaded(stream).await;
                     continue;
                 }
@@ -363,7 +366,8 @@ struct GatewayState {
     www_root: PathBuf,
     test_exe: Option<PathBuf>,
     supervisor_executables: Vec<PathBuf>,
-    sse_connections: Arc<Semaphore>,
+    management_sse_connections: Arc<Semaphore>,
+    upstream_sse_connections: Arc<Semaphore>,
     public_access: bool,
     web_client: hyper_util::client::legacy::Client<
         hyper_util::client::legacy::connect::HttpConnector,
@@ -398,7 +402,8 @@ fn build_router_with_supervisors(
         www_root,
         test_exe,
         supervisor_executables,
-        sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        management_sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        upstream_sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
         public_access: false,
         web_client,
     };
@@ -422,7 +427,8 @@ pub fn web_tcp_router_with_access(app: AppState, public: bool) -> Router {
         www_root: PathBuf::new(),
         test_exe: None,
         supervisor_executables: Vec::new(),
-        sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        management_sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        upstream_sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
         public_access: public,
         web_client,
     };
@@ -636,7 +642,7 @@ async fn dispatch(
             HeaderValue::from_static("application/json"),
         );
         if api_path == "events" && method == Method::GET {
-            let permit = match state.sse_connections.clone().try_acquire_owned() {
+            let permit = match state.management_sse_connections.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => return retryable_overload(),
             };

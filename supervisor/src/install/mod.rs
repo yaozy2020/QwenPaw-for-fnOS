@@ -1,3 +1,4 @@
+pub(crate) mod base_path_patch;
 mod channel;
 mod io;
 mod pip;
@@ -10,8 +11,8 @@ pub use channel::*;
 pub(crate) use io::{atomic_write_0600, sweep_stale_tmp_files};
 use pip::{PipSpawner, RealSpawner};
 pub(crate) use process::run_with_timeout;
+pub(crate) use process::wait_for_version_deadline_at;
 use process::{signal_process_group, version_matches, ExecutableIdentity, ProcessIdentity};
-pub(crate) use process::{wait_for_version_cancellable, wait_for_version_deadline};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -24,6 +25,8 @@ use transaction::{check_crash_point, pending_transactions};
 use channel::is_safe_exact_version;
 #[cfg(test)]
 use process::wait_for_version;
+#[cfg(test)]
+pub(crate) use process::{wait_for_version_cancellable, wait_for_version_cancellable_at};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
@@ -526,6 +529,15 @@ impl InstallState {
                         }
                     }
                     this.check_cancelled()?;
+                    if let Some(patch) = base_path_patch::for_channel(&channel)? {
+                        if !patch.includes_console() {
+                            return Err("base-path 补丁缺少与 2.3.0 配套的预构建 Console".into());
+                        }
+                        patch
+                            .apply(&transaction.record.staged)
+                            .map_err(|error| format!("应用 base-path 兼容补丁失败: {error}"))?;
+                    }
+                    this.check_cancelled()?;
                     transaction
                         .activate()
                         .map_err(|e| format!("切换内核运行环境失败: {e}"))?;
@@ -539,8 +551,18 @@ impl InstallState {
                     });
                     this.check_cancelled()?;
                     (on_success)().map_err(|e| format!("内核启动失败 (spawn_failed): {e}"))?;
-                    if !wait_for_version_cancellable(kernel_port, &actual, 30, &|| this.cancelled())
-                    {
+                    let health_base_path = if base_path_patch::active(Path::new(&venv_dir)) {
+                        "/app/qwenpaw/web"
+                    } else {
+                        ""
+                    };
+                    if !process::wait_for_version_cancellable_at(
+                        kernel_port,
+                        &actual,
+                        30,
+                        &|| this.cancelled(),
+                        health_base_path,
+                    ) {
                         this.check_cancelled()?;
                         return Err(
                             "内核包已安装，但在宽限期内启动健康检查超时 (health_timeout)".into(),

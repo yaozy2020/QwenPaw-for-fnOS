@@ -351,15 +351,18 @@ fn handle_connection(mut stream: UnixStream, state: AppState, runtime: tokio::ru
         ControlRequest::Install { version, mirror } => runtime
             .block_on(state.core.submit_install(&version, &mirror))
             .map(|acceptance| match acceptance {
-                crate::management::InstallAcceptance::Started { seq } => serde_json::json!({
-                    "status": 200,
-                    "ok": true,
-                    "success": true,
-                    "message": "安装已开始",
-                    "seq": seq,
-                    "instance": crate::api::instance_id(),
-                    "running": true,
-                }),
+                crate::management::InstallAcceptance::Started { seq } => {
+                    state.events.invalidate();
+                    serde_json::json!({
+                        "status": 200,
+                        "ok": true,
+                        "success": true,
+                        "message": "安装已开始",
+                        "seq": seq,
+                        "instance": crate::api::instance_id(),
+                        "running": true,
+                    })
+                }
                 crate::management::InstallAcceptance::Busy { seq } => serde_json::json!({
                     "status": 200,
                     "ok": true,
@@ -421,13 +424,7 @@ fn handle_connection(mut stream: UnixStream, state: AppState, runtime: tokio::ru
                         .lock()
                         .unwrap_or_else(|error| error.into_inner()) =
                         crate::api::AuthCache::default();
-                    let snapshot_state = state.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        snapshot_state
-                            .events
-                            .publish(crate::api::render_snapshot(&snapshot_state));
-                    })
-                    .await;
+                    state.events.invalidate();
                 }
                 outcome.result.map(|message| {
                     serde_json::json!({
@@ -1218,6 +1215,7 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         let listener = bind_private_socket(&path).unwrap();
         let state = dir.state(crate::api::test_support::free_port());
         let runtime = tokio::runtime::Handle::current();
+        let mut events = state.events.subscribe();
         install_python(
             &dir,
             &state,
@@ -1241,6 +1239,57 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         assert_eq!(response["success"], true);
         assert_eq!(response["running"], true);
         assert!(identity_is_valid);
+        assert_eq!(events.try_recv().unwrap(), "");
+        assert_eq!(
+            state.install.snapshot().seq,
+            response["seq"].as_u64().unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn private_settings_response_does_not_wait_for_status_snapshot() {
+        use crate::api::test_support::{
+            free_port, install_python, serve_reserved_port, KernelGuard, TestDir,
+        };
+
+        let dir = TestDir::new("control-settings-snapshot-delay");
+        let port = free_port();
+        let state = dir.state(port);
+        let _server = serve_reserved_port(port);
+        let _kernel = KernelGuard(Arc::clone(&state.kernel));
+        install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
+        state.kernel.spawn().unwrap();
+        let kernel = Arc::clone(&state.kernel);
+        assert!(
+            tokio::task::spawn_blocking(move || kernel.wait_healthy(Duration::from_secs(3)))
+                .await
+                .unwrap(),
+            "kernel fixture must be healthy before exercising snapshot publication"
+        );
+        fs::write(
+            &state.ui_config_file,
+            serde_json::json!({".url": {"qwenpaw.main": {"port": port.to_string()}}}).to_string(),
+        )
+        .unwrap();
+
+        let path = socket_path(&dir, "control");
+        let listener = bind_private_socket(&path).unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        let mut events = state.events.subscribe();
+        let started = Instant::now();
+        let response = exchange_request(&listener, &state, &runtime, br#"{"log_level":"info"}"#);
+        let elapsed = started.elapsed();
+
+        assert_eq!(response["status"], 200);
+        assert_eq!(events.try_recv().unwrap(), "");
+        assert_eq!(
+            fs::read_to_string(Path::new(&state.var_dir).join("qwenpaw-log-level")).unwrap(),
+            "info\n"
+        );
+        assert!(
+            elapsed < Duration::from_millis(275),
+            "control settings response waited for status rendering: {elapsed:?}"
+        );
     }
 
     #[test]

@@ -20,6 +20,14 @@ pub struct AuthCache {
     status: String,
 }
 
+fn auth_probe_path(state: &AppState) -> &'static str {
+    if state.kernel.base_path().is_empty() {
+        "/api/auth/status"
+    } else {
+        "/app/qwenpaw/web/api/auth/status"
+    }
+}
+
 fn auth_status(state: &AppState, running: bool, port: u16) -> String {
     {
         let cache = state.auth_cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -39,7 +47,10 @@ fn auth_status(state: &AppState, running: bool, port: u16) -> String {
             std::time::Duration::from_millis(300),
         ) {
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
-            let req = format!("GET /api/auth/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+            let req = format!(
+                "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
+                auth_probe_path(state)
+            );
             if stream.write_all(req.as_bytes()).is_ok() {
                 let mut buf = Vec::new();
                 if stream.read_to_end(&mut buf).is_ok() {
@@ -119,6 +130,12 @@ pub fn render_snapshot(state: &AppState) -> String {
     .to_string()
 }
 
+async fn render_snapshot_blocking(state: AppState) -> String {
+    tokio::task::spawn_blocking(move || render_snapshot(&state))
+        .await
+        .unwrap_or_else(|_| json!({"ok": false}).to_string())
+}
+
 pub(super) async fn status(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -126,9 +143,7 @@ pub(super) async fn status(
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    let snapshot = tokio::task::spawn_blocking(move || render_snapshot(&state))
-        .await
-        .unwrap_or_else(|_| json!({"ok": false}).to_string());
+    let snapshot = render_snapshot_blocking(state).await;
     // 快照已是合法 JSON 字符串:直返,不再反序列化转一遍(纯浪费)
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -137,7 +152,7 @@ pub(super) async fn status(
         .into_response()
 }
 
-/// SSE:首帧全量快照 + 状态变更推送;KeepAlive 由 axum 承载(dsh S1 配方)。
+/// SSE events are invalidation signals: always emit a fresh full snapshot, including after lag.
 pub(super) async fn events(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -148,14 +163,15 @@ pub(super) async fn events(
         // 且 EventSource 层面无法区分"连上了但被拒"与正常流。
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
-    let snapshot_state = state.clone();
-    let first = tokio::task::spawn_blocking(move || render_snapshot(&snapshot_state))
-        .await
-        .unwrap_or_else(|_| json!({"ok": false}).to_string());
     let rx = state.events.subscribe();
-    let snap_stream = BroadcastStream::new(rx).filter_map(|m| {
-        m.ok()
-            .map(|json| Ok(Event::default().event("snapshot").data(json)))
+    let first = render_snapshot_blocking(state.clone()).await;
+    let updates_state = state;
+    let snap_stream = BroadcastStream::new(rx).then(move |_| {
+        let state = updates_state.clone();
+        async move {
+            let snapshot = render_snapshot_blocking(state).await;
+            Ok(Event::default().event("snapshot").data(snapshot))
+        }
     });
     let first_stream = tokio_stream::once(Ok(Event::default().event("snapshot").data(first)));
     let merged: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
@@ -197,5 +213,116 @@ mod tests {
                 .unwrap(),
             modified
         );
+    }
+
+    fn event_request(state: &AppState) -> Request<axum::body::Body> {
+        Request::builder()
+            .method("GET")
+            .header("X-Supervisor-Token", &state.token)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn snapshot_from_frame(frame: &[u8]) -> serde_json::Value {
+        let frame = std::str::from_utf8(frame).unwrap();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data:"))
+            .expect("SSE frame must contain data")
+            .trim();
+        serde_json::from_str(data).unwrap()
+    }
+
+    #[test]
+    fn events_subscribes_before_rendering_the_initial_snapshot() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use std::future::Future;
+
+            let dir = TestDir::new("events-initial-subscribe");
+            let state = dir.state(crate::api::test_support::free_port());
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            started_rx.await.unwrap();
+
+            let mut response_future = Box::pin(events(State(state.clone()), event_request(&state)));
+            std::future::poll_fn(|context| match response_future.as_mut().poll(context) {
+                std::task::Poll::Pending => std::task::Poll::Ready(()),
+                std::task::Poll::Ready(_) => panic!("snapshot should wait for the blocking worker"),
+            })
+            .await;
+
+            state
+                .events
+                .publish(r#"{"success":false,"marker":"during-first-snapshot"}"#.into());
+            release_tx.send(()).unwrap();
+            let response = response_future.await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut stream = response.into_body().into_data_stream();
+            let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot_from_frame(&first)["success"], true);
+            let update = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .expect("event published during first snapshot was lost")
+                .unwrap()
+                .unwrap();
+            let update = snapshot_from_frame(&update);
+            assert_eq!(update["success"], true);
+            assert!(update.get("marker").is_none());
+            blocker.await.unwrap();
+        });
+    }
+
+    #[tokio::test]
+    async fn events_emit_a_fresh_snapshot_after_broadcast_lag() {
+        let dir = TestDir::new("events-broadcast-lag");
+        let state = dir.state(crate::api::test_support::free_port());
+        let response = events(State(state.clone()), event_request(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot_from_frame(&first)["success"], true);
+
+        for index in 0..17 {
+            state
+                .events
+                .publish(serde_json::json!({"marker": index}).to_string());
+        }
+        let update = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("lag must cause a current full snapshot")
+            .unwrap()
+            .unwrap();
+        let update = snapshot_from_frame(&update);
+        assert_eq!(update["success"], true);
+        assert!(update.get("marker").is_none());
+    }
+
+    #[test]
+    fn auth_probe_uses_the_native_base_path_when_the_patch_is_active() {
+        let dir = TestDir::new("auth-native-base-path");
+        let state = dir.state(crate::api::test_support::free_port());
+        let venv = dir.0.join("home/venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        assert_eq!(auth_probe_path(&state), "/api/auth/status");
+        std::fs::write(venv.join(".qwenpaw-base-path-patch"), "fixture").unwrap();
+        assert_eq!(auth_probe_path(&state), "/app/qwenpaw/web/api/auth/status");
     }
 }

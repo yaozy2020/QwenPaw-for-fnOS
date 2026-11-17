@@ -197,6 +197,9 @@ fn build_plan_with_runtime(
     let etc = validate_package_directory(Path::new(&cfg.etc_dir), "etc", "@appconf")?;
     let var = validate_package_directory(Path::new(&cfg.var_dir), "var", "@appdata")?;
     ensure_disjoint(&[home.clone(), etc.clone(), var.clone()], "package roots")?;
+    if preserve_runtime && mode == Mode::Remove {
+        return Err("UPGRADE 必须保留运行环境与用户数据，拒绝完整删除".into());
+    }
 
     match mode {
         Mode::Keep => {
@@ -759,6 +762,37 @@ mod tests {
 
         assert!(Path::new(&cfg.home_dir).join("venv").exists());
         assert!(Path::new(&cfg.var_dir).join("qwenpaw-version").exists());
+        assert!(Path::new(&cfg.share_dir).join("config.json").exists());
+    }
+
+    #[test]
+    fn upgrade_rejects_remove_instead_of_deleting_user_data() {
+        let root = TempTrimRoot::new();
+        let cfg = root.config();
+        root.populate(&cfg);
+        let mut stopped = false;
+        let mut removed = Vec::new();
+        let share_paths = root.share_base().to_string_lossy().into_owned();
+        assert_eq!(
+            run_with_runtime(
+                &cfg,
+                "remove",
+                Some(&share_paths),
+                None,
+                true,
+                || {
+                    stopped = true;
+                    0
+                },
+                |path| {
+                    removed.push(path.to_path_buf());
+                    remove_tree(path)
+                },
+            ),
+            1
+        );
+        assert!(!stopped);
+        assert!(removed.is_empty());
         assert!(Path::new(&cfg.share_dir).join("config.json").exists());
     }
 

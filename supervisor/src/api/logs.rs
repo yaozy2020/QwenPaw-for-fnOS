@@ -9,34 +9,65 @@ use serde_json::json;
 use super::{check_token, err_json, AppState};
 use crate::install::truncate_utf8;
 
-/// 日志尾部读取:只读文件末尾窗口(默认 256KB),不整文件加载 —— 日志文件可长期
-/// 追加到数十 MB,整读曾让 /logs 每次轮询都拖全量 IO。
-/// 单行截断到 2000 字符,防超长行撑爆响应。
 fn tail_lines(path: &std::path::Path, max: usize, window: u64) -> Vec<String> {
-    const LINE_CAP: usize = 2000;
-    let f = match std::fs::File::open(path) {
-        Ok(f) => f,
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(_) => return Vec::new(),
     };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(window);
-    let mut handle = f;
-    use std::io::{Read, Seek, SeekFrom};
-    if handle.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    read_tail_lines(&mut file, len, max, window).unwrap_or_default()
+}
+
+fn read_tail_lines(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    len: u64,
+    max: usize,
+    window: u64,
+) -> std::io::Result<Vec<String>> {
+    const LINE_CAP: usize = 2000;
+    const BLOCK_BYTES: u64 = 8192;
+    if max == 0 || window == 0 || len == 0 {
+        return Ok(Vec::new());
     }
-    let mut buf = Vec::new();
-    if handle.read_to_end(&mut buf).is_err() {
-        return Vec::new();
+    let lower_bound = len.saturating_sub(window);
+    let mut start = len;
+    let mut chunks = Vec::new();
+    let mut newlines = 0usize;
+    let mut trailing_newline = false;
+    while start > lower_bound {
+        let size = (start - lower_bound).min(BLOCK_BYTES);
+        start -= size;
+        reader.seek(std::io::SeekFrom::Start(start))?;
+        let mut chunk = vec![0; size as usize];
+        reader.read_exact(&mut chunk)?;
+        if chunks.is_empty() {
+            trailing_newline = chunk.last() == Some(&b'\n');
+        }
+        newlines += chunk.iter().filter(|&&byte| byte == b'\n').count();
+        chunks.push(chunk);
+        if newlines.saturating_sub(usize::from(trailing_newline)) >= max {
+            break;
+        }
     }
+    let buf = if chunks.len() == 1 {
+        chunks.pop().unwrap()
+    } else {
+        chunks.into_iter().rev().flatten().collect()
+    };
     let text = String::from_utf8_lossy(&buf);
-    let mut lines: Vec<String> = text.lines().map(|l| truncate_utf8(l, LINE_CAP)).collect();
-    // 起点切在行中间时,首行是残行;窗口未覆盖全文件才可能发生
-    if start > 0 && !lines.is_empty() {
-        lines.remove(0);
-    }
-    let tail: Vec<String> = lines.into_iter().rev().take(max).collect();
-    tail.into_iter().rev().collect()
+    let text = if start > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    let mut lines: Vec<_> = text
+        .lines()
+        .rev()
+        .take(max)
+        .map(|line| truncate_utf8(line, LINE_CAP))
+        .collect();
+    lines.reverse();
+    Ok(lines)
 }
 
 /// 内核运行日志尾部(旧形状:{success, logs: [字符串数组]})。
@@ -113,4 +144,173 @@ pub(super) async fn install_log(
         .await
         .unwrap_or_default();
     Json(json!({"success": true, "logs": lines})).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+    #[derive(Default)]
+    struct CountedReader {
+        cursor: Cursor<Vec<u8>>,
+        bytes_read: usize,
+    }
+
+    impl Read for CountedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.cursor.read(buffer)?;
+            self.bytes_read += count;
+            Ok(count)
+        }
+    }
+
+    impl Seek for CountedReader {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    fn reference(bytes: &[u8], max: usize, window: u64) -> Vec<String> {
+        let start = bytes.len().saturating_sub(window as usize);
+        let text = String::from_utf8_lossy(&bytes[start..]);
+        let mut lines: Vec<_> = text.lines().map(|line| truncate_utf8(line, 2000)).collect();
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        let tail: Vec<_> = lines.into_iter().rev().take(max).collect();
+        tail.into_iter().rev().collect()
+    }
+
+    #[test]
+    fn tail_matches_existing_line_window_and_utf8_rules() {
+        let cases = [
+            Vec::new(),
+            b"one".to_vec(),
+            b"one\n".to_vec(),
+            b"\n\n\n".to_vec(),
+            b"one\r\ntwo\r\nthree\r".to_vec(),
+            b"one\ntwo\nthree".to_vec(),
+            b"one\ntwo\nthree\n".to_vec(),
+            b"invalid\xff\xfe\nlast\n".to_vec(),
+            format!("first\n{}\nlast\n", "中".repeat(4000)).into_bytes(),
+            (0..10_000)
+                .map(|index| format!("日志 {index}\r\n"))
+                .collect::<String>()
+                .into_bytes(),
+        ];
+        for bytes in cases {
+            for max in [0, 1, 2, 40, 100, 2000] {
+                for window in [0, 1, 5, 8191, 8192, 8193, 256 * 1024] {
+                    let actual =
+                        read_tail_lines(&mut Cursor::new(&bytes), bytes.len() as u64, max, window)
+                            .unwrap();
+                    assert_eq!(
+                        actual,
+                        reference(&bytes, max, window),
+                        "len={} max={max} window={window}",
+                        bytes.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_tail_reads_only_the_needed_end_blocks() {
+        let bytes = b"ordinary log line\n".repeat(100_000);
+        let len = bytes.len() as u64;
+        let mut reader = CountedReader {
+            cursor: Cursor::new(bytes),
+            ..Default::default()
+        };
+        let lines = read_tail_lines(&mut reader, len, 100, 256 * 1024).unwrap();
+        assert_eq!(lines, vec!["ordinary log line"; 100]);
+        assert!(
+            reader.bytes_read <= 8192,
+            "100-line refresh read {} bytes",
+            reader.bytes_read
+        );
+    }
+
+    #[test]
+    fn tail_does_not_read_appendages_beyond_the_captured_file_length() {
+        let mut reader = CountedReader {
+            cursor: Cursor::new(b"first\nsecond\nappended\n".to_vec()),
+            ..Default::default()
+        };
+        let lines = read_tail_lines(&mut reader, 13, 100, 256 * 1024).unwrap();
+        assert_eq!(lines, ["first", "second"]);
+        assert_eq!(reader.bytes_read, 13);
+    }
+
+    #[test]
+    fn oversized_lines_never_expand_the_read_window() {
+        let bytes = vec![b'x'; 1024 * 1024];
+        let mut reader = CountedReader {
+            cursor: Cursor::new(bytes),
+            ..Default::default()
+        };
+        let lines = read_tail_lines(&mut reader, 1024 * 1024, 100, 256 * 1024).unwrap();
+        assert!(lines.is_empty());
+        assert_eq!(reader.bytes_read, 256 * 1024);
+    }
+
+    #[tokio::test]
+    async fn log_routes_preserve_auth_tail_limits_and_install_identity() {
+        use crate::api::{
+            build_router, instance_id,
+            test_support::{free_port, TestDir},
+        };
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tower::ServiceExt;
+
+        let dir = TestDir::new("log-tail");
+        let state = dir.state(free_port());
+        let bytes: String = (0..4000).map(|index| format!("日志 {index}\n")).collect();
+        std::fs::write(&state.kernel_log, &bytes).unwrap();
+        std::fs::write(format!("{}/qwenpaw-upgrade.log.pip", state.var_dir), &bytes).unwrap();
+        let router = build_router(state.clone());
+        let seq = state.install.snapshot().seq;
+        for (path, authenticated, status, count) in [
+            ("/logs?tail=100".to_owned(), false, 401, 0),
+            ("/logs?tail=100".to_owned(), true, 200, 100),
+            ("/logs?tail=9999".to_owned(), true, 200, 2000),
+            ("/logs?tail=0".to_owned(), true, 200, 1),
+            ("/kernel/install-log?tail=100".to_owned(), true, 404, 0),
+            (
+                format!(
+                    "/kernel/install-log?seq={seq}&instance={}&tail=9999",
+                    instance_id()
+                ),
+                true,
+                200,
+                500,
+            ),
+        ] {
+            let mut request = Request::builder().uri(&path);
+            if authenticated {
+                request = request.header("X-Supervisor-Token", &state.token);
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "{path}");
+            if status == 200 {
+                let body = to_bytes(response.into_body(), 8 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(value["success"], true);
+                let logs = value["logs"].as_array().unwrap();
+                assert_eq!(logs.len(), count);
+                assert_eq!(logs.last().unwrap(), "日志 3999");
+            }
+        }
+    }
 }

@@ -11,7 +11,11 @@
 
 set -o pipefail
 
-PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJ_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
+if [ -z "$PROJ_DIR" ] || [ "$PROJ_DIR" = "/" ]; then
+  echo "ERROR: 无法确定安全的项目目录" >&2
+  exit 1
+fi
 STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 # 版本号提取必须有失败保护:manifest 格式漂移(缩进/换行/键改名)会让这里静默得到
@@ -166,7 +170,8 @@ if [ ! -f "$PROJ_DIR/web/dist/index.html" ]; then
 fi
 CONSOLE_HTML="$STAGE/app/www/index.html"
 cp "$PROJ_DIR/web/dist/index.html" "$CONSOLE_HTML"
-chmod 0644 "$CONSOLE_HTML"
+cp "$PROJ_DIR/web/dist/auth-callback.html" "$STAGE/app/www/auth-callback.html"
+chmod 0644 "$CONSOLE_HTML" "$STAGE/app/www/auth-callback.html"
 
 if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ]; then
   "$NODE_BIN" -e 'const {readFileSync,writeFileSync}=require("fs"),{gzipSync,brotliCompressSync,constants}=require("zlib");const f=process.argv[1],b=readFileSync(f);writeFileSync(f+".gz",gzipSync(b,{level:9}));writeFileSync(f+".br",brotliCompressSync(b,{params:{[constants.BROTLI_PARAM_QUALITY]:11}}))' "$CONSOLE_HTML" \
@@ -176,6 +181,16 @@ if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ]; then
 elif command -v gzip >/dev/null 2>&1; then
   gzip -9 -c "$CONSOLE_HTML" > "$CONSOLE_HTML.gz" && chmod 0644 "$CONSOLE_HTML.gz" && echo "    预压缩: 无 node，仅生成 index.html.gz"
 fi
+
+# 携带后端兼容补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite。
+PATCH_STAGE="$STAGE/app/www/patches/qwenpaw-2.3.0-base-path"
+if [ ! -f "$PROJ_DIR/patches/qwenpaw-2.3.0-base-path/manifest.json" ]; then
+  echo -e "${RED}ERROR: base-path 后端补丁清单缺失${NC}"
+  exit 1
+fi
+mkdir -p "$STAGE/app/www/patches"
+cp -R "$PROJ_DIR/patches/qwenpaw-2.3.0-base-path" "$PATCH_STAGE"
+find "$PATCH_STAGE" -type f -exec chmod 0644 {} +
 
 # 统一所有目录为 0755 (P1-3 权限归一化)
 find "$STAGE" -type d -exec chmod 0755 {} +

@@ -50,18 +50,23 @@ async function fixture(t, options = {}) {
     logs: ["原始服务日志"],
     installLogs: ["本任务日志"],
     clearStatus: 200,
-    posts: [], logQueries: [], requestPaths: [], statusPolls: 0,
+    posts: [], logQueries: [], requestPaths: [], statusPolls: 0, statusRequests: 0,
     ...options,
   };
-  const context = await browser.newContext({ viewport: options.viewport, javaScriptEnabled: options.javaScriptEnabled });
+  const context = await browser.newContext({ viewport: options.viewport, deviceScaleFactor: options.deviceScaleFactor, javaScriptEnabled: options.javaScriptEnabled, userAgent: options.userAgent });
   t.after(() => context.close());
   await context.addCookies([{ name: "qwenpaw_csrf", value: "test-token", url: origin }]);
   const page = await context.newPage();
-  if (options.initScript) await page.addInitScript(options.initScript);
+  if (options.initScript) await page.addInitScript(options.initScript, options.initScriptArgs);
   await page.route("**/*", async route => {
     const req = route.request();
     const url = new URL(req.url());
     if (url.pathname === prefix) return route.fulfill({ contentType: "text/html", body: html });
+    if (url.pathname === `${prefix}web/`) return route.fulfill({ contentType: "text/html", body: "<html><body>QwenPaw Web</body></html>" });
+    if (url.pathname === `${prefix}web/api/workspace/project-directory/dirs`) {
+      if (req.method() === "PUT") state.projectDirs = req.postDataJSON().project_dirs;
+      return route.fulfill({ json: { project_dirs: state.projectDirs || [] } });
+    }
     if (!url.pathname.startsWith(`${prefix}api/`)) return route.abort();
     const path = url.pathname.slice(`${prefix}api/`.length);
     state.requestPaths.push({ method: req.method(), path });
@@ -79,7 +84,17 @@ async function fixture(t, options = {}) {
       return route.fulfill({ json: { success: true } });
     }
     if (path === "kernel/versions" && state.versionsHeld) await state.versionsHeld;
-    if (path === "status") return route.fulfill({ status: state.statusCode || 200, json: state.status });
+    if (path === "status") {
+      state.statusRequests++;
+      const statusCode = state.statusCode || 200;
+      const status = structuredClone(state.status);
+      if (state.statusHeld) {
+        const held = state.statusHeld;
+        state.statusHeld = null;
+        await held;
+      }
+      return route.fulfill({ status: statusCode, json: status });
+    }
     if (path === "web-proxy/port") return route.fulfill({ status: state.proxyStatus, json: state.proxy });
     if (path === "kernel/versions") return route.fulfill({ json: state.versions });
     if (path === "kernel/install-status") { state.statusPolls++; return route.fulfill({ json: state.install }); }
@@ -154,6 +169,32 @@ browserTest("downgrade warning and kernel removal keep their layouts when reveal
   await expect(page.locator("#downgradeWarnBar")).toBeHidden();
 });
 
+browserTest("empty version responses never create selectable ghost cards or pin the selection", async t => {
+  const { page, state } = await fixture(t, {
+    viewport: desktop,
+    versions: { success: true, latest_stable: "", versions: [] },
+  });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#versionCardsContainer [role=button]")).toHaveCount(0);
+  await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
+  await page.evaluate(() => window.pickVersion(""));
+  state.versions = { success: true, latest_stable: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
+  await page.evaluate(() => window.checkOnlineVersions());
+  await expect(page.locator("#versionCardsContainer")).toContainText("2.0.0");
+  await expect(page.locator("#versionCardsContainer [aria-pressed=true]")).toHaveCount(1);
+  await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+});
+
+browserTest("a version refresh without beta removes the stale beta card", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#versionCardsContainer")).toContainText("2.1.0b1");
+  state.versions = { success: true, latest_stable: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
+  await page.evaluate(() => window.checkOnlineVersions());
+  await expect(page.locator("#versionCardsContainer")).not.toContainText("2.1.0b1");
+  await expect(page.locator("#versionCardsContainer [role=button]")).toHaveCount(1);
+});
+
 browserTest("desktop dashboard spans the overview and pairs version with configuration", async t => {
   const { page } = await fixture(t, { viewport: desktop, status: runningStatus });
   await page.goto(origin + prefix);
@@ -167,8 +208,68 @@ browserTest("desktop dashboard spans the overview and pairs version with configu
   assert.ok(Math.abs(version.y - configuration.y) <= 1, "version and configuration share a row");
   assert.ok(Math.abs(version.height - configuration.height) <= 1, "paired cards end on the same line");
   assert.ok(version.x + version.width <= configuration.x, "version precedes configuration like the section navigation");
-  const order = await page.evaluate(() => [...document.querySelectorAll("[data-mobile-panel]")].map(el => el.id));
-  assert.deepEqual(order, ["overview", "version", "configuration", "logs"]);
+  const order = await page.evaluate(() => [...document.querySelectorAll("[data-mobile-panel]")].map(el => el.dataset.mobilePanel));
+  assert.deepEqual(order, ["overview", "overview", "configuration", "authorization", "logs"]);
+});
+
+browserTest("loaded version cards remove the loading placeholder", async t => {
+  const { page } = await fixture(t, { viewport: desktop });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#versionCardsContainer [role=button]")).toHaveCount(2);
+  await expect(page.locator("#versionCardsContainer .log-empty")).toHaveCount(0);
+});
+
+browserTest("desktop uses a complete single page without section navigation", async t => {
+  const { page } = await fixture(t, { viewport: desktop, status: runningStatus });
+  await page.goto(origin + prefix);
+  assert.equal(await page.evaluate(() => scrollY), 0);
+  const headerBox = await box(page.locator("header"));
+  assert.ok(headerBox.y >= 0);
+  await expect(page.locator("#mobileSectionNav")).toBeHidden();
+  await expect(page.locator("#configuration")).toBeVisible();
+  await expect(page.locator("#authorization")).toBeVisible();
+  await expect(page.locator("#logs")).toBeVisible();
+});
+
+browserTest("mobile running overview presents a labelled conversation action and compact metrics", async t => {
+  const { page } = await fixture(t, { viewport: { width: 360, height: 800 }, status: runningStatus });
+  await page.goto(origin + prefix);
+  const entry = page.locator("#overviewWebConsole");
+  await expect(entry).toBeVisible();
+  await expect(entry).toHaveText("进入 Web 对话");
+  const headerEntry = page.locator("#btnWebConsole");
+  await expect(headerEntry.locator("#webConsoleText")).toHaveText("进入 Web 对话");
+  await expect(headerEntry.locator("#webConsoleMobileText")).toHaveText("对话");
+  await expect(headerEntry.locator("#webConsoleMobileText")).toBeVisible();
+  await expect(headerEntry).toHaveAttribute("aria-label", "进入 Web 对话");
+  const header = await box(page.locator("header"));
+  assert.ok(header.height <= 90, `header height ${header.height}`);
+  assert.equal(await page.locator("header").evaluate(element => getComputedStyle(element).position), "static");
+  assert.equal(await page.locator("#mobileSectionNav").evaluate(element => getComputedStyle(element).position), "fixed");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await expect(page.locator("#overviewTitle")).toHaveText("QwenPaw");
+  await expect(page.locator("#versionTitle")).toHaveText("部署版本");
+  await expect(page.locator("#statusCardMount .stat")).toHaveCount(4);
+  await expect(page.locator("#statusCardMount .stat-label")).toHaveText(["CPU 使用率", "内存占用", "进程 PID", "运行时间"]);
+  await expect(page.locator(".overview-details")).toBeHidden();
+  await expect(page.locator(".overview-log-preview")).toBeHidden();
+  const stop = await box(page.locator("#btnStopService"));
+  const restart = await box(page.locator("#btnRestartService"));
+  assert.ok(Math.abs(stop.y - restart.y) <= 1, "stop and restart share the primary action row");
+  const title = await page.locator(".brand-info h1").evaluate(element => ({
+    scroll: element.scrollWidth,
+    client: element.clientWidth,
+  }));
+  assert.ok(title.scroll <= title.client, `brand title overflows its container: ${title.scroll}/${title.client}`);
+  const popupPromise = page.waitForEvent("popup");
+  const requestPromise = page.context().waitForEvent("request", {
+    predicate: request => request.url() === `${origin}/app/qwenpaw/web/`,
+  });
+  await entry.click();
+  const [popup, request] = await Promise.all([popupPromise, requestPromise]);
+  assert.ok(popup);
+  assert.equal(request.url(), `${origin}/app/qwenpaw/web/`);
+  await popup.close();
 });
 
 browserTest("install steps follow only the owned task and mark where it stopped", async t => {
@@ -197,6 +298,62 @@ browserTest("install steps follow only the owned task and mark where it stopped"
   await expect(page.locator("#upTitle")).toContainText("遇到问题");
   await expect(step("starting")).toHaveAttribute("data-status", "failed");
   await expect(step("installing")).toHaveAttribute("data-status", "done");
+});
+
+browserTest("running uptime ticks locally without another status request", async t => {
+  const { page, state } = await fixture(t, {
+    status: { ...runningStatus, startAt: Math.floor(Date.now() / 1000) - 65 },
+  });
+  await page.goto(origin + prefix);
+  const uptime = page.locator("#statusUptime");
+  await expect(uptime).toContainText("已运行");
+  const initial = await uptime.innerText();
+  const requests = state.statusRequests;
+  await expect.poll(() => uptime.innerText(), { timeout: 3000 }).not.toBe(initial);
+  assert.equal(state.statusRequests, requests, "local ticking must not add a network request");
+});
+
+browserTest("mobile log terminal fills the page and preserves manual scrolling", async t => {
+  const { page, state } = await fixture(t, {
+    viewport: { width: 390, height: 844 },
+    logs: Array.from({ length: 160 }, (_, index) => `日志 ${index + 1}`),
+  });
+  await page.goto(origin + prefix);
+  await page.locator('#mobileSectionNav [data-section="logs"]').click();
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal).toContainText("日志 160");
+  await expect(page.locator(".terminal-footer")).toHaveCount(0);
+  const metrics = await terminal.evaluate(element => ({
+    client: element.clientHeight,
+    scroll: element.scrollHeight,
+    top: element.scrollTop,
+  }));
+  assert.ok(metrics.client > 420, `terminal should use the available mobile space, got ${metrics.client}px`);
+  assert.ok(metrics.scroll > metrics.client, "all log lines share one scrolling window");
+  assert.ok(metrics.top + metrics.client >= metrics.scroll - 2, `latest logs start in view: ${JSON.stringify(metrics)}`);
+
+  await terminal.evaluate(element => { element.scrollTop = 0; });
+  state.logs = [...state.logs, "日志 161"];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal).toContainText("日志 161");
+  assert.equal(await terminal.evaluate(element => element.scrollTop), 0, "reading older logs must not jump to the bottom");
+  await page.screenshot({ path: "/tmp/qwenpaw-mobile-log-final.png", fullPage: true });
+});
+
+browserTest("log export downloads the complete visible history window", async t => {
+  const { page } = await fixture(t, {
+    viewport: { width: 390, height: 844 },
+    logs: Array.from({ length: 160 }, (_, index) => `导出日志 ${index + 1}`),
+  });
+  await page.goto(origin + prefix);
+  await page.locator('#mobileSectionNav [data-section="logs"]').click();
+  const pending = page.waitForEvent("download");
+  await page.locator("#exportLogsBtn").click();
+  const download = await pending;
+  assert.match(download.suggestedFilename(), /^qwenpaw-.*\.log$/);
+  const content = await readFile(await download.path(), "utf8");
+  assert.match(content, /导出日志 1/);
+  assert.match(content, /导出日志 160/);
 });
 
 browserTest("long logs scroll inside a bounded terminal that follows the newest line", async t => {
@@ -237,28 +394,272 @@ browserTest("theme toggle names the current mode and the action it performs", as
   await expect(toggle).toHaveAttribute("aria-label", "白天模式，切换到暗夜模式");
 });
 
-browserTest("mobile header keeps its actions on one compact row", async t => {
-  const { page } = await fixture(t, { viewport: { width: 390, height: 844 }, status: runningStatus });
+browserTest("about dialog exposes troubleshooting and official links with native focus handling", async t => {
+  const { page } = await fixture(t, { viewport: desktop });
+  await page.goto(origin + prefix);
+  const trigger = page.locator("#aboutButton");
+  await trigger.click();
+  const dialog = page.locator("#aboutDialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveJSProperty("open", true);
+  await expect(dialog.locator(".faq details")).toHaveCount(4);
+  await expect(dialog.locator(".about-links a").nth(0)).toHaveAttribute("href", "https://github.com/agentscope-ai/QwenPaw");
+  await expect(dialog.locator(".about-links a").nth(1)).toHaveAttribute("href", "https://github.com/yaozy2020/QwenPaw-for-fnOS");
+  for (const link of await dialog.locator(".about-links a").all()) {
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute("rel", /noopener/);
+  }
+  await dialog.locator("summary").first().click();
+  await expect(dialog.locator("details").first()).toHaveAttribute("open", "");
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+});
+
+browserTest("mobile header keeps visible actions within a compact, non-overlapping layout", async t => {
+  const { page } = await fixture(t, {
+    viewport: { width: 390, height: 844 },
+    status: { ...runningStatus, install: { running: true } },
+    install: { success: true, upgrading: true, running: true, seq: 42, instance: "worker-a", phase: "installing" },
+  });
   await page.goto(origin + prefix);
   await expect(page.locator("#webConsoleText")).toHaveText("进入 Web 对话");
+  await expect(page.locator("#webConsoleMobileText")).toHaveText("对话");
+  await expect(page.locator("#webConsoleMobileText")).toBeVisible();
+  await expect(page.locator("#btnWebConsole")).toHaveAttribute("aria-label", "进入 Web 对话");
+  await expect(page.locator("#themeToggleBtn")).toHaveAttribute("aria-label", /.+/);
+  await expect(page.locator("#aboutButton")).toHaveAttribute("aria-label", "关于与常见问题");
+  await page.locator('#mobileSectionNav a[data-section="overview"]').click();
+  await openInstall(page);
+  await page.locator("#btnUpMinimize").click();
+  await expect(page.locator("#taskCenterButton")).toBeVisible();
   const header = await box(page.locator("header"));
-  assert.ok(header.height <= 150, `header height ${header.height}`);
-  const actions = await Promise.all(["#themeToggleBtn", "#refreshDashboardBtn", "#btnWebConsole"].map(selector => box(page.locator(selector))));
-  const tops = actions.map(bounds => bounds.y);
-  assert.ok(Math.max(...tops) - Math.min(...tops) <= 1, "actions share one row");
-  assert.ok(actions.every(bounds => bounds.height >= 44 && bounds.width >= 44));
+  assert.ok(header.height <= 150, `header height ${header.height}px exceeds two compact rows`);
+  assert.equal(await page.locator("#statusBadge").isVisible(), false, "状态由概览承担，顶部不重复占高");
+  assert.equal(await page.locator(".brand-info p").isVisible(), false, "顶部副标题在移动端收起");
+  const brand = await box(page.locator(".brand"));
+  const title = await box(page.locator(".brand-info h1"));
+  const selectors = ["#themeToggleBtn", "#aboutButton", "#taskCenterButton", "#btnWebConsole"];
+  const actions = await Promise.all(selectors.map(selector => box(page.locator(selector))));
+  const intersects = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x
+    && a.y < b.y + b.height && a.y + a.height > b.y;
+  for (const [index, action] of actions.entries()) {
+    assert.ok(action.width >= 44 && action.height >= 44, `${selectors[index]} is smaller than 44px`);
+    assert.ok(action.x >= header.x && action.x + action.width <= header.x + header.width, `${selectors[index]} leaves the header horizontally`);
+    assert.ok(action.y >= header.y && action.y + action.height <= header.y + header.height, `${selectors[index]} leaves the header vertically`);
+    assert.equal(intersects(brand, action), false, `${selectors[index]} overlaps the brand`);
+    assert.equal(intersects(title, action), false, `${selectors[index]} overlaps the brand title`);
+  }
+  assert.equal(await page.locator("#taskCenterButton").evaluate(element => getComputedStyle(element, "::after").content), '"任务"');
+  const nav = await box(page.locator("#mobileSectionNav"));
+  assert.ok(header.y + header.height <= nav.y, "header and navigation remain in document flow without overlap");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
 });
 
-browserTest("uninstalled overview explains the next step and links to version selection", async t => {
-  const { page } = await fixture(t);
+for (const width of [360, 375, 390, 414]) {
+  browserTest(`mobile header title and controls do not overlap at ${width}px`, async t => {
+    const { page } = await fixture(t, { viewport: { width, height: 844 }, status: runningStatus });
+    await page.goto(origin + prefix);
+
+    const header = await box(page.locator("header"));
+    const brand = await box(page.locator(".brand"));
+    const title = await box(page.locator(".brand-info h1"));
+    const controlSelectors = ["#themeToggleBtn", "#aboutButton", "#btnWebConsole"];
+    const controls = await Promise.all(controlSelectors.map(selector => box(page.locator(selector))));
+    const intersects = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x
+      && a.y < b.y + b.height && a.y + a.height > b.y;
+
+    for (const [index, control] of controls.entries()) {
+      assert.equal(intersects(brand, control), false, `${controlSelectors[index]} overlaps the brand`);
+      assert.equal(intersects(title, control), false, `${controlSelectors[index]} overlaps the title`);
+      assert.ok(control.width >= 44 && control.height >= 44, `${controlSelectors[index]} is smaller than 44px`);
+    }
+    assert.ok(header.height <= 90, `header wrapped to multiple rows (${header.height}px)`);
+    assert.ok(Math.max(...controls.map(control => control.y)) - Math.min(...controls.map(control => control.y)) <= 1,
+      "header actions share one row");
+    await expect(page.locator("#webConsoleMobileText")).toBeVisible();
+    await expect(page.locator("#webConsoleMobileText")).toHaveText("对话");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(
+      await page.locator(".brand-info h1").evaluate(element => getComputedStyle(element, "::before").content),
+      width <= 400 ? '"QwenPaw"' : "none",
+    );
+  });
+}
+
+browserTest("header actions stay within the page at 200 percent browser zoom", async t => {
+  const { page } = await fixture(t, {
+    viewport: { width: 195, height: 422 },
+    deviceScaleFactor: 2,
+    status: runningStatus,
+  });
+  await page.goto(origin + prefix);
+  assert.equal(await page.evaluate(() => innerWidth), 195);
+  assert.equal(await page.evaluate(() => devicePixelRatio), 2);
+  const action = await box(page.locator("#btnWebConsole"));
+  const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  assert.ok(action.x + action.width <= 195, `conversation action ends at ${action.x + action.width}px`);
+  assert.ok(documentWidth <= 195, `document scrolls to ${documentWidth}px`);
+  const header = await box(page.locator("header"));
+  const nav = await box(page.locator("#mobileSectionNav"));
+  assert.ok(header.y + header.height <= nav.y, "header and navigation remain in document flow without overlap");
+});
+
+browserTest("195px viewport keeps section headings and overview content readable at DPR2", async t => {
+  const { page } = await fixture(t, {
+    viewport: { width: 195, height: 422 },
+    deviceScaleFactor: 2,
+    status: runningStatus,
+  });
+  await page.goto(origin + prefix);
+  assert.equal(await page.evaluate(() => devicePixelRatio), 2);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 195);
+
+  const headings = [];
+  for (const section of ["overview", "configuration", "authorization", "logs"]) {
+    await page.locator(`#mobileSectionNav [data-section="${section}"]`).click();
+    const panel = page.locator(`#${section}`);
+    await expect(panel).toBeVisible();
+    const heading = panel.locator(".card-title h2").first();
+    const metrics = await heading.evaluate(element => {
+      const style = getComputedStyle(element);
+      const title = element.closest(".card-title");
+      return {
+        text: element.innerText.replace(/\s+/g, " ").trim(),
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        fontSize: Number.parseFloat(style.fontSize),
+        lineHeight: Number.parseFloat(style.lineHeight),
+        textLines: [...element.childNodes].flatMap(node => {
+          if (node.nodeType !== Node.TEXT_NODE || !node.textContent.trim()) return [];
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          return [...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top));
+        }).filter((top, index, tops) => tops.indexOf(top) === index).length,
+        titleWidth: title.clientWidth,
+        titleScrollWidth: title.scrollWidth,
+        titleHeight: title.clientHeight,
+        titleScrollHeight: title.scrollHeight,
+      };
+    });
+    headings.push({ section, ...metrics });
+    assert.ok(metrics.clientWidth >= metrics.fontSize * 3, `${section} heading has no room for a short horizontal word: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.scrollWidth <= metrics.clientWidth, `${section} heading clips horizontally: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.clientHeight >= metrics.lineHeight, `${section} heading clips vertically: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.textLines <= 2, `${section} heading wraps into too many narrow lines: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.titleScrollWidth <= metrics.titleWidth, `${section} title/tools row clips horizontally: ${JSON.stringify(metrics)}`);
+    assert.ok(metrics.titleScrollHeight <= metrics.titleHeight, `${section} title/tools row clips vertically: ${JSON.stringify(metrics)}`);
+    const panelMetrics = await panel.evaluate(element => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+    assert.ok(panelMetrics.scrollWidth <= panelMetrics.clientWidth, `${section} card clips horizontally: ${JSON.stringify(panelMetrics)}`);
+  }
+
+  await page.locator('#mobileSectionNav [data-section="overview"]').click();
+  const summary = await page.locator(".status-description").evaluate(element => ({
+    text: element.innerText,
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    fontSize: Number.parseFloat(getComputedStyle(element).fontSize),
+    lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  assert.ok(summary.clientWidth >= summary.fontSize * 3, `status summary is compressed into a narrow column: ${JSON.stringify(summary)}`);
+  assert.ok(summary.scrollWidth <= summary.clientWidth, `status summary clips horizontally: ${JSON.stringify(summary)}`);
+  assert.ok(summary.clientHeight >= summary.lineHeight * 2, `status summary has no room to wrap: ${JSON.stringify(summary)}`);
+  assert.ok(summary.scrollHeight <= summary.clientHeight, `status summary clips vertically: ${JSON.stringify(summary)}`);
+
+  const stats = await page.locator(".stat-grid").evaluate(element => ({
+    columns: getComputedStyle(element).gridTemplateColumns.split(" ").length,
+    children: [...element.children].map(child => ({
+      text: child.innerText.replace(/\s+/g, " ").trim(),
+      width: child.clientWidth,
+      scrollWidth: child.scrollWidth,
+      height: child.clientHeight,
+      scrollHeight: child.scrollHeight,
+      fontSize: Number.parseFloat(getComputedStyle(child.querySelector(".stat-value")).fontSize),
+    })),
+  }));
+  assert.equal(stats.columns, 1, `overview metrics should stack at this width: ${JSON.stringify(stats)}`);
+  assert.ok(stats.children.every(stat => stat.width >= stat.fontSize * 3 && stat.scrollWidth <= stat.width && stat.scrollHeight <= stat.height),
+    `overview metrics are compressed or clipped: ${JSON.stringify(stats)}`);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 195);
+  assert.deepEqual(headings.map(({ section }) => section), ["overview", "configuration", "authorization", "logs"]);
+  await page.addStyleTag({ content: "[data-mobile-panel] { display: flex !important; } .grid { display: flex !important; flex-direction: column; }" });
+  await page.screenshot({ path: "/tmp/qwenpaw-console-20261113/supplement-browser-zoom-200-390x844-full.png", fullPage: true });
+});
+
+browserTest("brand title and header navigation remain readable at 200 percent text size", async t => {
+  const { page } = await fixture(t, { viewport: { width: 390, height: 844 }, status: runningStatus });
+  await page.goto(origin + prefix);
+  await page.evaluate(() => {
+    const elements = [...document.querySelectorAll("header, header *, #mobileSectionNav, #mobileSectionNav *")]
+      .filter(element => element instanceof HTMLElement && element.innerText?.trim() && element.getClientRects().length);
+    for (const element of elements) {
+      const size = Number.parseFloat(getComputedStyle(element).fontSize);
+      if (Number.isFinite(size) && size > 0) element.style.setProperty("font-size", `${size * 2}px`, "important");
+    }
+    const scale = document.createElement("style");
+    scale.textContent = ".brand-info h1::before { font-size: 32px !important; }";
+    document.head.append(scale);
+  });
+
+  const title = await box(page.locator(".brand-info h1"));
+  const titleMetrics = await page.locator(".brand-info h1").evaluate(element => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    generatedTitle: getComputedStyle(element, "::before").content,
+  }));
+  assert.equal(titleMetrics.generatedTitle, '"QwenPaw"');
+  assert.ok(titleMetrics.scrollWidth <= titleMetrics.clientWidth, `brand title clips horizontally (${titleMetrics.scrollWidth}px > ${titleMetrics.clientWidth}px)`);
+  assert.ok(titleMetrics.scrollHeight <= titleMetrics.clientHeight, `brand title clips vertically (${titleMetrics.scrollHeight}px > ${titleMetrics.clientHeight}px)`);
+  const selectors = ["#themeToggleBtn", "#aboutButton", "#btnWebConsole"];
+  const intersects = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x
+    && a.y < b.y + b.height && a.y + a.height > b.y;
+  for (const selector of selectors) {
+    const action = await box(page.locator(selector));
+    assert.equal(intersects(title, action), false, `${selector} overlaps the enlarged brand title`);
+  }
+  const header = await box(page.locator("header"));
+  const nav = await box(page.locator("#mobileSectionNav"));
+  assert.ok(header.y + header.height <= nav.y, "header and navigation remain in document flow without overlap");
+  for (const link of await page.locator("#mobileSectionNav a").all()) {
+    const metrics = await link.evaluate(element => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth, clientHeight: element.clientHeight, scrollHeight: element.scrollHeight }));
+    assert.ok(metrics.scrollWidth <= metrics.clientWidth, `navigation label clips horizontally (${metrics.scrollWidth}px > ${metrics.clientWidth}px)`);
+    assert.ok(metrics.scrollHeight <= metrics.clientHeight, `navigation label clips vertically (${metrics.scrollHeight}px > ${metrics.clientHeight}px)`);
+  }
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+});
+
+browserTest("uninstalled overview provides the first-run guide and homepage installer", async t => {
+  const { page, state } = await fixture(t, { viewport: { width: 390, height: 844 } });
   await page.goto(origin + prefix);
   await expect(page.locator("#statusCardMount .status-description")).toHaveText("先安装 QwenPaw 内核，即可开始使用 AI 对话。");
-  await expect(page.locator("#statusInstallLink")).toBeVisible();
-  await expect(page.locator("#statusInstallLink")).toHaveAttribute("href", "#version");
   await expect(page.locator("#btnWebConsole")).toHaveAttribute("href", "#version");
   await expect(page.locator("#webConsoleText")).toHaveText("安装并开始使用");
+  await expect(page.locator("#webConsoleMobileText")).toHaveText("安装");
+  await expect(page.locator("#webConsoleMobileText")).toBeVisible();
+  await expect(page.locator("#btnWebConsole")).toHaveAttribute("aria-label", "安装并开始使用");
   await expect(page.locator("#statusCheckedAt")).toContainText("最近同步");
+  await expect(page.locator("#overviewAuth")).toHaveText("无法确认");
+  await expect(page.locator("#overviewGuide")).toBeVisible();
+  await expect(page.locator("#overviewGuide li")).toHaveCount(3);
+  await expect(page.locator("#overviewLogPreview")).toContainText("原始服务日志");
+  await expect(page.locator("#overviewInstaller")).toBeVisible();
+  await expect(page.locator("#overviewInstallVersion")).toHaveText("v2.0.0");
+  await expect(page.locator("#releaseNotesDialog")).toHaveCount(0);
+  await page.locator("#overviewInstallButton").click();
+  await page.locator("#modalConfirmBtn").click();
+  await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
+  assert.equal(state.posts.filter(post => post.path === "kernel/install").length, 1);
 });
 
 browserTest("running overview provides direct console access and hides installation actions", async t => {
@@ -271,10 +672,47 @@ browserTest("running overview provides direct console access and hides installat
   await expect(page.locator("#statusCardMount .status-description")).toContainText("服务已就绪");
   await expect(page.locator("#btnWebConsole")).toHaveAttribute("href", "/app/qwenpaw/web/");
   await expect(page.locator("#webConsoleText")).toHaveText("进入 Web 对话");
-  await expect(page.locator("#statusInstallLink")).toBeHidden();
+  await expect(page.locator("#webConsoleMobileText")).toHaveText("对话");
+  await expect(page.locator("#webConsoleMobileText")).toBeHidden();
+  await expect(page.locator("#overviewInstaller")).toBeHidden();
   await expect(page.locator("#btnStartService")).toBeHidden();
   await expect(page.locator("#btnRestartService")).toBeVisible();
   await expect(page.locator("#statusCheckedAt")).toContainText("最近同步");
+  await expect(page.locator("#overviewVersion")).toHaveText("2.0.0");
+  await expect(page.locator("#overviewPort")).toHaveText("18088");
+  await expect(page.locator("#overviewAuth")).toHaveText("已开启（需要密码）");
+  await expect(page.locator("#overviewGuide")).toBeHidden();
+  await expect(page.locator("#overviewLogPreview")).toContainText("原始服务日志");
+});
+
+browserTest("PC browser opens QwenPaw Web in a new tab", async t => {
+  const { page } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix);
+  const popupPromise = page.waitForEvent("popup");
+  const requestPromise = page.context().waitForEvent("request", {
+    predicate: request => request.url() === `${origin}/app/qwenpaw/web/`,
+  });
+  await page.locator("#btnWebConsole").click();
+  const [popup, request] = await Promise.all([popupPromise, requestPromise]);
+  assert.ok(popup);
+  assert.equal(request.url(), `${origin}/app/qwenpaw/web/`);
+  await expect(page.locator("#webEntryOverlay")).toBeHidden();
+});
+
+browserTest("fnOS App opens QwenPaw Web in a full-screen overlay and closes it before leaving", async t => {
+  const { page } = await fixture(t, {
+    status: runningStatus,
+    userAgent: "Mozilla/5.0 FNAppType/fnOS FNAppVer/1.38.0",
+  });
+  await page.goto(origin + prefix);
+  const beforeHistory = await page.evaluate(() => history.length);
+  await page.locator("#btnWebConsole").click();
+  await expect(page.locator("#webEntryOverlay")).toBeVisible();
+  await expect(page.locator("#webEntryFrame")).toHaveAttribute("src", "/app/qwenpaw/web/");
+  assert.equal(await page.evaluate(() => history.length), beforeHistory + 1);
+  await page.goBack();
+  await expect(page.locator("#webEntryOverlay")).toBeHidden();
+  await expect(page.locator("#overview")).toBeVisible();
 });
 
 browserTest("manual refresh exposes busy state until status and logs finish", async t => {
@@ -293,66 +731,101 @@ browserTest("manual refresh exposes busy state until status and logs finish", as
   await expect(page.locator("#refreshDashboardBtn")).not.toHaveAttribute("aria-busy");
 });
 
-browserTest("overview shortcuts navigate mobile sections without horizontal overflow", async t => {
+browserTest("mobile overview drops the duplicated shortcut entries without horizontal overflow", async t => {
   const { page } = await fixture(t, { viewport: { width: 390, height: 844 } });
   await page.goto(origin + prefix);
-  const shortcuts = page.locator(".overview-shortcuts a");
-  await expect(shortcuts).toHaveCount(3);
-  await expect(shortcuts.nth(0)).toHaveAttribute("href", "#version");
-  await expect(shortcuts.nth(1)).toHaveAttribute("href", "#configuration");
-  await expect(shortcuts.nth(2)).toHaveAttribute("href", "#logs");
-  for (const shortcut of await shortcuts.all()) {
-    const size = await shortcut.boundingBox();
-    assert.ok(size && size.width >= 44 && size.height >= 44);
-  }
+  await expect(page.locator(".overview-shortcuts")).toHaveCount(0);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  await shortcuts.nth(1).click();
-  await expect(page.locator("#configuration")).toBeVisible();
-  await expect(page.locator('#mobileSectionNav [data-section="configuration"]')).toHaveAttribute("aria-current", "page");
+  const about = page.locator("#aboutButton");
+  await expect(about).toBeVisible();
+  await about.click();
+  await expect(page.locator("#aboutDialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#aboutDialog")).not.toBeVisible();
 });
 
-browserTest("mobile bottom navigation defaults to overview and synchronizes hash and history", async t => {
+browserTest("mobile navigation stays fixed above the safe-area bottom without covering content", async t => {
+  const { page } = await fixture(t, { viewport: { width: 390, height: 844 } });
+  await page.goto(origin + prefix);
+  const nav = page.locator("#mobileSectionNav");
+  await expect(nav).toBeVisible();
+  await expect(nav).toHaveCSS("position", "fixed");
+  const bounds = await box(nav);
+  assert.ok(Math.abs(bounds.y + bounds.height - 844) <= 1, `navigation must sit at the viewport bottom: ${bounds.y + bounds.height}`);
+  const padding = await page.locator("body").evaluate(el => parseFloat(getComputedStyle(el).paddingBottom));
+  assert.ok(padding >= 56, `content needs bottom clearance: ${padding}`);
+});
+
+browserTest("mobile navigation exposes four pages and synchronizes hash and history", async t => {
   const { page } = await fixture(t, { viewport: { width: 390, height: 844 } });
   await page.goto(origin + prefix);
   const nav = page.locator("#mobileSectionNav");
   const overview = nav.locator('[data-section="overview"]');
-  const version = nav.locator('[data-section="version"]');
+  const authorization = nav.locator('[data-section="authorization"]');
+  await expect(nav).toHaveCSS("display", "grid");
   await expect(nav).toHaveCSS("position", "fixed");
-  const bounds = await nav.boundingBox();
-  assert.ok(bounds && Math.abs(bounds.y + bounds.height - 844) <= 1);
-  assert.equal(await nav.locator("button").count(), 4);
-  for (const button of await nav.locator("button").all()) {
-    const size = await button.boundingBox();
+  assert.equal(await nav.locator("a").count(), 4);
+  await expect(nav.locator("a")).toHaveText(["概览", "配置", "授权与备份", "日志"]);
+  for (const link of await nav.locator("a").all()) {
+    const size = await link.boundingBox();
     assert.ok(size && size.width >= 44 && size.height >= 44);
   }
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await expect(overview).toHaveAttribute("aria-current", "page");
   assert.equal(await page.evaluate(() => location.hash), "#overview");
   await expect(page.locator("#overview")).toBeVisible();
+  await expect(page.locator("#version")).toBeVisible();
   await expect(page.locator("#configuration")).toBeHidden();
-  await expect(page.locator("#version")).toBeHidden();
+  await expect(page.locator("#authorization")).toBeHidden();
   await expect(page.locator("#logs")).toBeHidden();
 
-  await version.click();
-  await expect(version).toHaveAttribute("aria-current", "page");
+  await authorization.click();
+  await expect(authorization).toHaveAttribute("aria-current", "page");
   await expect(overview).not.toHaveAttribute("aria-current");
-  await expect(page.locator("#version")).toBeVisible();
+  await expect(page.locator("#authorization")).toBeVisible();
   await expect(page.locator("#overview")).toBeHidden();
-  assert.equal(await page.evaluate(() => location.hash), "#version");
+  await expect(page.locator("#version")).toBeHidden();
+  assert.equal(await page.evaluate(() => location.hash), "#authorization");
 
   await page.goBack();
   await expect(overview).toHaveAttribute("aria-current", "page");
   await expect(page.locator("#overview")).toBeVisible();
   assert.equal(await page.evaluate(() => location.hash), "#overview");
   await page.goForward();
-  await expect(version).toHaveAttribute("aria-current", "page");
-  await expect(page.locator("#version")).toBeVisible();
+  await expect(authorization).toHaveAttribute("aria-current", "page");
+  await expect(page.locator("#authorization")).toBeVisible();
   const configuration = nav.locator('[data-section="configuration"]');
   await configuration.focus();
   await page.keyboard.press("Enter");
   await expect(configuration).toHaveAttribute("aria-current", "page");
   assert.equal(await page.evaluate(() => location.hash), "#configuration");
 });
+
+for (const width of [360, 390, 768, 1440]) {
+  browserTest(`console navigation and content fit without horizontal overflow at ${width}px`, async t => {
+    const mobile = width <= 768;
+    const { page } = await fixture(t, { viewport: { width, height: mobile ? 844 : 900 } });
+    await page.goto(origin + prefix);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    assert.equal(await page.evaluate(() => document.body.scrollWidth <= innerWidth), true);
+    const nav = page.locator("#mobileSectionNav");
+    if (mobile) {
+      await expect(nav).toBeVisible();
+      await expect(nav).toHaveCSS("position", "fixed");
+      await expect(nav).toHaveCSS("display", "grid");
+      for (const link of await nav.locator("a").all()) {
+        const size = await link.boundingBox();
+        assert.ok(size && size.width >= 40 && size.height >= 44);
+      }
+    } else {
+      await expect(nav).toBeHidden();
+      await expect(page.locator("body")).toHaveCSS("display", "block");
+      for (const section of ["overview", "configuration", "authorization", "logs"]) {
+        await expect(page.locator(`#${section}`)).toBeVisible();
+      }
+    }
+  });
+}
 
 browserTest("mobile configuration is grouped as its own section", async t => {
   const { page } = await fixture(t, { viewport: { width: 390, height: 844 } });
@@ -365,8 +838,198 @@ browserTest("mobile configuration is grouped as its own section", async t => {
   }
   await expect(page.locator("#overview")).toBeHidden();
   await expect(page.locator("#version")).toBeHidden();
-  await expect(page.locator("#logs")).toBeHidden();
   await expect(page.locator('#mobileSectionNav [data-section="configuration"]')).toHaveAttribute("aria-current", "page");
+});
+
+browserTest("mobile authorization page owns directory controls and opens the upstream backup page", async t => {
+  const { page } = await fixture(t, {
+    viewport: { width: 390, height: 844 },
+    status: runningStatus,
+    userAgent: "Mozilla/5.0 FNAppType/Android FNAppVer/1.38.2",
+  });
+  await page.goto(origin + prefix);
+  await page.locator('#mobileSectionNav [data-section="authorization"]').click();
+  await expect(page.locator("#authorization")).toBeVisible();
+  await expect(page.locator("#authorized-dirs")).toBeVisible();
+  await expect(page.locator("#addAuthorizedDirBtn")).toBeVisible();
+  await expect(page.locator("#configuration")).toBeHidden();
+  await expect(page.locator("#overview")).toBeHidden();
+  await expect(page.locator("#version")).toBeHidden();
+  const backup = page.locator("#openBackupBtn");
+  await expect(backup).toBeEnabled();
+  await backup.click();
+  await expect(page.locator("#webEntryOverlay")).toBeVisible();
+  await expect(page.locator("#webEntryFrame")).toHaveAttribute("src", "/app/qwenpaw/web/backups");
+});
+
+browserTest("console reconstruction displays the directory and opens it in the native file manager", async t => {
+  const state = "recovered-auth";
+  const search = `?status=success&method=pickUserFile&state=${state}&path=%5B%22%2Fvol1%2Fwork%22%5D`;
+  const { page, state: fixtureState } = await fixture(t, {
+    initScript: ({ state, search }) => {
+      localStorage.setItem("qwenpaw.auth-result.v1", JSON.stringify({
+        state,
+        result: { status: "success", error: "", method: "pickUserFile", state, path: ["/vol1/work"] },
+        search,
+        ts: Date.now(),
+      }));
+      window.__openedNativeDirs = [];
+      Object.defineProperty(window, "parent", {
+        configurable: true,
+        value: {
+          postMessage(message) {
+            if (message.penpal === "syn") {
+              const response = new MessageEvent("message", {
+                origin: location.origin,
+                data: { penpal: "synAck", methodNames: ["openFileManager"] },
+              });
+              Object.defineProperty(response, "source", { value: window.parent });
+              window.dispatchEvent(response);
+            } else if (message.penpal === "call") {
+              window.__openedNativeDirs.push(message);
+              const response = new MessageEvent("message", {
+                origin: location.origin,
+                data: { penpal: "reply", id: message.id, resolution: "fulfilled", returnValue: null },
+              });
+              Object.defineProperty(response, "source", { value: window.parent });
+              window.dispatchEvent(response);
+            }
+          },
+        },
+      });
+    },
+    initScriptArgs: { state, search },
+  });
+  await page.goto(origin + prefix + "#authorization");
+  await expect(page.locator("#authorizedDirsList")).toContainText("/vol1/work");
+  assert.deepEqual(fixtureState.projectDirs, [{ path: "/vol1/work" }]);
+  assert.equal(await page.evaluate(() => localStorage.getItem("qwenpaw.auth-result.v1")), null);
+  await page.getByRole("button", { name: "打开目录", exact: true }).click();
+  const opened = await page.evaluate(() => window.__openedNativeDirs);
+  assert.deepEqual(opened.map(call => ({ methodName: call.methodName, args: call.args })), [
+    { methodName: "openFileManager", args: ["/vol1/work"] },
+  ]);
+});
+
+browserTest("native directory open reports the bridge result instead of claiming success", async t => {
+  const state = "native-open-failure";
+  const search = `?status=success&method=pickUserFile&state=${state}&path=%5B%22%2Fvol1%2Fwork%22%5D`;
+  const { page } = await fixture(t, {
+    initScript: ({ state, search }) => {
+      localStorage.setItem("qwenpaw.auth-result.v1", JSON.stringify({
+        state,
+        result: { status: "success", error: "", method: "pickUserFile", state, path: ["/vol1/work"] },
+        search,
+        ts: Date.now(),
+      }));
+      window.__openCalls = [];
+      Object.defineProperty(window, "parent", {
+        configurable: true,
+        value: {
+          postMessage(message) {
+            if (message.penpal === "syn") {
+              const response = new MessageEvent("message", {
+                origin: location.origin,
+                data: { penpal: "synAck", methodNames: ["openFileManager"] },
+              });
+              Object.defineProperty(response, "source", { value: window.parent });
+              window.dispatchEvent(response);
+            } else if (message.penpal === "call") {
+              window.__openCalls.push(message);
+              const response = new MessageEvent("message", {
+                origin: location.origin,
+                data: {
+                  penpal: "reply",
+                  id: message.id,
+                  resolution: "rejected",
+                  returnValueIsError: true,
+                  returnValue: { message: "E_UNSUPPORTED" },
+                },
+              });
+              Object.defineProperty(response, "source", { value: window.parent });
+              window.dispatchEvent(response);
+            }
+          },
+        },
+      });
+    },
+    initScriptArgs: { state, search },
+  });
+  await page.goto(origin + prefix + "#authorization");
+  await page.getByRole("button", { name: "打开目录", exact: true }).click();
+  await expect(page.locator("#authorizedDirsStatus")).toContainText("E_UNSUPPORTED");
+  await expect(page.locator("#authorizedDirsStatus")).toHaveAttribute("data-error", "true");
+  await expect(page.locator("#authorizedDirsStatus")).not.toContainText("已请求飞牛打开文件管理器");
+  const calls = await page.evaluate(() => window.__openCalls);
+  assert.deepEqual(calls.map(call => ({ methodName: call.methodName, args: call.args })), [
+    { methodName: "openFileManager", args: ["/vol1/work"] },
+  ]);
+});
+
+browserTest("mobile directory open uses the TrimApp Flutter envelope and app API version", async t => {
+  const { page } = await fixture(t, {
+    projectDirs: [{ path: "/vol1/work" }],
+    userAgent: "Mozilla/5.0 FNAppType/Android FNAppVer/1.38.2",
+    initScript: () => {
+      window.__openCalls = [];
+      window.flutter_inappwebview = {
+        _platformReady: true,
+        callHandler(name, path) {
+          window.__openCalls.push({ name, path });
+          if (name === "getAppMessage") {
+            return Promise.resolve(JSON.stringify({ result: JSON.stringify({ appApi: "v1.0" }) }));
+          }
+          if (name === "openFileManager") {
+            return Promise.resolve(JSON.stringify({ result: JSON.stringify(null) }));
+          }
+          return Promise.resolve(null);
+        },
+      };
+    },
+  });
+  await page.goto(origin + prefix + "#authorization");
+  await page.getByRole("button", { name: "打开目录", exact: true }).click();
+  await expect(page.locator("#authorizedDirsStatus")).toContainText("openFileManager 返回：null");
+  assert.deepEqual(await page.evaluate(() => window.__openCalls), [
+    { name: "getAppMessage", path: undefined },
+    { name: "openFileManager", path: "/vol1/work" },
+  ]);
+});
+
+browserTest("mobile directory open reports host appMessage when platform config cannot initialize", async t => {
+  const { page } = await fixture(t, {
+    projectDirs: [{ path: "/vol1/work" }],
+    userAgent: "Mozilla/5.0 FNAppType/Android FNAppVer/1.38.2",
+    initScript: () => {
+      window.__openCalls = [];
+      window.flutter_inappwebview = {
+        _platformReady: true,
+        callHandler(name, path) {
+          window.__openCalls.push({ name, path });
+          return Promise.resolve(null);
+        },
+      };
+    },
+  });
+  await page.goto(origin + prefix + "#authorization");
+  await page.getByRole("button", { name: "打开目录", exact: true }).click();
+  await expect(page.locator("#authorizedDirsStatus")).toContainText("openFileManager requires appApi >= v1.0");
+  await expect(page.locator("#authorizedDirsStatus")).toContainText("getAppMessage=null");
+  assert.deepEqual(await page.evaluate(() => window.__openCalls), [
+    { name: "getAppMessage", path: undefined },
+    { name: "getAppMessage", path: undefined },
+  ]);
+});
+
+browserTest("legacy version deep links select the combined overview page", async t => {
+  const { page } = await fixture(t, { viewport: { width: 375, height: 812 } });
+  await page.goto(origin + prefix + "#version");
+  await expect(page.locator("#overview")).toBeVisible();
+  await expect(page.locator("#version")).toBeVisible();
+  await expect(page.locator("#configuration")).toBeHidden();
+  await expect(page.locator("#authorization")).toBeHidden();
+  await expect(page.locator('#mobileSectionNav [data-section="overview"]')).toHaveAttribute("aria-current", "page");
+  assert.equal(await page.evaluate(() => location.hash), "#version");
 });
 
 browserTest("mobile section deep links and hash changes select the matching panel", async t => {
@@ -389,16 +1052,15 @@ browserTest("section selection keeps desktop content available after resizing", 
   await page.goto(origin + prefix + "#version");
   await page.setViewportSize({ width: 1200, height: 800 });
   await expect(page.locator("#mobileSectionNav")).toBeHidden();
-  for (const section of ["overview", "version", "configuration", "logs"]) {
+  for (const section of ["overview", "configuration", "authorization", "logs"]) {
     await expect(page.locator(`#${section}`)).toBeVisible();
   }
-  await expect(page.locator('.section-nav a[href="#version"]')).toHaveAttribute("aria-current", "page");
-  await page.locator('.section-nav a[href="#configuration"]').click();
-  await expect(page.locator('.section-nav a[href="#configuration"]')).toHaveAttribute("aria-current", "page");
   await page.setViewportSize({ width: 375, height: 812 });
-  await expect(page.locator("#configuration")).toBeVisible();
-  await expect(page.locator("#version")).toBeHidden();
-  await expect(page.locator('#mobileSectionNav [data-section="configuration"]')).toHaveAttribute("aria-current", "page");
+  await expect(page.locator("#mobileSectionNav")).toBeVisible();
+  await expect(page.locator("#overview")).toBeVisible();
+  await expect(page.locator("#version")).toBeVisible();
+  await expect(page.locator("#configuration")).toBeHidden();
+  await expect(page.locator('#mobileSectionNav [data-section="overview"]')).toHaveAttribute("aria-current", "page");
 });
 
 for (const [name, options] of [
@@ -411,13 +1073,13 @@ for (const [name, options] of [
     const { page } = await fixture(t, { viewport: { width: 390, height: 844 }, ...options });
     await page.goto(origin + prefix);
     await expect(page.locator("html")).not.toHaveAttribute("data-mobile-section");
-    await expect(page.locator("#mobileSectionNav")).toBeHidden();
-    for (const section of ["overview", "version", "configuration", "logs"]) {
+    await expect(page.locator("#mobileSectionNav")).toBeVisible();
+    for (const section of ["overview", "configuration", "authorization", "logs"]) {
       await expect(page.locator(`#${section}`)).toBeVisible();
     }
-    await page.locator('.section-nav a[href="#version"]').click();
+    await page.locator('#mobileSectionNav [data-section="overview"]').click();
     await expect(page.locator("html")).not.toHaveAttribute("data-mobile-section");
-    for (const section of ["overview", "version", "configuration", "logs"]) {
+    for (const section of ["overview", "configuration", "authorization", "logs"]) {
       await expect(page.locator(`#${section}`)).toBeVisible();
     }
   });
@@ -441,7 +1103,7 @@ browserTest("mobile section switches do not fetch or restart an active install p
     },
   });
   await page.goto(origin + prefix);
-  await page.locator('#mobileSectionNav [data-section="version"]').click();
+  await page.locator('#mobileSectionNav [data-section="overview"]').click();
   await openInstall(page);
   await page.locator("#btnUpMinimize").click();
   await expect.poll(() => state.statusPolls).toBeGreaterThan(0);
@@ -450,7 +1112,7 @@ browserTest("mobile section switches do not fetch or restart an active install p
     const audit = window.navigationAudit;
     const before = { fetches: audit.fetches, timers: audit.timers.length, history: history.length };
     const activePoll = audit.timers.findLast(event => event.action === "set" && event.delay === 800);
-    for (const section of ["overview", "configuration", "logs", "version", "version"]) {
+    for (const section of ["configuration", "authorization", "logs", "overview", "overview"]) {
       document.querySelector(`#mobileSectionNav [data-section="${section}"]`).click();
     }
     return {
@@ -467,6 +1129,52 @@ browserTest("mobile section switches do not fetch or restart an active install p
   const polls = state.statusPolls;
   await expect.poll(() => state.statusPolls).toBeGreaterThan(polls);
   assert.equal(state.posts.filter(post => post.path === "kernel/install").length, 1);
+});
+
+browserTest("previously retired service ports pass validation and submit", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop, status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#statusCardMount .status-text")).toHaveText("运行中");
+  for (const port of [19090, 19091]) {
+    await page.evaluate(() => { void window.changeServicePort(); });
+    await page.locator("#customModal.active #modalInput").fill(String(port));
+    await page.locator("#customModal.active #modalConfirmBtn").click();
+    await page.locator("#customModal.active #modalTitle").filter({ hasText: "修改服务端口确认" }).waitFor();
+    await page.locator("#customModal.active #modalConfirmBtn").click();
+    await expect(page.locator("#toast")).toContainText(`端口已变更为 ${port}`);
+  }
+  assert.deepEqual(state.posts.filter(post => post.path === "port").map(post => post.body.port), [19090, 19091]);
+});
+
+browserTest("unreachable status clears stale overview values until a fresh snapshot arrives", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop, status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+  await expect(page.locator("#overviewVersion")).toHaveText("2.0.0");
+  await expect(page.locator("#overviewPort")).toHaveText("18088");
+  await expect(page.locator("#overviewAuth")).toContainText("需要密码");
+
+  state.statusCode = 503;
+  await page.evaluate(() => window.fetchStatus());
+  await expect(page.locator("#statusBadge")).toContainText("状态不可达");
+  for (const selector of ["#overviewPid", "#overviewVersion", "#overviewPort", "#overviewAuth"]) {
+    await expect(page.locator(selector)).toHaveText("—");
+  }
+  await expect(page.locator("#valPort")).toHaveText("无法获取");
+  await expect(page.locator("#valAdminStatus")).toHaveText("无法获取");
+  await expect(page.locator("#statusCardMount .status-description")).toContainText("HTTP 503");
+  await expect(page.locator("#btnChangeServicePort")).toBeDisabled();
+  await page.evaluate(() => window.changeServicePort());
+  await expect(page.locator("#customModal")).not.toHaveClass(/active/);
+  await expect(page.locator("#toast")).toContainText("服务状态尚未同步");
+  assert.equal(state.posts.filter(post => post.path === "port").length, 0);
+
+  state.statusCode = 200;
+  await page.evaluate(() => window.fetchStatus());
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+  await expect(page.locator("#overviewVersion")).toHaveText("2.0.0");
+  await expect(page.locator("#overviewPort")).toHaveText("18088");
+  await expect(page.locator("#overviewAuth")).toContainText("需要密码");
 });
 
 browserTest("unreachable status stays disabled across delayed version loads and selections, then recovers", async t => {
@@ -591,29 +1299,6 @@ browserTest("version, archive, mirror and running-task controls work with keyboa
   assert.equal(state.posts.filter(post => post.path === "kernel/install").length, 0);
 });
 
-browserTest("clearing logs requires confirmation and retains displayed logs on failure", async t => {
-  const { page, state } = await fixture(t, { clearStatus: 500 });
-  await page.goto(origin + prefix);
-  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
-  const clear = page.locator('[onclick="clearTerminalLogs()"]');
-  await clear.click();
-  await expect(page.locator("#modalMessage")).toContainText("删除");
-  await page.keyboard.press("Escape");
-  assert.equal(state.posts.length, 0);
-  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
-  await clear.click();
-  await page.locator("#modalConfirmBtn").click();
-  await expect.poll(() => state.posts.length).toBe(1);
-  await expect(page.locator("#toast")).toContainText("失败");
-  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
-  state.clearStatus = 200;
-  await clear.click();
-  await page.locator("#modalConfirmBtn").click();
-  await expect.poll(() => state.posts.length).toBe(2);
-  await expect(page.locator("#logTerminal")).not.toContainText("原始服务日志");
-  assert.ok(state.posts.every(post => post.path === "logs/clear" && post.csrf === "test-token"));
-});
-
 browserTest("page reconstruction resumes only the stored task identity without another install POST", async t => {
   const { page, state } = await fixture(t);
   await page.goto(origin + prefix);
@@ -631,7 +1316,7 @@ browserTest("reopening a terminal task refreshes logs written after completion",
   const { page, state } = await fixture(t, { installLogs: [] });
   await page.goto(origin + prefix);
   await openInstall(page);
-  await expect(page.locator("#upTerminal")).toContainText("正在等待 pip 安装输出");
+  await expect(page.locator("#upTerminal")).toContainText("正在安装内核");
   state.install = { success: true, upgrading: false, running: false, seq: 42, instance: "worker-a", phase: "done" };
   await pollNow(page, state);
   await expect(page.locator("#upTitle")).toContainText("顺利完成");
@@ -641,79 +1326,42 @@ browserTest("reopening a terminal task refreshes logs written after completion",
   await expect(page.locator("#upTerminal")).toContainText("Successfully installed qwenpaw-2.0.0");
 });
 
-
-browserTest("a full first log page allows loading older entries without unbounded output", async t => {
-  const { page } = await fixture(t, { logs: Array.from({ length: 100 }, (_, index) => `日志 ${index + 1}`) });
-  const tails = [];
-  await page.route("**/app/qwenpaw/api/logs**", async route => {
-    const tail = Number(new URL(route.request().url()).searchParams.get("tail") || 100);
-    tails.push(tail);
-    await route.fulfill({ json: { success: true, logs: Array.from({ length: Math.min(tail, 200) }, (_, index) => `日志 ${index + 1}`) } });
-  });
+browserTest("terminal completion replaces the running fallback when no install logs are returned", async t => {
+  const { page, state } = await fixture(t, { installLogs: [] });
   await page.goto(origin + prefix);
-  await expect(page.locator("#logPageIndicator")).toHaveText("第 1 / 1 页");
-  await expect(page.locator("#logPrevBtn")).toBeEnabled();
-  await page.locator("#logPrevBtn").click();
-  await expect(page.locator("#logPageIndicator")).toHaveText("第 1 / 2 页");
-  await expect(page.locator("#logTerminal")).toContainText("日志 1");
-  assert.ok(tails.includes(200));
+  await openInstall(page);
+  await expect(page.locator("#upTerminal")).toContainText("正在安装内核");
+  state.install = { success: true, upgrading: false, running: false, seq: 42, instance: "worker-a", phase: "done" };
+  await pollNow(page, state);
+  await expect(page.locator("#upTitle")).toContainText("顺利完成");
+  await expect(page.locator("#upTerminal")).not.toContainText("正在安装内核");
+  await expect(page.locator("#upTerminal")).toContainText("未获取到日志输出");
+});
+
+browserTest("terminal completion clears a stale running placeholder even after logs were rendered", async t => {
+  const { page, state } = await fixture(t, { viewport: { width: 390, height: 844 } });
+  await page.goto(origin + prefix);
+  await page.locator('#mobileSectionNav a[data-section="overview"]').click();
+  await openInstall(page);
+  await page.locator("#btnUpMinimize").click();
+  await page.locator("#taskCenterButton").click();
+  await expect(page.locator("#upTerminal")).toContainText("本任务日志");
+  await page.locator("#upTerminal").evaluate(element => { element.innerText = "正在安装内核..."; });
+  state.install = { success: true, upgrading: false, running: false, seq: 42, instance: "worker-a", phase: "done" };
+  await pollNow(page, state);
+  await expect(page.locator("#upTitle")).toContainText("顺利完成");
+  await expect(page.locator("#upTerminal")).not.toContainText("正在安装内核");
+  await expect(page.locator("#upTerminal")).toContainText("安装任务已完成");
 });
 
 browserTest("navigation initialization failure preserves working management controls", async t => {
-  const { page, state } = await fixture(t, { initScript: () => {
+  const { page, state } = await fixture(t, { viewport: { width: 390, height: 844 }, initScript: () => {
     history.replaceState = () => { throw new Error("blocked history"); };
   } });
   await page.goto(origin + prefix);
   await expect(page.locator("html")).not.toHaveAttribute("data-mobile-section");
   await openInstall(page);
   await expect.poll(() => state.posts.filter(post => post.path === "kernel/install").length).toBe(1);
-});
-
-browserTest("older live log responses cannot overwrite the latest refresh", async t => {
-  const { page } = await fixture(t);
-  await page.goto(origin + prefix);
-  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
-  await page.evaluate(() => window.toggleAutoRefresh(false));
-  let release;
-  const held = new Promise(resolve => { release = resolve; });
-  t.after(() => release());
-  let requests = 0;
-  await page.route("**/app/qwenpaw/api/logs?**", async route => {
-    const sequence = ++requests;
-    if (sequence === 1) await held;
-    await route.fulfill({ json: { success: true, logs: [sequence === 1 ? "旧响应日志" : "最新响应日志"] } });
-  });
-  await page.evaluate(() => { window.pendingLogRefresh = window.fetchLogs(); });
-  await expect.poll(() => requests).toBe(1);
-  await page.evaluate(() => window.fetchLogs());
-  await expect(page.locator("#logTerminal")).toContainText("最新响应日志");
-  release();
-  await page.evaluate(() => window.pendingLogRefresh);
-  await expect(page.locator("#logTerminal")).toContainText("最新响应日志");
-  await expect(page.locator("#logTerminal")).not.toContainText("旧响应日志");
-});
-
-browserTest("log history stops requesting older pages at the 2000-line window limit", async t => {
-  const { page } = await fixture(t);
-  const tails = [];
-  await page.route("**/app/qwenpaw/api/logs?**", async route => {
-    const tail = Number(new URL(route.request().url()).searchParams.get("tail"));
-    tails.push(tail);
-    await route.fulfill({ json: { success: true, logs: Array.from({ length: Math.min(tail, 2000) }, (_, index) => `日志 ${index + 1}`) } });
-  });
-  await page.goto(origin + prefix);
-  await expect(page.locator("#logPrevBtn")).toBeEnabled();
-  await page.evaluate(() => window.toggleAutoRefresh(false));
-  for (let pageCount = 2; pageCount <= 20; pageCount++) {
-    await page.locator("#logPrevBtn").click();
-    await expect(page.locator("#logPageIndicator")).toHaveText(`第 1 / ${pageCount} 页`);
-  }
-  await expect(page.locator("#logWindowHint")).toBeVisible();
-  await expect(page.locator("#logPrevBtn")).toBeDisabled();
-  const requests = tails.length;
-  await page.evaluate(() => window.logGoPrev());
-  assert.equal(tails.length, requests);
-  assert.ok(tails.every(tail => tail <= 2000));
 });
 
 for (const outcome of ["accepted", "rejected", "network-error"]) {
@@ -747,6 +1395,68 @@ for (const outcome of ["accepted", "rejected", "network-error"]) {
   });
 }
 
+browserTest("late status success and failure cannot overwrite a newer snapshot", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop, status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+
+  let releaseFailure;
+  state.statusCode = 503;
+  state.statusHeld = new Promise(resolve => { releaseFailure = resolve; });
+  let requests = state.statusRequests;
+  void page.evaluate(() => window.fetchStatus());
+  await expect.poll(() => state.statusRequests).toBeGreaterThan(requests);
+  state.statusCode = 200;
+  state.status = { ...runningStatus, pid: 777 };
+  await page.evaluate(() => window.fetchStatus());
+  await expect(page.locator("#overviewPid")).toHaveText("777");
+  releaseFailure();
+  await expect.poll(() => page.locator("#overviewPid").innerText()).toBe("777");
+  await expect(page.locator("#statusBadge")).toContainText("运行中");
+
+  let releaseSuccess;
+  state.status = { ...runningStatus, running: false, pid: 111 };
+  state.statusHeld = new Promise(resolve => { releaseSuccess = resolve; });
+  requests = state.statusRequests;
+  void page.evaluate(() => window.fetchStatus());
+  await expect.poll(() => state.statusRequests).toBeGreaterThan(requests);
+  state.status = { ...runningStatus, pid: 888 };
+  await page.evaluate(() => window.fetchStatus());
+  await expect(page.locator("#overviewPid")).toHaveText("888");
+  releaseSuccess();
+  await expect(page.locator("#overviewPid")).toHaveText("888");
+  await expect(page.locator("#statusBadge")).toContainText("运行中");
+});
+
+browserTest("status snapshots arrive over SSE without waiting for the polling interval", async t => {
+  const { page, state } = await fixture(t, {
+    status: runningStatus,
+    initScript: () => {
+      class FakeEventSource {
+        static instances = [];
+        constructor(url) {
+          this.url = url;
+          FakeEventSource.instances.push(this);
+        }
+        addEventListener(type, listener) {
+          if (type === "snapshot") this.snapshotListener = listener;
+        }
+        close() { this.closed = true; }
+      }
+      window.EventSource = FakeEventSource;
+    },
+  });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#statusBadge")).toContainText("运行中");
+  const stream = await page.evaluate(() => window.EventSource.instances[0]?.url);
+  assert.equal(stream, "/app/qwenpaw/api/events");
+  const stopped = { ...state.status, running: false, pid: "0", startAt: 0, cpu: 0, memKB: 0 };
+  await page.evaluate(data => {
+    window.EventSource.instances[0].snapshotListener({ data: JSON.stringify(data) });
+  }, stopped);
+  await expect(page.locator("#statusBadge")).toContainText("已停止", { timeout: 500 });
+});
+
 browserTest("install submits the version confirmed before an asynchronous selection change", async t => {
   const { page, state } = await fixture(t);
   await page.goto(origin + prefix);
@@ -757,4 +1467,22 @@ browserTest("install submits the version confirmed before an asynchronous select
   await page.locator("#modalConfirmBtn").click();
   await expect.poll(() => state.posts.filter(post => post.path === "kernel/install").length).toBe(1);
   assert.equal(state.posts.find(post => post.path === "kernel/install").body.version, "2.0.0");
+});
+
+
+browserTest("polling uses low-frequency fallbacks and never requests release notes", async t => {
+  const { page, state } = await fixture(t, { initScript: () => {
+    window.pollingDelays = [];
+    const original = window.setInterval;
+    window.setInterval = (callback, delay, ...args) => {
+      window.pollingDelays.push(delay);
+      return original(callback, delay, ...args);
+    };
+  } });
+  await page.goto(origin + prefix);
+  const delays = await page.evaluate(() => window.pollingDelays);
+  assert.ok(delays.includes(15000), `missing 15-second log refresh: ${delays}`);
+  assert.ok(delays.includes(30000), `missing 30-second status fallback: ${delays}`);
+  assert.ok(!delays.includes(3500) && !delays.includes(5000), `legacy high-frequency polling remains: ${delays}`);
+  assert.equal(state.requestPaths.some(request => request.path === "kernel/release-notes"), false);
 });

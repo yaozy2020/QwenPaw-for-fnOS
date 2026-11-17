@@ -930,9 +930,10 @@ dependencies = [
 
 [[package]]
 name = "qwenpaw-supervisor"
-version = "1.2.0-rc.1"
+version = "1.2.7-rc.1"
 dependencies = [
  "axum",
+ "flate2",
  "http-body-util",
  "hyper",
  "hyper-util",

@@ -1,17 +1,14 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{Request, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde_json::json;
 
-use super::{
-    begin_operation, check_token, err_json, render_snapshot, sync_main_entry, try_operation,
-    AppState,
-};
+use super::{begin_operation, check_token, err_json, sync_main_entry, try_operation, AppState};
 use crate::{
     install::{phase_wire, InstallChannel},
     management::{InstallAcceptance, ManagementCore},
@@ -58,11 +55,7 @@ pub(super) async fn kernel_install(
     };
     match acceptance {
         InstallAcceptance::Started { seq } => {
-            let snap_state = state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                snap_state.events.publish(render_snapshot(&snap_state));
-            })
-            .await;
+            state.events.invalidate();
             Json(json!({"ok": true, "success": true, "message": "安装已开始", "seq": seq, "instance": super::instance_id()}))
                 .into_response()
         }
@@ -80,6 +73,49 @@ pub(super) async fn kernel_install(
 
 fn version_index_url(mirror: &str) -> Result<reqwest::Url, crate::version_index::IndexError> {
     crate::version_index::index_url(mirror)
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct ReleaseNotesQuery {
+    version: String,
+}
+
+pub(super) async fn kernel_release_notes(
+    State(state): State<AppState>,
+    Query(query): Query<ReleaseNotesQuery>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let version = query
+        .version
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .to_string();
+    if crate::version::Pep440Version::parse(&version).is_none() {
+        return err_json(StatusCode::BAD_REQUEST, "版本号无效");
+    }
+    let lookup_version = version.clone();
+    let notes = tokio::task::spawn_blocking(move || crate::release_notes::lookup(&lookup_version))
+        .await
+        .unwrap_or_else(|error| crate::release_notes::NotesResponse {
+            available: false,
+            note: String::new(),
+            note_zh: String::new(),
+            source: "unavailable".into(),
+            error: format!("更新日志查询失败: {error}"),
+        });
+    Json(json!({
+        "success": true,
+        "version": version,
+        "available": notes.available,
+        "note": notes.note,
+        "note_zh": notes.note_zh,
+        "source": notes.source,
+        "error": notes.error,
+    }))
+    .into_response()
 }
 
 pub(super) async fn kernel_versions(
@@ -163,6 +199,7 @@ pub(super) async fn kernel_uninstall(
     let was_running = state.kernel.status_now().running;
     state.kernel.stop().await;
     if let Some(error) = super::lifecycle::stop_verification_error(&state.kernel) {
+        state.events.invalidate();
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
     }
     let home = state.home_dir.clone();
@@ -184,11 +221,13 @@ pub(super) async fn kernel_uninstall(
                 let kernel = Arc::clone(&state.kernel);
                 let _ = tokio::task::spawn_blocking(move || kernel.spawn()).await;
             }
+            state.events.invalidate();
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
         }
         Err(RemoveKernelFilesError::PartialRemoval(error)) => {
             state.kernel.invalidate_version();
             state.install.block_recovery(error.clone());
+            state.events.invalidate();
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
         }
     };
@@ -199,10 +238,7 @@ pub(super) async fn kernel_uninstall(
         tokio::task::spawn_blocking(move || sync_main_entry(std::path::Path::new(&ui_cfg), false))
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(format!("spawn_blocking join: {e}"))));
-    let snap_state = state.clone();
-    tokio::task::spawn_blocking(move || {
-        snap_state.events.publish(render_snapshot(&snap_state));
-    });
+    state.events.invalidate();
     if let Err(e) = entry_result {
         return err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -256,11 +292,7 @@ pub(super) async fn kernel_pin(
     .unwrap_or_else(|e| Err(std::io::Error::other(e)));
     match wrote {
         Ok(_) => {
-            let snap_state = state.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                snap_state.events.publish(render_snapshot(&snap_state));
-            })
-            .await;
+            state.events.invalidate();
             Json(json!({"ok": true, "message": format!("版本钉已更新: {}", req.version)}))
                 .into_response()
         }
@@ -426,6 +458,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     async fn accepted_mirror_is_snapshotted_before_a_later_mirror_change() {
         let dir = TestDir::new("install-mirror-snapshot");
         let state = dir.state(crate::api::test_support::free_port());
+        let mut events = state.events.subscribe();
         install_python_with_installer_recorder(&dir, &state);
         let bootstrap_started = dir.0.join("bootstrap-started");
         std::fs::write(dir.0.join("block-bootstrap"), "block").unwrap();
@@ -450,6 +483,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
         }
 
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(events.try_recv().unwrap(), "");
         assert!(
             started,
             "accepted install should invoke bootstrap: {}",
@@ -561,6 +595,28 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     }
 
     #[tokio::test]
+    async fn release_notes_reject_invalid_versions_before_fetching() {
+        let dir = TestDir::new("release-notes-invalid-version");
+        let state = dir.state(crate::api::test_support::free_port());
+        let request = Request::builder()
+            .method("GET")
+            .uri("/kernel/release-notes?version=latest")
+            .header("X-Supervisor-Token", &state.token)
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = kernel_release_notes(
+            axum::extract::State(state),
+            axum::extract::Query(ReleaseNotesQuery {
+                version: "latest".into(),
+            }),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn invalid_persisted_version_mirror_returns_bad_gateway_without_fallback() {
         let dir = TestDir::new("invalid-version-mirror");
         let state = dir.state(crate::api::test_support::free_port());
@@ -617,11 +673,55 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
             .unwrap()
     }
 
+    fn pin_request(state: &AppState, version: &str) -> Request<axum::body::Body> {
+        Request::builder()
+            .method("POST")
+            .header("X-Supervisor-Token", &state.token)
+            .body(axum::body::Body::from(
+                json!({"version": version}).to_string(),
+            ))
+            .unwrap()
+    }
+
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn kernel_pin_publishes_after_persisting_the_new_pin() {
+        let dir = TestDir::new("kernel-pin-notification");
+        let state = dir.state(crate::api::test_support::free_port());
+        let mut events = state.events.subscribe();
+
+        let response = kernel_pin(State(state.clone()), pin_request(&state, "2.3.0")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&state.var_dir).join("qwenpaw-version"))
+                .unwrap(),
+            "2.3.0\n"
+        );
+        assert_eq!(events.try_recv().unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn kernel_uninstall_publishes_recovery_state_for_pending_removal() {
+        let dir = TestDir::new("uninstall-pending-journal-notification");
+        let state = dir.state(crate::api::test_support::free_port());
+        let journal = std::path::Path::new(&state.var_dir).join("kernel-uninstall.json");
+        std::fs::write(&journal, "pending").unwrap();
+        let mut events = state.events.subscribe();
+
+        let response = kernel_uninstall(State(state.clone()), uninstall_request(&state)).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(events.try_recv().unwrap(), "");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&crate::api::render_snapshot(&state)).unwrap();
+        assert_eq!(snapshot["install"]["recovery_required"], true);
     }
 
     #[tokio::test]
@@ -682,6 +782,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
         std::fs::create_dir_all(home.join("venv/bin")).unwrap();
         std::fs::write(home.join("venv/bin/python3"), "runtime").unwrap();
         std::fs::write(var.join("qwenpaw-version"), "2.3.0\n").unwrap();
+        let mut events = state.events.subscribe();
 
         let response = kernel_uninstall(State(state.clone()), uninstall_request(&state)).await;
         let status = response.status();
@@ -690,6 +791,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(value["success"], false);
+        assert_eq!(events.try_recv().unwrap(), "");
         assert!(!home.join("venv").exists());
         assert!(!var.join("qwenpaw-version").exists());
         assert!(message.contains("桌面入口更新失败"), "{message}");

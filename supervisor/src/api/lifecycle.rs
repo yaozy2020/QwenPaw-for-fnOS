@@ -8,7 +8,7 @@ use axum::{
 };
 use serde_json::json;
 
-use super::{begin_operation, check_token, err_json, render_snapshot, AppState};
+use super::{begin_operation, check_token, err_json, AppState};
 
 pub(super) async fn start(
     State(state): State<AppState>,
@@ -40,10 +40,7 @@ pub(super) async fn start(
         .unwrap_or_else(|e| Err(e.to_string()));
     match res {
         Ok(pid) => {
-            let snap_state = state.clone();
-            tokio::task::spawn_blocking(move || {
-                snap_state.events.publish(render_snapshot(&snap_state));
-            });
+            state.events.invalidate();
             Json(json!({"ok": true, "success": true, "message": "QwenPaw 已启动", "pid": pid}))
                 .into_response()
         }
@@ -74,10 +71,7 @@ pub(super) async fn stop(
     if let Some(error) = stop_verification_error(&state.kernel) {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
     }
-    let snap_state = state.clone();
-    tokio::task::spawn_blocking(move || {
-        snap_state.events.publish(render_snapshot(&snap_state));
-    });
+    state.events.invalidate();
     Json(json!({"ok": true, "success": true, "message": "QwenPaw 已停止"})).into_response()
 }
 
@@ -102,10 +96,7 @@ pub(super) async fn restart(
         .unwrap_or_else(|e| Err(e.to_string()));
     match res {
         Ok(pid) => {
-            let snap_state = state.clone();
-            tokio::task::spawn_blocking(move || {
-                snap_state.events.publish(render_snapshot(&snap_state));
-            });
+            state.events.invalidate();
             Json(json!({"ok": true, "success": true, "message": "QwenPaw 已重启", "pid": pid}))
                 .into_response()
         }
@@ -116,7 +107,7 @@ pub(super) async fn restart(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::test_support::TestDir;
+    use crate::api::test_support::{install_python, serve_reserved_port, KernelGuard, TestDir};
 
     fn request(state: &AppState) -> Request<axum::body::Body> {
         Request::builder()
@@ -124,6 +115,29 @@ mod tests {
             .header("X-Supervisor-Token", &state.token)
             .body(axum::body::Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lifecycle_successes_publish_invalidation_signals() {
+        let dir = TestDir::new("api-lifecycle-invalidation");
+        let port = crate::api::test_support::free_port();
+        let state = dir.state(port);
+        let _server = serve_reserved_port(port);
+        let _kernel = KernelGuard(Arc::clone(&state.kernel));
+        install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
+
+        let mut events = state.events.subscribe();
+        let response = start(State(state.clone()), request(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(events.try_recv().unwrap(), "");
+
+        let response = stop(State(state.clone()), request(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(events.try_recv().unwrap(), "");
+
+        let response = restart(State(state.clone()), request(&state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(events.try_recv().unwrap(), "");
     }
 
     #[tokio::test]

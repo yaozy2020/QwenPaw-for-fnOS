@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.2.0-8-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.2.7-7-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
@@ -14,6 +14,7 @@
 - 查看运行状态、端口、日志和安装进度。
 - 选择稳定版、测试版或历史版本；安装失败时保留或恢复原运行环境。
 - 修改下载源、内核端口、独立 Web 反代端口和日志级别。
+- 手机端以固定底栏切换概览与版本、配置、授权与备份、日志四页；桌面端直接展示完整单页。通过飞牛授权绑定工作区目录，并进入上游备份管理。
 - 手机或浏览器切换页面后恢复正在进行的安装任务。
 - 仅卸载内核并保留配置、记忆和管理员认证，或按卸载向导彻底删除应用数据。
 
@@ -46,6 +47,13 @@
 
 反代端口支持自动分配和手动修改。启动时若目标端口已被占用，会自动选择空闲端口；修改时先绑定新端口，成功后再切换，失败保留原端口。当前实际端口以控制台显示为准。
 
+## 当前版本候选与兼容边界
+
+- 当前 manifest 版本为 `1.2.7-7`。候选产物：`build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,773,890 字节，SHA256 `382684beadb7c61349d14fe8bea1e5bb63edeb0ce4a2163e8777185d84f57e6c`；包内 musl supervisor SHA256 `d3b0ca12241369a73bb5219d0baa6f2fd7f65e069523bf64c5ce3660f64b91e2`。这是测试候选，不是生产发布。
+- Console 以官方 v2.3.0 为基线，限制动态资源预加载并发为 16，保留 base-path 与浏览器 Cookie 清理；不再回退下载其他版本源码。历史补丁哈希与 `/proc/exe` 权限回退保持；全新安装可接管已登记或唯一受管 orphan supervisor，多实例或身份不明仍失败关闭。
+- Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项、Rust 388+13 项及严格 Clippy、preflight、build/FPK audit 通过。首屏 2.921 MiB raw、0.792 MiB Brotli；无旧 PID 登记的隔离重装 8.9 秒完成。
+- 远程应用中心已安装 `1.2.7-7 running`，内核 `2.3.0` 正常运行且 `recovery_required=false`。主 Web 聊天输入与设置深链刷新通过，资源/API/页面错误均为 0；实测资源峰值 18，不宣称严格限制为 16。CLI `read_last_api()`、第三方频道回调和旧版 Starlette 不属于本候选的完整兼容承诺。
+
 上游 WebSocket 目前不由此外壳代理，相关请求返回 501；主 Console 的 HTTP、鉴权和 SSE 流程走 Gateway 或独立反代。独立反代默认仅监听回环地址；开启外部访问时，受保护 API 仍需有效的 QwenPaw 登录会话。首次进入上游鉴权页默认使用中文，已有浏览器语言选择不会被覆盖。
 
 ## 端口与下载源
@@ -56,7 +64,7 @@
 
 ## 升级与回退
 
-外壳升级不改变用户主动选择的内核版本。已有运行环境正常时不重新安装内核；环境缺损且存在精确版本钉时，才按该版本修复。
+外壳升级不改变用户主动选择的内核版本。已有运行环境正常时不重新安装内核；环境缺损且存在精确版本钉时，才按该版本修复。轻量候选不再因缺少自包含补丁指纹而重建既有 2.3.0 环境。
 
 fnOS 不允许直接原位安装低版本 FPK。需要回到旧外壳时，先确认没有未决事务及数据格式不兼容，再通过官方「保留数据卸载 → 安装旧包 → 验证」流程操作。不要直接覆盖安装低版本。
 

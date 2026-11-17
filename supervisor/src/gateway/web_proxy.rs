@@ -70,6 +70,10 @@ async fn forward_impl(
     secure: bool,
     rewrite_paths: bool,
 ) -> Response {
+    let native_base_path = crate::install::base_path_patch::active(
+        &std::path::Path::new(&state.app.core.home_dir).join("venv"),
+    );
+    let rewrite_paths = rewrite_paths && !native_base_path;
     let method = request.method().clone();
     let head_request = method == Method::HEAD;
     if !matches!(
@@ -98,7 +102,11 @@ async fn forward_impl(
         request.headers(),
         secure,
         &forwarded_host,
-        if rewrite_paths { WEB_PREFIX } else { "/" },
+        if rewrite_paths || native_base_path {
+            WEB_PREFIX
+        } else {
+            "/"
+        },
     ) {
         Ok(headers) => headers,
         Err(status) => return status.into_response(),
@@ -122,11 +130,18 @@ async fn forward_impl(
     if !rewrite_paths
         && (is_config_path(path) || (state.public_access && requires_upstream_auth(path, &method)))
     {
-        if let Err(status) = verify_upstream_session(state, port, &headers).await {
+        if let Err(status) = verify_upstream_session(state, port, &headers, native_base_path).await
+        {
             return status.into_response();
         }
     }
-    let mut target = format!("http://127.0.0.1:{port}{path}");
+    let already_prefixed = path == WEB_PREFIX || path.starts_with(&format!("{WEB_PREFIX}/"));
+    let upstream_path = if native_base_path && !already_prefixed {
+        format!("{WEB_PREFIX}{path}")
+    } else {
+        path.to_owned()
+    };
+    let mut target = format!("http://127.0.0.1:{port}{upstream_path}");
     if let Some(query) = request.uri().query() {
         target.push('?');
         target.push_str(query);
@@ -158,7 +173,7 @@ async fn forward_impl(
         .and_then(|value| value.to_str().ok());
     let rewrite_kind = content_type
         .and_then(rewrite_kind)
-        .filter(|kind| rewrite_paths || matches!(kind, RewriteKind::Html));
+        .filter(|kind| !native_base_path && (rewrite_paths || matches!(kind, RewriteKind::Html)));
     let is_sse = content_type
         .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"));
     let upstream_body = upstream.into_body();
@@ -166,7 +181,7 @@ async fn forward_impl(
         if head_request {
             Body::empty()
         } else {
-            let permit = match state.sse_connections.clone().try_acquire_owned() {
+            let permit = match state.upstream_sse_connections.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => return super::retryable_overload(),
             };
@@ -233,6 +248,14 @@ async fn forward_impl(
         Body::new(upstream_body)
     };
 
+    if (rewrite_paths || native_base_path) && status == StatusCode::OK && is_hashed_asset(path) {
+        response_headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+        response_headers.remove(header::LAST_MODIFIED);
+    }
+
     let mut response = Response::builder()
         .status(status)
         .body(body)
@@ -288,8 +311,14 @@ async fn verify_upstream_session(
     state: &GatewayState,
     port: u16,
     headers: &HeaderMap,
+    native_base_path: bool,
 ) -> Result<(), StatusCode> {
-    let mut request = Request::get(format!("http://127.0.0.1:{port}/api/auth/verify"))
+    let verify_path = if native_base_path {
+        format!("{WEB_PREFIX}/api/auth/verify")
+    } else {
+        "/api/auth/verify".to_owned()
+    };
+    let mut request = Request::get(format!("http://127.0.0.1:{port}{verify_path}"))
         .body(Body::empty())
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let cookie = headers.get(header::COOKIE);
@@ -349,6 +378,25 @@ enum RewriteKind {
     Html,
     JavaScript,
     Css,
+}
+
+fn is_hashed_asset(path: &str) -> bool {
+    let Some(filename) = path.strip_prefix("/assets/") else {
+        return false;
+    };
+    if filename.contains('/') {
+        return false;
+    }
+    let Some((stem, extension)) = filename.rsplit_once('.') else {
+        return false;
+    };
+    !extension.is_empty()
+        && stem.rsplit_once('-').is_some_and(|(_, hash)| {
+            hash.len() == 8
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
 }
 
 fn is_rewritable_path(path: &str) -> bool {
@@ -572,6 +620,10 @@ fn rewrite_javascript(text: &str) -> String {
             r#"function vE(){return"/app/qwenpaw/web/api"}"#,
         )
         .replace(
+            r#"const Ri=lP(),Yl="#,
+            &format!(r#"const Ri="{WEB_PREFIX}",Yl="#),
+        )
+        .replace(
             r#"function Wa(e){return/^\/console(?:\/|$)/.test(e)?AA:void 0}"#,
             r#"function Wa(e){return/^\/app\/qwenpaw\/web\/console(?:\/|$)/.test(e)?"/app/qwenpaw/web/console":/^\/app\/qwenpaw\/web(?:\/|$)/.test(e)?"/app/qwenpaw/web":/^\/console(?:\/|$)/.test(e)?AA:void 0}"#,
         )
@@ -606,6 +658,10 @@ fn rewrite_javascript(text: &str) -> String {
         );
     }
     rewritten = rewritten
+        .replace(
+            r#"`/${H?"logo-dark.svg":"logo-light.svg"}`"#,
+            &format!(r#"`{WEB_PREFIX}/${{H?"logo-dark.svg":"logo-light.svg"}}`"#),
+        )
         .replace(r#""/api""#, &format!(r#""{WEB_PREFIX}/api""#))
         .replace(r#"'/api'"#, &format!(r#"'{WEB_PREFIX}/api'"#));
     rewritten = rewrite_quoted_asset_prefix(&rewritten, "/api/", &format!("{WEB_PREFIX}/api/"));
@@ -946,7 +1002,7 @@ mod tests {
 
     #[test]
     fn javascript_rewrites_root_assets_for_all_quote_forms_without_touching_other_paths() {
-        let source = r#"const a="/assets/entry.js",b='/assets/login.js',c=`/assets/ui.css`,d="/app/qwenpaw/web/assets/prefixed.js",e="/login",f=`/${w?"logo-dark.svg":"logo-light.svg"}`,g=`/${i?"logo-dark.svg":"logo-light.svg"}`;"#;
+        let source = r#"const a="/assets/entry.js",b='/assets/login.js',c=`/assets/ui.css`,d="/app/qwenpaw/web/assets/prefixed.js",e="/login",f=`/${w?"logo-dark.svg":"logo-light.svg"}`,g=`/${i?"logo-dark.svg":"logo-light.svg"}`,h=`/${H?"logo-dark.svg":"logo-light.svg"}`;"#;
         let rewritten = rewrite_javascript(source);
 
         for expected in [
@@ -957,11 +1013,25 @@ mod tests {
             r#""/login""#,
             r#"`/app/qwenpaw/web/${w?"logo-dark.svg":"logo-light.svg"}`"#,
             r#"`/app/qwenpaw/web/${i?"logo-dark.svg":"logo-light.svg"}`"#,
+            r#"`/app/qwenpaw/web/${H?"logo-dark.svg":"logo-light.svg"}`"#,
         ] {
             assert!(rewritten.contains(expected), "missing {expected}");
         }
         assert!(!rewritten.contains("/app/qwenpaw/web/app/qwenpaw/web/assets/"));
         assert_eq!(rewrite_javascript(&rewritten), rewritten);
+    }
+
+    #[test]
+    fn javascript_rewrites_qwenpaw_230_login_logo_expression_from_wheel() {
+        let source = include_str!("testdata/qwenpaw-2.3.0-login-logo.js").trim_end();
+        let rewritten = rewrite_javascript(source);
+
+        assert_eq!(
+            rewritten,
+            r#"e.jsx("img",{src:`/app/qwenpaw/web/${H?"logo-dark.svg":"logo-light.svg"}`,alt:"QwenPaw",style:{height:48,marginBottom:12}})"#
+        );
+        let other_identifier = r#"`/${Q?"logo-dark.svg":"logo-light.svg"}`"#;
+        assert_eq!(rewrite_javascript(other_identifier), other_identifier);
     }
 
     #[test]
@@ -1016,6 +1086,40 @@ mod tests {
         assert!(rewritten
             .contains(r#"return /^\/app\/qwenpaw\/web(?:\/|$)/.test(e)?"/app/qwenpaw/web":Ai&&"#));
         assert_eq!(rewrite_javascript(&rewritten), rewritten);
+    }
+
+    #[test]
+    fn javascript_rewrites_qwenpaw_230_router_basename() {
+        let source = r#"function lP(e){const t="/console".replace(/^\/+|\/+$/g,"");return t?`/${t}`:""}const Ri=lP(),Yl="osPawAppId";function or(e){return Ri&&(e===Ri||e.startsWith(`${Ri}/`))?Ri:void 0}function zo(e,t){return`${or(e)??""}${t}`}const openSession=e=>zo(location.pathname,`/chat/${encodeURIComponent(e.id)}`);"#;
+        let rewritten = rewrite_javascript(source);
+
+        assert!(rewritten.contains(r#"const Ri="/app/qwenpaw/web",Yl="osPawAppId""#));
+        assert!(rewritten
+            .contains(r#"function or(e){return Ri&&(e===Ri||e.startsWith(`${Ri}/`))?Ri:void 0}"#));
+        assert!(rewritten.contains(r#"zo(location.pathname,`/chat/${encodeURIComponent(e.id)}`)"#));
+        assert_eq!(rewrite_javascript(&rewritten), rewritten);
+    }
+
+    #[test]
+    fn immutable_cache_is_limited_to_hashed_asset_files() {
+        for path in [
+            "/assets/index-opcB8AGu.js",
+            "/assets/ui-vendor-UcHCQ9Ai.css",
+            "/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
+        ] {
+            assert!(is_hashed_asset(path), "must cache {path}");
+        }
+        for path in [
+            "/",
+            "/login",
+            "/api/status",
+            "/assets/index.js",
+            "/assets/nested/index-opcB8AGu.js",
+            "/assets/index-opcB8AGu.js/extra",
+            "/assets/short-abc.js",
+        ] {
+            assert!(!is_hashed_asset(path), "must not cache {path}");
+        }
     }
 
     #[test]

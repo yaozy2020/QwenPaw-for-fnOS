@@ -87,6 +87,7 @@ test("Gateway transport exposes the prefixed console over real UDS and enforces 
   const response = await page.goto(prefix);
   expect(response?.status(), "Gateway console entry must exist").toBe(200);
   await expect(page.locator("#statusCardMount .status-text")).toHaveText("内核未安装");
+  await expect(page.locator("#releaseNotesDialog")).toHaveCount(0);
   const csrf = (await page.context().cookies()).find(cookie => cookie.name === "__Host-qwenpaw_csrf");
   expect(csrf).toMatchObject({ secure: true, path: "/", sameSite: "Lax" });
   expect(csrf?.value).toMatch(/^\d+\.[a-f0-9]{64}\.[a-f0-9]{64}$/);
@@ -614,7 +615,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   await expect(webConsole).not.toHaveAttribute("target", "_blank");
   const webConsoleUrl = new URL((await webConsole.getAttribute("href"))!, page.url());
   expect(webConsoleUrl.origin).toBe(origin);
-  expect(webConsoleUrl.pathname).toBe(mainEntry.url);
+  expect(webConsoleUrl.pathname).toBe(`${prefix}web/`);
   expect(webConsoleUrl.port).toBe(new URL(page.url()).port);
   expect(webConsoleUrl.port).not.toBe(String(targetPort));
   const changedHealth = await request.get(`http://127.0.0.1:${targetPort}/api/version`);

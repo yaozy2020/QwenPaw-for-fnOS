@@ -101,8 +101,8 @@ impl WebProxyManager {
 async fn bind(port: u16, public: bool) -> io::Result<(TcpListener, u16)> {
     let host = if public { "0.0.0.0" } else { "127.0.0.1" };
     let listener = TcpListener::bind((host, port)).await?;
-    let port = listener.local_addr()?.port();
-    Ok((listener, port))
+    let actual_port = listener.local_addr()?.port();
+    Ok((listener, actual_port))
 }
 
 async fn bind_after_close(port: u16, public: bool) -> io::Result<(TcpListener, u16)> {

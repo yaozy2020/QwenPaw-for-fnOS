@@ -205,9 +205,13 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     }
   }
 
-  function get<T>(route: string, routeParams = ""): Promise<ApiResult<T>> {
+  function getWithTimeout<T>(route: string, routeParams: string, timeoutMs: number): Promise<ApiResult<T>> {
     const query = routeParams ? `${routeParams}&_t=${now()}` : `_t=${now()}`;
-    return request<T>(`${base}/${route}?${query}`, undefined, readTimeoutMs);
+    return request<T>(`${base}/${route}?${query}`, undefined, timeoutMs);
+  }
+
+  function get<T>(route: string, routeParams = ""): Promise<ApiResult<T>> {
+    return getWithTimeout(route, routeParams, readTimeoutMs);
   }
 
   function post<T>(route: string, body?: unknown, keepalive = false): Promise<ApiResult<T>> {

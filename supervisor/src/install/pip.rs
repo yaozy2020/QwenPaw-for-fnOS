@@ -2,7 +2,7 @@ use super::{truncate_utf8, uv_args, uv_bootstrap_args, InstallChannel, InstallSt
 use std::{
     io::{self, Read, Write},
     os::fd::AsRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -27,6 +27,64 @@ const LOG_LINE_CAP: usize = 4096;
 const LOG_TOTAL_CAP: u64 = 1024 * 1024;
 const NO_OUTPUT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+fn pip_trusted_host(mirror: &str) -> Option<&str> {
+    mirror
+        .strip_prefix("http://")
+        .and_then(|remainder| remainder.split('/').next())
+        .filter(|authority| !authority.is_empty())
+}
+
+fn installer_cache_dir(path: &Path, uid: libc::uid_t) -> io::Result<PathBuf> {
+    if !cache_requires_isolation(path, uid) {
+        return Ok(path.to_path_buf());
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("安装缓存路径缺少目录名"))?;
+    let fallback = path.with_file_name(format!("{}-uid-{uid}", name.to_string_lossy()));
+    if cache_requires_isolation(&fallback, uid) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("安装缓存包含其他用户或链接条目: {}", fallback.display()),
+        ));
+    }
+    Ok(fallback)
+}
+
+fn cache_requires_isolation(path: &Path, uid: libc::uid_t) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut pending = vec![path.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(current) = pending.pop() {
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return true,
+        };
+        if (current == path && metadata.file_type().is_symlink()) || metadata.uid() != uid {
+            return true;
+        }
+        if metadata.is_dir() {
+            let entries = match std::fs::read_dir(&current) {
+                Ok(entries) => entries,
+                Err(_) => return true,
+            };
+            for entry in entries {
+                match entry {
+                    Ok(entry) => pending.push(entry.path()),
+                    Err(_) => return true,
+                }
+            }
+        }
+        visited += 1;
+        if visited > 200_000 {
+            return true;
+        }
+    }
+    false
+}
 
 #[derive(Clone, Copy)]
 enum InstallerTool {
@@ -73,7 +131,7 @@ where
     }
     let mut pending = Vec::new();
     let mut chunk = [0u8; 8192];
-    while !stop.load(Ordering::Acquire) {
+    loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(size) => {
@@ -135,6 +193,8 @@ impl InstallState {
                 InstallerTool::PipBootstrap => "pip-cache",
                 InstallerTool::Uv => "uv-cache",
             });
+        let cache_dir = installer_cache_dir(&cache_dir, unsafe { libc::geteuid() })
+            .map_err(|error| format!("选择安装缓存目录失败: {error}"))?;
         std::fs::create_dir_all(&cache_dir)
             .map_err(|error| format!("创建安装缓存目录失败: {error}"))?;
         let mut cmd = Command::new(python);
@@ -143,6 +203,9 @@ impl InstallState {
                 cmd.arg("-m").arg("pip").args(uv_bootstrap_args());
                 if !mirror.is_empty() {
                     cmd.env("PIP_INDEX_URL", mirror);
+                }
+                if let Some(host) = pip_trusted_host(mirror) {
+                    cmd.env("PIP_TRUSTED_HOST", host);
                 }
             }
             InstallerTool::Uv => {
@@ -363,5 +426,49 @@ mod reader_tests {
         stop.store(true, Ordering::Release);
         reader_thread.join().unwrap();
         assert!(stopped_at.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn reader_drains_output_already_queued_when_stop_is_requested() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let reader = unsafe { File::from_raw_fd(fds[0]) };
+        let mut writer = unsafe { File::from_raw_fd(fds[1]) };
+        writer.write_all(b"queued pip output\n").unwrap();
+        let stop = AtomicBool::new(true);
+        let mut lines = Vec::new();
+
+        read_pipe_lines(reader, &stop, |line| {
+            lines.push(String::from_utf8_lossy(line).into_owned());
+        });
+
+        assert_eq!(lines, ["queued pip output"]);
+    }
+
+    #[test]
+    fn mixed_uid_or_linked_cache_uses_a_per_uid_fallback() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-cache-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = dir.join("uv-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("entry"), b"cache").unwrap();
+        let uid = unsafe { libc::geteuid() };
+
+        assert_eq!(installer_cache_dir(&cache, uid).unwrap(), cache);
+        std::os::unix::fs::symlink(cache.join("entry"), cache.join("owned-link")).unwrap();
+        assert_eq!(
+            installer_cache_dir(&cache, uid).unwrap(),
+            cache,
+            "uv 在当前用户缓存内创建的链接不得触发隔离"
+        );
+        let fallback = installer_cache_dir(&cache, uid + 1).unwrap();
+        assert_eq!(fallback, dir.join(format!("uv-cache-uid-{}", uid + 1)));
+
+        std::os::unix::fs::symlink(&cache, dir.join("linked-cache")).unwrap();
+        assert_eq!(
+            installer_cache_dir(&dir.join("linked-cache"), uid).unwrap(),
+            dir.join(format!("linked-cache-uid-{uid}"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

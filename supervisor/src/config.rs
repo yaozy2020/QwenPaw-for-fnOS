@@ -51,6 +51,8 @@ fn value_or(value: Option<&str>, fallback: &str) -> String {
     }
 }
 
+const DEFAULT_SUPERVISOR_PORT: u16 = 18091;
+
 fn parse_port(value: Option<&str>, fallback: u16) -> u16 {
     value
         .and_then(|value| value.trim().parse().ok())
@@ -98,10 +100,10 @@ fn parse_config(values: ConfigValues) -> (Config, Option<String>) {
         .service_port_file
         .as_deref()
         .and_then(|value| value.trim().parse::<u16>().ok())
-        .filter(|value| (1024..=65535).contains(value) && *value != 19091);
+        .filter(|value| (1024..=65535).contains(value));
     let configured_kernel_port =
         file_port.unwrap_or_else(|| parse_port(values.service_port.as_deref(), 18088));
-    let listen_port = parse_port(values.supervisor_port.as_deref(), 19090);
+    let listen_port = parse_port(values.supervisor_port.as_deref(), DEFAULT_SUPERVISOR_PORT);
     let (kernel_port, warning) = if configured_kernel_port == listen_port {
         let fallback = if listen_port == 18088 { 18089 } else { 18088 };
         (
@@ -268,6 +270,23 @@ mod tests {
             conflicting.supervisor_binary,
             PathBuf::from("/var/apps/qwenpaw/target/bin/qwenpaw-supervisor")
         );
+    }
+
+    #[test]
+    fn previously_retired_ports_are_accepted_by_listener_config() {
+        for allowed in [19090, 19091] {
+            let (config, _) = parse_config(ConfigValues {
+                service_port: Some(allowed.to_string()),
+                service_port_file: Some(allowed.to_string()),
+                supervisor_port: Some(allowed.to_string()),
+                web_proxy_port: Some(allowed.to_string()),
+                ..ConfigValues::default()
+            });
+            assert_eq!(config.listen_port, allowed);
+            assert_eq!(config.kernel_port, 18088);
+            assert_eq!(config.web_proxy_port, Some(allowed));
+        }
+        assert_eq!(parse_config(ConfigValues::default()).0.listen_port, 18091);
     }
 
     #[test]

@@ -341,6 +341,33 @@ def test_authentication_and_methods(fixture):
     print(f"PASS: {len(routes)} routes reject missing/wrong tokens and wrong methods with zero fixture side effects")
 
 
+def test_logs(fixture):
+    fixture.start()
+    path = fixture.root / "var/qwenpaw.log"
+    lines = [f"日志 {index}" for index in range(3000)]
+    contents = b"older line\n" * 1_000_000 + ("\r\n".join(lines) + "\r\n").encode()
+    path.write_bytes(contents)
+    for query, count in (("", 80), ("?tail=100", 100), ("?tail=2000", 2000),
+                         ("?tail=9999", 2000), ("?tail=0", 1), ("?tail=bad", 80)):
+        code, result = fixture.request("/logs" + query)
+        assert code == 200 and result == {"success": True, "logs": lines[-count:]}, (query, code, result)
+    assert path.read_bytes() == contents, "reading logs changed the file"
+
+    install = fixture.request("/status")[1]["install"]
+    task = f"seq={install['seq']}&instance={install['instance']}"
+    pip_path = fixture.root / "var/qwenpaw-upgrade.log.pip"
+    pip_path.write_bytes(contents)
+    code, result = fixture.request(f"/kernel/install-log?{task}&tail=9999")
+    assert code == 200 and result == {"success": True, "logs": lines[-500:]}, (code, result)
+    assert fixture.request(f"/kernel/install-log?seq={install['seq']}&instance=wrong")[0] == 404
+    assert fixture.request("/logs/clear", {})[0] == 200
+    assert path.read_bytes() == b""
+    assert fixture.request("/logs")[1] == {"success": True, "logs": []}
+    path.unlink()
+    assert fixture.request("/logs")[1] == {"success": True, "logs": []}
+    print("PASS: large-file log tails, CRLF/UTF-8, limits, install identity, clear and missing file")
+
+
 def test_settings(fixture):
     fixture.start()
     assert fixture.request("/start", {})[0] == 200
@@ -654,6 +681,7 @@ def main():
             cases = [
                 ("settings", test_settings),
                 ("auth-methods", test_authentication_and_methods),
+                ("logs", test_logs),
                 ("settings-crash", test_settings_crash_recovery),
                 ("settings-disconnect", test_disconnected_settings_finishes_rollback),
                 ("legacy-uninstall", test_legacy_uninstall_pin_recovery),

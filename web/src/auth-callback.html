@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>飞牛目录授权</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f3ef; color: #2c2825; }
+    main { width: min(440px, calc(100vw - 40px)); padding: 28px; box-sizing: border-box; background: #faf9f6; border: 1px solid #ded6cb; border-radius: 14px; }
+    h1 { margin: 0 0 12px; font-size: 22px; }
+    p { margin: 0; color: #655d54; }
+    .path { margin-top: 16px; padding: 10px; background: #efeee9; overflow-wrap: anywhere; font-family: ui-monospace,monospace; font-size: 12px; }
+    button { margin-top: 22px; min-height: 40px; padding: 6px 16px; border: 1px solid #a34727; border-radius: 8px; background: #a34727; color: #fff; cursor: pointer; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #181615; color: #f1eae2; }
+      main { background: #24211f; border-color: #51463e; }
+      p { color: #d0c5ba; }
+      .path { background: #302b27; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1 id="title">正在返回 QwenPaw…</h1>
+  <p id="message">授权结果已收到。</p>
+  <div class="path" id="path" hidden></div>
+  <button type="button" id="close">关闭</button>
+</main>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var paths = [];
+  try {
+    var parsed = JSON.parse(params.get("path") || "[]");
+    if (Array.isArray(parsed)) paths = parsed.filter(function (path) { return typeof path === "string"; });
+  } catch (_) {}
+  var result = {
+    status: params.get("status") || "",
+    error: params.get("error") || "",
+    method: params.get("method") || "",
+    appName: params.get("appName") || "",
+    state: params.get("state") || "",
+    path: paths
+  };
+  var payload = { type: "qwenpaw:authorized-directory", state: result.state, result: result, search: location.search };
+  var success = result.status === "success" && (paths.length > 0 || result.method === "authorizeUserFile" || result.method === "authorizeSharedFile");
+  var canAutoClose = success;
+  try { localStorage.setItem("qwenpaw.auth-result.v1", JSON.stringify({ state: result.state, result: result, search: location.search, ts: Date.now() })); } catch (_) {}
+  try { if (window.opener && !window.opener.closed) window.opener.postMessage(payload, location.origin); } catch (_) {}
+  try { if (window.parent !== window) window.parent.postMessage(payload, location.origin); } catch (_) {}
+  function publicationFailed(detail) {
+    canAutoClose = false;
+    document.getElementById("title").textContent = "授权回传失败";
+    document.getElementById("message").textContent = "授权结果接口返回失败：" + detail + "。请保留本页并将此提示反馈给维护者。";
+  }
+  try {
+    var csrf = document.cookie.split(";").map(function (part) { return part.trim(); }).find(function (part) {
+      return part.startsWith("__Host-qwenpaw_csrf=") || part.startsWith("qwenpaw_csrf=");
+    });
+    fetch("/app/qwenpaw/api/authorized-dirs/result", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf ? csrf.slice(csrf.indexOf("=") + 1) : "" },
+      body: JSON.stringify({ state: result.state, search: location.search }),
+      keepalive: true
+    }).then(function (response) {
+      if (!response.ok) publicationFailed("HTTP " + response.status);
+    }).catch(function (error) {
+      publicationFailed(error && error.message ? error.message : "网络错误");
+    });
+  } catch (error) {
+    publicationFailed(error && error.message ? error.message : "请求未能发出");
+  }
+  document.getElementById("title").textContent = success ? "目录授权成功" : "未完成授权";
+  document.getElementById("message").textContent = success ? "已授权给飞牛应用，正在返回 QwenPaw。" : (result.error || "授权已取消，请返回 QwenPaw 后重试。");
+  if (paths.length) {
+    var path = document.getElementById("path");
+    path.textContent = paths[0];
+    path.hidden = false;
+  }
+  function returnToConsole() {
+    try { window.close(); } catch (_) {}
+  }
+  function forceReturnConsole() {
+    if (window.closed || window.parent !== window) return;
+    try {
+      if (window.top && window.top.location) {
+        window.top.location.replace("/app/qwenpaw/#authorization");
+        return;
+      }
+    } catch (_) {}
+    window.location.replace("/app/qwenpaw/#authorization");
+  }
+  document.getElementById("close").addEventListener("click", function () {
+    returnToConsole();
+    forceReturnConsole();
+  });
+  window.setTimeout(function () { if (canAutoClose) returnToConsole(); }, success ? 300 : 1400);
+  window.setTimeout(function () { if (canAutoClose) forceReturnConsole(); }, 1500);
+})();
+</script>
+</body>
+</html>

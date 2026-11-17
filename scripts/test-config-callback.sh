@@ -225,7 +225,7 @@ assert_desktop_sentinels() {
         && grep -Fq '"entry-sentinel": "preserve-main"' "$UI_CONFIG" \
         && grep -Fq '"console-sentinel": "preserve-console"' "$UI_CONFIG" \
         && grep -Fq '"type": "iframe"' "$UI_CONFIG" \
-        && grep -Fq '"url": "/app/qwenpaw/"' "$UI_CONFIG" \
+        && grep -Fq '"url": "/app/qwenpaw/web/"' "$UI_CONFIG" \
         && grep -Fq '"gatewayPrefix": "/app/qwenpaw"' "$UI_CONFIG" \
         && grep -Fq '"gatewaySocket": "app.sock"' "$UI_CONFIG" \
         && grep -Fq '"allUsers": false' "$UI_CONFIG" \
@@ -514,11 +514,10 @@ else
 fi
 check_forbidden_tools
 
-for invalid in port-low port-reserved-supervisor port-reserved-platform port-high log-level; do
+for invalid in port-low port-reserved-supervisor port-high log-level; do
     case "$invalid" in
         port-low) port_value=80; level_value= ;;
         port-reserved-supervisor) port_value="$SUP_PORT"; level_value= ;;
-        port-reserved-platform) port_value=19091; level_value= ;;
         port-high) port_value=65536; level_value= ;;
         log-level) port_value=; level_value=verbose ;;
     esac

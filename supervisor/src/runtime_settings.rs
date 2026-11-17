@@ -17,9 +17,9 @@ pub struct SettingsPatch {
 impl SettingsPatch {
     pub fn validate(&self, supervisor_port: u16) -> Result<(), ManagementError> {
         if let Some(port) = self.port {
-            if port < 1024 || port == supervisor_port || port == 19091 {
+            if port < 1024 || port == supervisor_port {
                 return Err(ManagementError::InvalidSettings(format!(
-                    "端口无效(1024~65535,且不可为监督者保留端口 {supervisor_port}/19091)"
+                    "端口无效(1024~65535,且不可使用当前管理端口 {supervisor_port})"
                 )));
             }
         }
@@ -378,19 +378,27 @@ mod tests {
 
     #[test]
     fn settings_reject_reserved_ports_and_unknown_log_levels() {
-        for port in [0, 80, 19090, 19091] {
+        for port in [0, 80, 18091] {
             assert!(SettingsPatch {
                 port: Some(port),
                 log_level: None
             }
-            .validate(19090)
+            .validate(18091)
             .is_err());
         }
         assert!(SettingsPatch {
             port: None,
             log_level: Some("verbose".into())
         }
-        .validate(19090)
+        .validate(18091)
         .is_err());
+        for port in [19090, 19091] {
+            assert!(SettingsPatch {
+                port: Some(port),
+                log_level: None
+            }
+            .validate(18091)
+            .is_ok());
+        }
     }
 }

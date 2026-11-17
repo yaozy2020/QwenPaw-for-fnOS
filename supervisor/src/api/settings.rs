@@ -9,8 +9,7 @@ use axum::{
 use serde_json::json;
 
 use super::{
-    begin_operation, check_token, err_json, management_error_response, render_snapshot, AppState,
-    AuthCache,
+    begin_operation, check_token, err_json, management_error_response, AppState, AuthCache,
 };
 /// 重置管理员密码:移除 auth.json,下次打开 Web 端重新设定(旧 reset_auth 语义)。
 /// 事务式:先备份重命名 → 重启 → 健康检查通过才删备份;失败恢复备份并如实报错。
@@ -85,10 +84,7 @@ pub(super) async fn kernel_reset_auth(
             .auth_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = AuthCache::default();
-        let snap_state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            snap_state.events.publish(render_snapshot(&snap_state));
-        });
+        state.events.invalidate();
         Json(json!({"ok": true, "success": true, "message": "管理员密码已重置,服务已重启"}))
             .into_response()
     } else {
@@ -116,10 +112,7 @@ pub(super) async fn kernel_reset_auth(
         } else {
             false
         };
-        let snap_state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            snap_state.events.publish(render_snapshot(&snap_state));
-        });
+        state.events.invalidate();
         let detail = match spawn_result {
             Err(e) => format!("服务重启失败: {e}"),
             Ok(_) => "服务重启后健康检查未通过".to_string(),
@@ -260,10 +253,7 @@ pub(super) async fn web_proxy_port_set(
     };
     match manager.reconfigure(request.port, public).await {
         Ok(port) => {
-            let snap_state = state.clone();
-            tokio::task::spawn_blocking(move || {
-                snap_state.events.publish(render_snapshot(&snap_state));
-            });
+            state.events.invalidate();
             Json(json!({"success": true, "port": port, "message": "Web 反代端口已切换"}))
                 .into_response()
         }
@@ -320,13 +310,7 @@ async fn settings_request(
             .auth_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = AuthCache::default();
-        let snapshot_state = state.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            snapshot_state
-                .events
-                .publish(render_snapshot(&snapshot_state));
-        })
-        .await;
+        state.events.invalidate();
     }
     match outcome.result {
         Ok(message) => Json(json!({"ok": true, "success": true, "message": message,
@@ -340,6 +324,65 @@ async fn settings_request(
 mod tests {
     use super::*;
     use crate::api::test_support::{install_python, ChildGuard, KernelGuard, TestDir, TestServer};
+    use std::time::Duration;
+
+    struct SlowAuthServer {
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl SlowAuthServer {
+        fn start(listener: std::net::TcpListener) -> Self {
+            listener.set_nonblocking(true).unwrap();
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread_shutdown = Arc::clone(&shutdown);
+            let worker = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                while !thread_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                            let mut request = [0; 1024];
+                            let size = stream.read(&mut request).unwrap_or_default();
+                            let auth_probe = request[..size].starts_with(b"GET /api/auth/status ");
+                            if auth_probe {
+                                std::thread::sleep(Duration::from_millis(500));
+                            }
+                            let body: &[u8] = if request[..size].starts_with(b"GET /api/version ") {
+                                br#"{"version":"2.3.0"}"#
+                            } else {
+                                br#"{"enabled":true,"has_users":true}"#
+                            };
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(body);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                shutdown,
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for SlowAuthServer {
+        fn drop(&mut self) {
+            self.shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
 
     #[tokio::test]
     async fn mirror_handlers_reject_missing_tokens_without_touching_the_mirror() {
@@ -372,7 +415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_handler_publishes_snapshots_after_success_and_rollback() {
+    async fn settings_handler_invalidates_after_success_and_rollback() {
         let dir = TestDir::new("settings-observers");
         let state = dir.state(crate::api::test_support::free_port());
         std::fs::write(
@@ -393,9 +436,7 @@ mod tests {
             .unwrap();
         let response = settings(State(state.clone()), request).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let snapshot: serde_json::Value =
-            serde_json::from_str(&events.try_recv().unwrap()).unwrap();
-        assert_eq!(snapshot["success"], true);
+        assert_eq!(events.try_recv().unwrap(), "");
 
         std::fs::write(&state.ui_config_file, "invalid json").unwrap();
         let mut events = state.events.subscribe();
@@ -409,12 +450,65 @@ mod tests {
             .unwrap();
         let response = settings(State(state.clone()), request).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let snapshot: serde_json::Value =
-            serde_json::from_str(&events.try_recv().unwrap()).unwrap();
-        assert_eq!(snapshot["success"], true);
+        assert_eq!(events.try_recv().unwrap(), "");
         assert_eq!(
             std::fs::read_to_string(dir.0.join("var/qwenpaw-log-level")).unwrap(),
             "debug\n"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_response_does_not_wait_for_slow_auth_snapshot() {
+        let dir = TestDir::new("settings-slow-auth-snapshot");
+        let port = crate::api::test_support::free_port();
+        let state = dir.state(port);
+        let _server = SlowAuthServer::start(crate::api::test_support::release_port_reservation(port));
+        let _kernel = KernelGuard(Arc::clone(&state.kernel));
+        install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
+        state.kernel.spawn().unwrap();
+        assert!(
+            tokio::task::spawn_blocking({
+                let kernel = Arc::clone(&state.kernel);
+                move || kernel.wait_healthy(Duration::from_secs(3))
+            })
+            .await
+            .unwrap(),
+            "kernel fixture must be healthy before settings mutation"
+        );
+        assert!(state.kernel.status_now().running);
+        std::fs::write(
+            &state.ui_config_file,
+            json!({".url": {"qwenpaw.main": {"port": port.to_string()}}}).to_string(),
+        )
+        .unwrap();
+        let mut events = state.events.subscribe();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/settings")
+            .header("X-Supervisor-Token", &state.token)
+            .body(axum::body::Body::from(
+                json!({"log_level": "info"}).to_string(),
+            ))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let response = settings(State(state.clone()), request).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(
+            elapsed < Duration::from_millis(275),
+            "settings response waited for the slow auth probe in snapshot rendering: {elapsed:?}"
+        );
+        let render_started = std::time::Instant::now();
+        let snapshot_state = state.clone();
+        tokio::task::spawn_blocking(move || crate::api::render_snapshot(&snapshot_state))
+            .await
+            .unwrap();
+        assert!(
+            render_started.elapsed() >= Duration::from_millis(250),
+            "fixture must keep snapshot auth probing slow"
         );
     }
 
@@ -435,18 +529,26 @@ mod tests {
             json!({".url": {"qwenpaw.main": {"port": old_port.to_string()}}}).to_string(),
         )
         .unwrap();
-        let python = install_python(
-            &dir,
-            &state,
-            r#"import time
+        let python = install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
+        let real_python = python.with_file_name("python3.real");
+        std::fs::copy("/usr/bin/python3", &real_python).unwrap();
+        let package = dir.0.join("qwenpaw");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(
+            package.join("__main__.py"),
+            r#"import os, pathlib, sys, time
 port = int(sys.argv[sys.argv.index('--port') + 1])
+root = pathlib.Path(os.environ['QWENPAW_TEST_ROOT'])
 (root / ('ready-' + str(port))).write_text('ready')
 time.sleep(3600)
 "#,
-        );
+        )
+        .unwrap();
         let old = ChildGuard(
-            std::process::Command::new(&python)
+            std::process::Command::new(&real_python)
                 .args(["-m", "qwenpaw", "app", "--port", &old_port.to_string()])
+                .env("PYTHONPATH", &dir.0)
+                .env("QWENPAW_TEST_ROOT", &dir.0)
                 .process_group(0)
                 .spawn()
                 .unwrap(),
@@ -459,7 +561,14 @@ time.sleep(3600)
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let candidates = crate::procfs::rediscover_all(old_port, 0);
+        let candidates = crate::procfs::rediscover_all_in_venv(
+            old_port,
+            0,
+            &std::path::Path::new(&state.home_dir)
+                .join("venv")
+                .to_string_lossy(),
+        )
+        .unwrap();
         assert_eq!(candidates, vec![old.0.id() as i32]);
         let old_identity = crate::procfs::process_identity(old.0.id() as i32)
             .unwrap()
@@ -472,7 +581,7 @@ time.sleep(3600)
         let executable = std::fs::read_link(format!("/proc/{}/exe", old.0.id())).unwrap();
         assert_eq!(
             executable.canonicalize().unwrap(),
-            std::fs::canonicalize("/usr/bin/python3").unwrap()
+            std::fs::canonicalize(&real_python).unwrap()
         );
         let cmdline = std::fs::read(format!("/proc/{}/cmdline", old.0.id())).unwrap();
         let argv: Vec<_> = cmdline
@@ -480,7 +589,7 @@ time.sleep(3600)
             .filter(|arg| !arg.is_empty())
             .map(String::from_utf8_lossy)
             .collect();
-        assert!(argv.iter().any(|arg| arg == &python.to_string_lossy()));
+        assert!(argv.iter().any(|arg| arg == &real_python.to_string_lossy()));
         assert!(argv.iter().any(|arg| arg == "-m"));
         assert!(argv.iter().any(|arg| arg == "qwenpaw"));
         assert!(argv.iter().any(|arg| arg == &old_port.to_string()));
@@ -540,8 +649,10 @@ sys.exit(1)
             .body(axum::body::Body::empty())
             .unwrap();
 
+        let mut events = state.events.subscribe();
         let response = kernel_reset_auth(State(state.clone()), req).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(events.try_recv().unwrap(), "");
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .unwrap();

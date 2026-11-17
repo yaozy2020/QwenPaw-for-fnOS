@@ -9,8 +9,11 @@ gen-audit.py — 自动生成 AUDIT_REPORT.md
   - cmd/*（生命周期脚本）
   - wizard/*（向导清单）
   - app/qwenpaw/code/src/*（可选的本地上游源码统计，不属于 FPK 物料）
+  - supervisor/src/gateway/testdata/*（源码回归夹具及 SHA256，不属于 FPK 物料）
   - git log --tags（最近发布）
 """
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -71,6 +74,32 @@ def list_workflows() -> list[str]:
     return sorted(p.name for p in d.glob("*.yml"))
 
 
+def base_path_patch_summary() -> tuple[str, int, int, int]:
+    root = ROOT / "patches/qwenpaw-2.3.0-base-path"
+    raw = (root / "manifest.json").read_bytes()
+    manifest = json.loads(raw)
+    size = sum((root / "payload" / entry["path"]).stat().st_size
+               for entry in manifest["files"])
+    return (hashlib.sha256(raw).hexdigest(), len(manifest["files"]), size,
+            manifest["upstream_pr"])
+
+
+def list_gateway_fixtures() -> list[tuple[str, str, str]]:
+    """返回 Gateway 源码回归夹具及其摘要和用途。"""
+    d = ROOT / "supervisor" / "src" / "gateway" / "testdata"
+    purpose_map = {
+        "qwenpaw-2.3.0-login-logo.js": "QwenPaw 2.3.0 登录 Logo 路径回归；不代表完整 base-path 契约",
+    }
+    if not d.exists():
+        return []
+    result = []
+    for path in sorted(p for p in d.iterdir() if p.is_file()):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        purpose = purpose_map.get(path.name, "Gateway 上游路径/协议回归夹具")
+        result.append((path.relative_to(ROOT).as_posix(), digest, purpose))
+    return result
+
+
 def recent_tags(n: int = 5) -> list[tuple[str, str]]:
     """读取最近 n 个已发布历史 git tag（按版本号降序，排除当前正在构建的 tag）。"""
     if os.environ.get("AUDIT_NO_GIT") == "1":
@@ -123,6 +152,8 @@ def render() -> str:
     py_files, py_lines = count_upstream_python()
     plugin_files = count_plugins()
     workflows = list_workflows()
+    patch_digest, patch_files, patch_bytes, upstream_pr = base_path_patch_summary()
+    gateway_fixtures = list_gateway_fixtures()
     tags = recent_tags()
     now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %z")
 
@@ -132,7 +163,7 @@ def render() -> str:
     a("# QwenPaw FPK — 审计报告")
     a("")
     a("> ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。")
-    a("> 数据源：manifest / cmd / wizard / app / .github / git tags。")
+    a("> 数据源：manifest / cmd / wizard / app / supervisor Gateway testdata / .github / git tags。")
     a("")
     a(f"## 当前版本：v{version}")
     a("")
@@ -180,6 +211,25 @@ def render() -> str:
         a("|:-----|:-----|")
         for w in wizard_files:
             a(f"| `wizard/{w}` | {w} |")
+    else:
+        a("（无）")
+    a("")
+    a("## QwenPaw 2.3.0 base-path 与预构建 Console 补丁载荷")
+    a("")
+    a(f"- 上游 PR：`#{upstream_pr}`（临时下游兼容，不表示上游已合并）")
+    a(f"- 后端及预构建 Console 差异文件：{patch_files} 个，原始数据 {patch_bytes:,} 字节")
+    a(f"- manifest SHA256：`{patch_digest}`")
+    a("- FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite")
+    a("")
+    a("## Gateway 源码回归夹具")
+    a("")
+    a("> 以下文件是源码测试夹具，不属于 FPK 物料清单。")
+    a("")
+    if gateway_fixtures:
+        a("| 文件 | SHA256 | 用途 |")
+        a("|:-----|:-------|:-----|")
+        for path, digest, purpose in gateway_fixtures:
+            a(f"| `{path}` | `{digest}` | {purpose} |")
     else:
         a("（无）")
     a("")

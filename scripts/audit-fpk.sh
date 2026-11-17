@@ -51,9 +51,42 @@ app_files = {
     "ui/config",
     "ui/images/console_64.png", "ui/images/console_256.png",
     "ui/images/icon_64.png", "ui/images/icon_256.png",
-    "www/index.html", "www/index.html.gz", "www/index.html.br",
+    "www/index.html", "www/index.html.gz", "www/index.html.br", "www/auth-callback.html",
 }
 app_dirs = {"bin", "config", "ui", "ui/images", "www"}
+patch_root = "www/patches/qwenpaw-2.3.0-base-path"
+patch_source_root = "patches/qwenpaw-2.3.0-base-path"
+with open(os.path.join(root, patch_source_root, "manifest.json"), "rb") as source:
+    patch_manifest_bytes = source.read()
+patch_manifest = json.loads(patch_manifest_bytes)
+if patch_manifest.get("schema_version") != 1 or patch_manifest.get("base_version") != "2.3.0":
+    raise ValueError("unsupported base-path patch manifest")
+if not patch_manifest.get("files") or len(patch_manifest["files"]) > 2048:
+    raise ValueError("base-path patch file count exceeds the allowed payload limit")
+app_files.add(f"{patch_root}/manifest.json")
+for entry in patch_manifest["files"]:
+    relative = entry["path"]
+    parts = relative.split("/")
+    if (parts[0] not in {"app", "console"} or len(parts) < 2
+            or any(part in {"", ".", ".."} for part in parts) or "\\" in relative):
+        raise ValueError(f"base-path patch payload path is invalid: {relative!r}")
+    if not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+        raise ValueError(f"invalid base-path patch digest: {relative!r}")
+    if entry["original_sha256"] is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", entry["original_sha256"]):
+        raise ValueError(f"invalid base-path original digest: {relative!r}")
+    previous = entry.get("previous_sha256", [])
+    if not isinstance(previous, list) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in previous):
+        raise ValueError(f"invalid base-path previous digest: {relative!r}")
+    payload_name = f"{patch_root}/payload/{relative}"
+    app_files.add(payload_name)
+    parent = os.path.dirname(payload_name)
+    while parent != patch_root:
+        app_dirs.add(parent)
+        parent = os.path.dirname(parent)
+app_dirs.update({patch_root, os.path.dirname(patch_root)})
 
 
 def safe_members(archive, expected_files, expected_dirs, label, executable_files=()):
@@ -62,7 +95,7 @@ def safe_members(archive, expected_files, expected_dirs, label, executable_files
     seen = set()
     expanded = 0
     members = archive.getmembers()
-    if len(members) > 512:
+    if len(members) > 4096:
         raise ValueError(f"{label}: excessive archive member count ({len(members)})")
     for member in members:
         raw_name = member.name
@@ -311,10 +344,7 @@ def upgrade_init_wrapper():
 def platform_callback(action):
     if action in {"upgrade", "uninstall"}:
         return [
-            'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then',
-            f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {action}',
-            "fi",
-            f'if [ -x "${{0%/*}}/qwenpaw-supervisor" ]; then',
+            'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
             f'exec "${{0%/*}}/qwenpaw-supervisor" platform {action}',
             "fi",
             "exit 127",
@@ -451,7 +481,7 @@ for name in ("ui/api.cgi", "ui/index.cgi"):
 gateway_config_valid, main_entry_valid = desktop_entry_checks(app_payloads["ui/config"])
 report(gateway_config_valid, "qwenpaw.console 使用固定网关 URL/Prefix/Socket 并保留 iframe 权限属性",
        "qwenpaw.console 网关配置或保留属性不符合契约")
-report(main_entry_valid, "qwenpaw.main 保持既有 URL 桌面入口配置",
+report(main_entry_valid, "qwenpaw.main 保持 fnOS iframe 会话链与网关配置",
        "qwenpaw.main 桌面入口配置发生漂移")
 
 expected_wrappers = {
@@ -524,7 +554,7 @@ for name, (binary, mode) in packaged_binaries.items():
                f"{name} SHA256 与 release 源一致 ({source_sha256})",
                f"{name} SHA256 与 release 源不一致 (包内={packaged_hashes[name]}, 源={source_sha256})")
 report(len(set(packaged_hashes.values())) == 1,
-       "外层 helper 与 target supervisor SHA256 一致", "外层 helper 与 target supervisor SHA256 不一致")
+       "cmd 与 target supervisor SHA256 一致", "cmd 与 target supervisor SHA256 不一致")
 report("bin/qwenpaw-test-runtime" not in app_files,
        "包内白名单未包含测试辅助 runtime", "包内不应包含测试辅助 runtime")
 
@@ -559,6 +589,27 @@ else:
     brotli_detail = "decompressed bytes differ from index.html"
 report(brotli_valid, "index.html.br 解压后与 index.html 字节一致",
        f"index.html.br 无效: {brotli_detail}")
+
+print("audit: base-path backend and prebuilt Console payload")
+report(app_payloads[f"{patch_root}/manifest.json"] == patch_manifest_bytes,
+       "包内 base-path 补丁清单与构建源一致", "包内 base-path 补丁清单发生漂移")
+manifest_paths = [entry["path"] for entry in patch_manifest["files"]]
+report(all(path.startswith(("app/", "console/")) for path in manifest_paths)
+       and any(path.startswith("console/") for path in manifest_paths),
+       "补丁包含后端与完整预构建 Console", "补丁清单缺少 Console 或包含未知路径")
+patch_bytes = 0
+for entry in patch_manifest["files"]:
+    name = f"{patch_root}/payload/{entry['path']}"
+    patch_bytes += len(app_payloads[name])
+    actual = hashlib.sha256(app_payloads[name]).hexdigest()
+    if actual != entry["sha256"]:
+        failures.append(f"base-path 补丁哈希不匹配: {entry['path']}")
+report(not any("base-path 补丁哈希不匹配" in failure for failure in failures),
+       f"全部 {len(manifest_paths)} 个补丁文件 SHA256 与清单一致",
+       "base-path 补丁文件哈希校验失败")
+report(patch_bytes <= 48 * 1024 * 1024,
+       f"补丁载荷不超过 48 MiB（实际 {patch_bytes} 字节）",
+       f"补丁载荷超过 48 MiB: {patch_bytes}")
 
 with open(fpk_path, "rb") as fpk_file:
     fpk_sha256 = hashlib.sha256(fpk_file.read()).hexdigest()

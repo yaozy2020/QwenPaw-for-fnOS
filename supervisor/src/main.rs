@@ -10,13 +10,13 @@ mod control;
 mod desktop;
 mod events;
 mod gateway;
-mod helper;
 mod install;
 mod kernel;
 mod management;
 mod mirror;
 mod platform;
 mod procfs;
+mod release_notes;
 mod runtime;
 mod runtime_settings;
 mod service;
@@ -283,7 +283,8 @@ fn serve() {
 
     // 孤儿安装清理:监督者异常退出时 pip(独立进程组)可能仍存活并继续改 venv。
     // 凭 install.pid 找到候选,核对 /proc cmdline 身份(防 PID 复用误杀)后整组回收。
-    if let Err(error) = cleanup_orphan_install(&cfg.var_dir) {
+    let orphan_cleanup_result = cleanup_orphan_install(&cfg.var_dir);
+    if let Err(error) = &orphan_cleanup_result {
         logf(&format!("孤儿安装进程清理失败: {error}"));
         install.block_recovery(format!("孤儿安装进程清理失败: {error}"));
         kernel.stop_sync();
@@ -304,26 +305,30 @@ fn serve() {
         let k = Arc::clone(&kernel);
         move || k.stop_sync()
     };
-    let recovery_error = match install::recover_pending_transactions(
-        std::path::Path::new(&cfg.kernel_venv),
-        std::path::Path::new(&pin_file),
-        Some(&*logf),
-        Some(&stop_for_recovery),
-    ) {
-        Ok(report) => {
-            if report.recovered > 0 {
-                logf(&format!(
-                    "recovered {} pending venv transaction(s)",
-                    report.recovered
-                ));
+    let recovery_error = if !orphan_cleanup_permits_recovery(&orphan_cleanup_result) {
+        orphan_cleanup_result.err()
+    } else {
+        match install::recover_pending_transactions(
+            std::path::Path::new(&cfg.kernel_venv),
+            std::path::Path::new(&pin_file),
+            Some(&*logf),
+            Some(&stop_for_recovery),
+        ) {
+            Ok(report) => {
+                if report.recovered > 0 {
+                    logf(&format!(
+                        "recovered {} pending venv transaction(s)",
+                        report.recovered
+                    ));
+                }
+                if report.is_ready() {
+                    None
+                } else {
+                    Some(report.pending.join("; "))
+                }
             }
-            if report.is_ready() {
-                None
-            } else {
-                Some(report.pending.join("; "))
-            }
+            Err(e) => Some(format!("recover pending transactions error: {e}")),
         }
-        Err(e) => Some(format!("recover pending transactions error: {e}")),
     };
     if let Some(reason) = recovery_error {
         logf(&reason);
@@ -469,7 +474,6 @@ fn serve() {
         ));
     }
     let stable_helper_binary = cfg.stable_helper_binary();
-    let persistent_helper_binary = crate::helper::path(&cfg.var_dir);
     let gateway = gateway_socket.map(|bound| {
         rt.block_on(async {
             gateway::start(
@@ -477,7 +481,6 @@ fn serve() {
                 state.clone(),
                 &cfg.supervisor_binary,
                 &stable_helper_binary,
-                &persistent_helper_binary,
             )
         })
         .unwrap_or_else(|error| panic!("start gateway listener: {error}"))
@@ -1070,6 +1073,23 @@ mod orphan_install_tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), record);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn orphan_cleanup_permits_recovery(result: &Result<(), String>) -> bool {
+    result.is_ok()
+}
+
+#[cfg(test)]
+mod orphan_recovery_gate_tests {
+    use super::*;
+
+    #[test]
+    fn failed_orphan_cleanup_blocks_disk_recovery() {
+        assert!(!orphan_cleanup_permits_recovery(&Err(
+            "live installer remains".into()
+        )));
+        assert!(orphan_cleanup_permits_recovery(&Ok(())));
     }
 }
 

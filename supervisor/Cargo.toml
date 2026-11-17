@@ -1,6 +1,6 @@
 [package]
 name = "qwenpaw-supervisor"
-version = "1.2.0-rc.1"
+version = "1.2.7-rc.1"
 edition = "2021"
 
 [dependencies]
@@ -12,6 +12,7 @@ hyper-util = { version = "0.1.21", features = ["tokio", "service", "client", "cl
 http-body-util = "0.1.3"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["compression-gzip"] }
+flate2 = "1"
 ring = "0.17.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

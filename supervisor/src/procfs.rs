@@ -75,7 +75,7 @@ pub fn identity_status(identity: ProcessIdentity) -> IdentityStatus {
     }
 }
 
-fn scan_processes() -> Result<Vec<(ProcessIdentity, i32)>, String> {
+pub(crate) fn scan_processes() -> Result<Vec<(ProcessIdentity, i32)>, String> {
     let entries = fs::read_dir("/proc").map_err(|error| format!("scan /proc: {error}"))?;
     let mut processes = Vec::new();
     for entry in entries {
@@ -251,32 +251,69 @@ pub fn started_wall(pid: i32) -> Option<std::time::SystemTime> {
     Some(boot + std::time::Duration::from_secs_f64(start_ticks as f64 / 100.0))
 }
 
-/// 扫 /proc:cmdline 特征匹配内核(basename 含 python3 且 -m qwenpaw app --port N)。
-/// 返回全部匹配 pid——数量 >1 说明存在多实例(历史孤儿),调用方负责清扫。
-pub fn rediscover_all(port: u16, exclude: i32) -> Vec<i32> {
+pub fn rediscover_all_in_venv(port: u16, exclude: i32, venv_dir: &str) -> Result<Vec<i32>, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let owner_path = std::path::Path::new(venv_dir)
+        .parent()
+        .ok_or_else(|| "kernel venv has no parent directory".to_string())?;
+    let expected_uid = fs::metadata(venv_dir)
+        .or_else(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                fs::metadata(owner_path)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| format!("inspect kernel venv owner: {error}"))?
+        .uid();
+    let entries = fs::read_dir("/proc").map_err(|error| format!("scan /proc: {error}"))?;
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return out;
-    };
-    for e in entries.flatten() {
-        let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else {
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read /proc entry: {error}"))?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
             continue;
         };
         if pid == exclude || pid == std::process::id() as i32 {
             continue;
         }
-        let Ok(raw) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
-            continue;
+        let raw = match fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("read /proc/{pid}/cmdline: {error}")),
         };
         if raw.is_empty() {
-            continue; // 僵尸:cmdline 为空,天然不命中
+            continue;
         }
         let argv: Vec<&str> = raw.trim_end_matches('\0').split('\0').collect();
-        if is_kernel_argv(&argv, port) {
+        if !is_kernel_argv_in_venv(&argv, port, venv_dir) {
+            continue;
+        }
+        let process_uid = match fs::metadata(format!("/proc/{pid}")) {
+            Ok(metadata) => metadata.uid(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("inspect /proc/{pid} owner: {error}")),
+        };
+        if process_uid == expected_uid {
             out.push(pid);
         }
     }
-    out
+    Ok(out)
+}
+
+fn is_kernel_argv_in_venv(argv: &[&str], port: u16, venv_dir: &str) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    let program = std::path::Path::new(program);
+    let venv = std::path::Path::new(venv_dir);
+    let in_venv_bin = program
+        .parent()
+        .is_some_and(|parent| parent == venv.join("bin"));
+    let python_program = program
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("python3"));
+    in_venv_bin && python_program && is_kernel_argv(argv, port)
 }
 
 fn is_kernel_argv(argv: &[&str], port: u16) -> bool {
@@ -323,5 +360,29 @@ mod tests {
         let mut stale = identity;
         stale.starttime = stale.starttime.saturating_add(1);
         assert_eq!(identity_status(stale), IdentityStatus::Reused);
+    }
+
+    #[test]
+    fn uninstall_rediscovery_requires_the_configured_venv_interpreter() {
+        let valid = [
+            "/srv/home/venv/bin/python3.real",
+            "-m",
+            "qwenpaw",
+            "app",
+            "--port",
+            "18088",
+        ];
+        assert!(is_kernel_argv_in_venv(&valid, 18088, "/srv/home/venv"));
+        assert!(!is_kernel_argv_in_venv(&valid, 18088, "/srv/other/venv"));
+        assert!(!is_kernel_argv_in_venv(&valid, 18089, "/srv/home/venv"));
+        let external = [
+            "/usr/bin/python3",
+            "-m",
+            "qwenpaw",
+            "app",
+            "--port",
+            "18088",
+        ];
+        assert!(!is_kernel_argv_in_venv(&external, 18088, "/srv/home/venv"));
     }
 }

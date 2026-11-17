@@ -1,7 +1,4 @@
 #!/bin/sh
-if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then
-    exec "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" platform uninstall
-fi
 if [ -x "${0%/*}/qwenpaw-supervisor" ]; then
     exec "${0%/*}/qwenpaw-supervisor" platform uninstall
 fi

@@ -25,11 +25,13 @@ test("desktop main entry shares the console Gateway prefix and socket without a 
   const consoleEntry = entries["qwenpaw.console"];
   const mainEntry = entries["qwenpaw.main"];
 
-  assert.equal(mainEntry.type, "iframe");
+  assert.equal(mainEntry.type, "iframe", "main entry must keep the default fnOS WebView token renewal path");
+  assert.equal(consoleEntry.type, "iframe");
+  assert.equal(mainEntry.type, consoleEntry.type, "a second native URL WebView can lose the fnOS session");
   assert.equal(mainEntry.protocol, "");
   assert.equal(mainEntry.port, undefined);
-  assert.equal(mainEntry.url, webEntryPath);
-  assert.equal(mainEntry.url, `${mainEntry.gatewayPrefix}/web/`);
+  assert.equal(mainEntry.url, webEntryPath, "main icon must open QwenPaw Web, not the management console");
+  assert.notEqual(mainEntry.url, consoleEntry.url);
   assert.equal(mainEntry.gatewayPrefix, consoleEntry.gatewayPrefix);
   assert.equal(mainEntry.gatewaySocket, consoleEntry.gatewaySocket);
   assert.doesNotMatch(mainEntry.url, /^https?:\/\/|:\d+/);

@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::management::{ManagementCore, ManagementError, OperationGuard};
 
+mod authorized_dirs;
 mod installation;
 mod lifecycle;
 mod logs;
@@ -21,12 +22,21 @@ mod settings;
 mod status;
 
 pub use crate::desktop::sync_main_entry;
-pub use status::{render_snapshot, AuthCache};
+#[cfg(test)]
+pub use status::render_snapshot;
+pub use status::AuthCache;
 
 #[cfg(test)]
 use crate::install::InstallState;
 
-use installation::{install_status, kernel_install, kernel_pin, kernel_uninstall, kernel_versions};
+use authorized_dirs::{
+    check as authorized_dirs_check, publish_result_http as authorized_dirs_result_publish,
+    take_result_http as authorized_dirs_result,
+};
+use installation::{
+    install_status, kernel_install, kernel_pin, kernel_release_notes, kernel_uninstall,
+    kernel_versions,
+};
 use lifecycle::{restart, start, stop};
 use logs::{install_log, logs, logs_clear};
 use settings::{kernel_reset_auth, port, settings};
@@ -68,6 +78,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/kernel/install-status", get(install_status))
         .route("/kernel/install-log", get(install_log))
         .route("/kernel/versions", get(kernel_versions))
+        .route("/kernel/release-notes", get(kernel_release_notes))
         .route("/kernel/pin", post(kernel_pin))
         .route("/kernel/reset-auth", post(kernel_reset_auth))
         .route("/port", post(port))
@@ -76,6 +87,11 @@ pub fn build_router(state: AppState) -> Router {
             get(settings::web_proxy_port_get).post(settings::web_proxy_port_set),
         )
         .route("/settings", post(settings))
+        .route("/authorized-dirs/check", post(authorized_dirs_check))
+        .route(
+            "/authorized-dirs/result",
+            get(authorized_dirs_result).post(authorized_dirs_result_publish),
+        )
         .route(
             "/mirror",
             get(settings::mirror_get).post(settings::mirror_set),
@@ -252,11 +268,13 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn release_port_reservation(port: u16) {
+    pub(crate) fn release_port_reservation(port: u16) -> TcpListener {
         port_reservations()
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remove(&port);
+            .remove(&port)
+            .unwrap_or_else(|| panic!("no test port reservation exists for {port}"))
+            .listener
     }
 
     pub(crate) fn serve_reserved_port(port: u16) -> TestServer {

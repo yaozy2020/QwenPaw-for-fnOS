@@ -1,4 +1,4 @@
-//! 状态广播:预渲染快照 JSON 的 broadcast 通道,axum SSE 直接订阅。
+//! 状态广播:快照或失效通知的 broadcast 通道,axum SSE 直接订阅。
 
 use tokio::sync::broadcast;
 
@@ -14,8 +14,13 @@ impl Events {
     }
 
     /// 广播一份快照 JSON(调用方已序列化);无订阅者时为空操作。
+    #[cfg(test)]
     pub fn publish(&self, snapshot_json: String) {
         let _ = self.tx.send(snapshot_json);
+    }
+
+    pub fn invalidate(&self) {
+        let _ = self.tx.send(String::new());
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<String> {

@@ -1,7 +1,7 @@
 #!/bin/bash
 # preflight.sh — 一致性门禁
 # 步骤: 1) 版本号一致性 2) 仓库残留 3) cmd/ 完整性 4) 前端源码完整性
-#       5) 桌面网关入口 6) 持久 helper/薄回调 7) Gateway-only 物料
+#       5) 桌面网关入口 6) cmd supervisor/薄回调 7) Gateway-only 物料
 
 # 不使用 set -e:本脚本已有 FAIL 聚合模式(收集全部问题后统一报错)。
 # set -e 会让第一条失败就中止,用户只看到一个问题、修完再跑又冒出下一个。
@@ -155,8 +155,8 @@ else
 fi
 echo
 
-# [6/7] 持久 helper 与薄回调边界
-echo "[6/7] 持久 helper 与薄回调边界 ..."
+# [6/7] cmd supervisor 与薄回调边界
+echo "[6/7] cmd supervisor 与薄回调边界 ..."
 if python3 - "$PROJ_DIR" <<'PY'
 import re
 import sys
@@ -235,34 +235,15 @@ for name, action in (
         failures.append(f"cmd/{name} missing")
         continue
     expected = expected_install() if action == "install" else [
-        'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then',
-        f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {action}',
-        "fi",
-        f'if [ -x "${{0%/*}}/qwenpaw-supervisor" ]; then',
+        'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
         f'exec "${{0%/*}}/qwenpaw-supervisor" platform {action}',
         "fi",
         "exit 127",
     ]
     if active(path) != expected:
-        failures.append(f"cmd/{name} is not the fixed thin callback/helper shape")
-
-helper_source = root / "supervisor/src/helper.rs"
-if not helper_source.is_file():
-    failures.append("supervisor/src/helper.rs missing")
-else:
-    source = helper_source.read_text(encoding="utf-8")
-    for marker in (
-        'const HELPER_NAME: &str = "qwenpaw-supervisor-helper";',
-        "const HELPER_MODE: u32 = 0o750;",
-        ".create_new(true)",
-        ".sync_all()",
-        "fs::rename",
-        "fs::remove_file",
-    ):
-        if marker not in source:
-            failures.append(f"helper staging marker missing: {marker}")
-    if "/var/apps/" in source:
-        failures.append("helper staging must not contain a global /var/apps destination")
+        failures.append(f"cmd/{name} must use only the packaged cmd supervisor and fail closed")
+    if action != "install" and "qwenpaw-supervisor-helper" in path.read_text(encoding="utf-8"):
+        failures.append(f"cmd/{name} must not contain a persistent helper fallback")
 
 build_script = (root / "build.sh").read_text(encoding="utf-8")
 for marker in (
@@ -287,12 +268,12 @@ if failures:
     for failure in failures:
         print(f"preflight: FAIL: {failure}", file=sys.stderr)
     raise SystemExit(1)
-print("preflight: fixed callbacks, compatible Rust helper staging, release copies and target identity passed")
+print("preflight: fixed callbacks, single cmd supervisor, release copies and target identity passed")
 PY
 then
   echo -e "${GREEN}  -> 通过${NC}"
 else
-  echo -e "${RED}  -> 失败：helper staging 或薄回调边界不符合契约${NC}"
+  echo -e "${RED}  -> 失败：cmd supervisor 或薄回调边界不符合契约${NC}"
   FAIL=1
 fi
 echo

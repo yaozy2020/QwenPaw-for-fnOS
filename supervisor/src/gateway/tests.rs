@@ -405,6 +405,7 @@ const READ_ROUTES: &[&str] = &[
     "kernel/install-status",
     "kernel/install-log",
     "kernel/versions",
+    "kernel/release-notes",
 ];
 
 #[tokio::test]
@@ -979,7 +980,6 @@ async fn bind_to_start_socket_replacement_is_rejected_and_preserved() {
         state,
         Path::new("/tmp/target-supervisor"),
         Path::new("/tmp/cmd/qwenpaw-supervisor"),
-        Path::new("/tmp/var/qwenpaw-supervisor-helper"),
     ) {
         Ok(gateway) => {
             gateway.shutdown().await;
@@ -1238,9 +1238,15 @@ async fn real_uds_connection_limit_returns_retryable_http_instead_of_reset() {
     let rejected = tokio::task::spawn_blocking(move || {
         use std::io::Read;
         let mut stream = UnixStream::connect(path).unwrap();
-        stream
-            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .unwrap();
+        if let Err(error) =
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "overloaded write failed for an unexpected reason: {error}"
+            );
+        }
         let mut response = String::new();
         let _ = stream.read_to_string(&mut response);
         response
@@ -1256,6 +1262,49 @@ async fn real_uds_connection_limit_returns_retryable_http_instead_of_reset() {
         "missing Retry-After: {rejected}"
     );
 
+    drop(pending);
+    tx.send(true).unwrap();
+    worker.await.unwrap();
+}
+
+#[tokio::test]
+async fn real_uds_capacity_waits_for_a_slot_instead_of_immediately_rejecting() {
+    let (dir, state, _) = fixture("gateway-capacity-wait");
+    let path = dir.0.join("gateway-wait.sock");
+    let BoundGateway { listener, cleanup } = bind(&path).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let router = build_router(state, dir.0.join("www"), std::env::current_exe().ok());
+    let (tx, rx) = watch::channel(false);
+    let worker = tokio::spawn(serve(listener, cleanup, router, rx));
+    let mut pending = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let mut stream = UnixStream::connect(&path).unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .unwrap();
+        pending.push(stream);
+    }
+    let waiting_path = path.clone();
+    let waiting = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut stream = UnixStream::connect(waiting_path).unwrap();
+        stream
+            .write_all(b"GET /app/qwenpaw/ HTTP/1.1\r\nHost: localhost\r\nX-Trim-Userid: 1000\r\nX-Trim-Username: test-admin\r\nX-Trim-Isadmin: true\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(pending.pop());
+    let response = tokio::time::timeout(Duration::from_secs(3), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "a request waiting for a freed slot must succeed: {response:?}"
+    );
     drop(pending);
     tx.send(true).unwrap();
     worker.await.unwrap();
@@ -1357,6 +1406,18 @@ async fn capture_web_upstream(
             "text/html; charset=utf-8",
         );
     }
+    if uri == "/app/qwenpaw/web/" {
+        return upstream_sample(
+            br#"<base href="/app/qwenpaw/web/"><script>window.__qpBase = "/app/qwenpaw/web";</script>"#,
+            "text/html; charset=utf-8",
+        );
+    }
+    if uri == "/app/qwenpaw/web/assets/native.js" {
+        return upstream_sample(
+            br#"const asset = "/assets/unmodified.js";"#,
+            "text/javascript; charset=utf-8",
+        );
+    }
     if uri == "/assets/auth-230-fixture.js" {
         return upstream_sample(
             br#"const endpoint = "/api" + "/auth/status";"#,
@@ -1375,6 +1436,18 @@ async fn capture_web_upstream(
     if uri == "/assets/index-BpFaGbCq.js" {
         return upstream_sample(
             include_bytes!("testdata/qwenpaw-2.2.2.post1-entry.js"),
+            "text/javascript; charset=utf-8",
+        );
+    }
+    if uri == "/assets/index-DZrIuh3B.js" {
+        return upstream_sample(
+            br#"function lP(e){const t="/console".replace(/^\/+|\/+$/g,"");return t?`/${t}`:""}const Ri=lP(),Yl="osPawAppId";function or(e){return Ri&&(e===Ri||e.startsWith(`${Ri}/`))?Ri:void 0}function Md(e){const t=or(e);return t?e.slice(t.length)||"/":e||"/"}function zo(e,t){return`${or(e)??""}${t}`}const openSession=e=>zo(location.pathname,`/chat/${encodeURIComponent(e.id)}`);"#,
+            "text/javascript; charset=utf-8",
+        );
+    }
+    if uri == "/assets/index-opcB8AGu.js" {
+        return upstream_sample(
+            include_bytes!("testdata/qwenpaw-2.3.0-chat.js"),
             "text/javascript; charset=utf-8",
         );
     }
@@ -1556,7 +1629,8 @@ fn root_proxy_state(app: AppState) -> GatewayState {
         www_root: PathBuf::new(),
         test_exe: None,
         supervisor_executables: Vec::new(),
-        sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        management_sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
+        upstream_sse_connections: Arc::new(Semaphore::new(MAX_SSE_CONNECTIONS)),
         public_access: false,
         web_client,
     }
@@ -3587,6 +3661,100 @@ fn assert_web_proxy_startup(
 }
 
 #[tokio::test]
+async fn patched_runtime_uses_native_base_path_without_string_rewriting() {
+    let (_dir, app, _) = fixture("native-base-path-proxy");
+    let venv = Path::new(&app.home_dir).join("venv");
+    fs::create_dir_all(&venv).unwrap();
+    fs::write(venv.join(".qwenpaw-base-path-patch"), b"fixture\n").unwrap();
+    let (mut captured, upstream) = start_web_upstream(&app).await;
+    let state = root_proxy_state(app);
+
+    for mounted in [false, true] {
+        let html = if mounted {
+            web_proxy::forward(
+                &state,
+                request(
+                    "GET",
+                    "/app/qwenpaw/web/",
+                    HeaderMap::new(),
+                    Body::empty(),
+                    None,
+                ),
+                "/",
+                false,
+            )
+            .await
+        } else {
+            web_proxy::forward_root(
+                &state,
+                request("GET", "/", HeaderMap::new(), Body::empty(), None),
+                "/",
+            )
+            .await
+        };
+        assert_eq!(html.status(), StatusCode::OK);
+        assert_eq!(
+            &to_bytes(html.into_body(), 128 * 1024).await.unwrap()[..],
+            br#"<base href="/app/qwenpaw/web/"><script>window.__qpBase = "/app/qwenpaw/web";</script>"#
+        );
+        assert_eq!(captured.recv().await.unwrap().uri, "/app/qwenpaw/web/");
+
+        let script = if mounted {
+            web_proxy::forward(
+                &state,
+                request(
+                    "GET",
+                    "/app/qwenpaw/web/assets/native.js",
+                    HeaderMap::new(),
+                    Body::empty(),
+                    None,
+                ),
+                "/assets/native.js",
+                false,
+            )
+            .await
+        } else {
+            web_proxy::forward_root(
+                &state,
+                request(
+                    "GET",
+                    "/assets/native.js",
+                    HeaderMap::new(),
+                    Body::empty(),
+                    None,
+                ),
+                "/assets/native.js",
+            )
+            .await
+        };
+        assert_eq!(script.status(), StatusCode::OK);
+        assert_eq!(
+            &to_bytes(script.into_body(), 4096).await.unwrap()[..],
+            br#"const asset = "/assets/unmodified.js";"#
+        );
+        assert_eq!(
+            captured.recv().await.unwrap().uri,
+            "/app/qwenpaw/web/assets/native.js"
+        );
+    }
+
+    let full_path = "/app/qwenpaw/web/assets/native.js";
+    let script = web_proxy::forward_root(
+        &state,
+        request("GET", full_path, HeaderMap::new(), Body::empty(), None),
+        full_path,
+    )
+    .await;
+    assert_eq!(script.status(), StatusCode::OK);
+    assert_eq!(
+        &to_bytes(script.into_body(), 4096).await.unwrap()[..],
+        br#"const asset = "/assets/unmodified.js";"#
+    );
+    assert_eq!(captured.recv().await.unwrap().uri, full_path);
+    upstream.abort();
+}
+
+#[tokio::test]
 async fn forward_root_keeps_html_and_assets_at_root_and_guards_language_setting() {
     let (_dir, app, _) = fixture("direct-web-root-assets");
     let (mut captured, upstream) = start_web_upstream(&app).await;
@@ -3866,6 +4034,77 @@ async fn web_proxy_streams_large_mutation_bodies_with_same_origin_without_gatewa
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{label}");
         assert!(captured.try_recv().is_err(), "{label} reached the upstream");
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn qwenpaw_230_chat_route_keeps_the_web_mount_prefix() {
+    let (_dir, state, router) = fixture("gateway-web-proxy-qwenpaw-230-chat-route");
+    let (mut captured, server) = start_web_upstream(&state).await;
+
+    let response = router
+        .oneshot(request(
+            "GET",
+            "/app/qwenpaw/web/assets/index-DZrIuh3B.js",
+            admin_headers(),
+            Body::empty(),
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let script = to_bytes(response.into_body(), 32 * 1024).await.unwrap();
+    let script = String::from_utf8(script.to_vec()).unwrap();
+    assert!(script.contains(r#"const Ri="/app/qwenpaw/web",Yl="osPawAppId""#));
+    assert!(script.contains(r#"zo(location.pathname,`/chat/${encodeURIComponent(e.id)}`)"#));
+    assert_eq!(
+        captured.recv().await.unwrap().uri,
+        "/assets/index-DZrIuh3B.js"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn qwenpaw_230_dynamic_chat_module_is_complete_and_loadable_under_the_mount() {
+    let (_dir, state, router) = fixture("gateway-web-proxy-qwenpaw-230-dynamic-chat");
+    let (mut captured, server) = start_web_upstream(&state).await;
+
+    let response = router
+        .oneshot(request(
+            "GET",
+            "/app/qwenpaw/web/assets/index-opcB8AGu.js",
+            admin_headers(),
+            Body::empty(),
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    let expected_len = response.headers()[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let script = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(script.len(), expected_len);
+    let script = String::from_utf8(script.to_vec()).unwrap();
+    assert!(script.contains(r#""app/qwenpaw/web/assets/FilesWorkspace-jgsEgDeJ.js""#));
+    assert!(!script.contains(r#""assets/FilesWorkspace-jgsEgDeJ.js""#));
+    assert!(script.ends_with("export{Zf as i,Te as s};\n"));
+    assert_eq!(
+        captured.recv().await.unwrap().uri,
+        "/assets/index-opcB8AGu.js"
+    );
     server.abort();
 }
 
@@ -4505,6 +4744,151 @@ async fn web_proxy_mutation_methods_forward_and_reject_cross_origin() {
 }
 
 #[tokio::test]
+async fn upstream_sse_remains_available_when_management_events_quota_is_full() {
+    let (_dir, app, _) = fixture("gateway-upstream-sse-isolated");
+    let (_captured, upstream) = start_web_upstream(&app).await;
+    let state = root_proxy_state(app);
+    let mut occupied = Vec::new();
+    for _ in 0..MAX_SSE_CONNECTIONS {
+        occupied.push(
+            state
+                .management_sse_connections
+                .clone()
+                .try_acquire_owned()
+                .unwrap(),
+        );
+    }
+
+    let response = web_proxy::forward(
+        &state,
+        request("GET", "/sse", HeaderMap::new(), Body::empty(), None),
+        "/sse",
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+    drop(occupied);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn upstream_sse_quota_stays_at_eight_and_releases_after_disconnect() {
+    const EXPECTED_SSE_LIMIT: usize = 8;
+    assert_eq!(MAX_SSE_CONNECTIONS, EXPECTED_SSE_LIMIT);
+
+    let (_dir, app, _) = fixture("gateway-upstream-sse-quota");
+    let (_captured, upstream) = start_web_upstream(&app).await;
+    let state = root_proxy_state(app);
+    let mut responses = Vec::new();
+    for index in 0..EXPECTED_SSE_LIMIT {
+        let response = web_proxy::forward(
+            &state,
+            request("GET", "/sse-hold", HeaderMap::new(), Body::empty(), None),
+            "/sse-hold",
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "upstream SSE {index}");
+        responses.push(response);
+    }
+    assert_eq!(state.upstream_sse_connections.available_permits(), 0);
+
+    let overflow = web_proxy::forward(
+        &state,
+        request("GET", "/sse-hold", HeaderMap::new(), Body::empty(), None),
+        "/sse-hold",
+        false,
+    )
+    .await;
+    assert_eq!(overflow.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(overflow.headers().contains_key(header::RETRY_AFTER));
+
+    drop(responses);
+    let released = tokio::time::timeout(Duration::from_millis(500), async {
+        while state.upstream_sse_connections.available_permits() != EXPECTED_SSE_LIMIT {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "upstream SSE permits leaked after downstream disconnect"
+    );
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn management_events_remain_available_when_upstream_sse_quota_is_full() {
+    let (_dir, app, _) = fixture("gateway-management-sse-isolated");
+    let state = root_proxy_state(app);
+    let mut occupied = Vec::new();
+    for _ in 0..MAX_SSE_CONNECTIONS {
+        occupied.push(
+            state
+                .upstream_sse_connections
+                .clone()
+                .try_acquire_owned()
+                .unwrap(),
+        );
+    }
+    let mut slots = Vec::new();
+    let mut responses = Vec::new();
+    for index in 0..MAX_SSE_CONNECTIONS {
+        let slot = SseConnectionSlot::default();
+        let response = dispatch(
+            State(state.clone()),
+            Some(Extension(Some(peer()))),
+            Some(Extension(slot.clone())),
+            request(
+                "GET",
+                &format!("{PREFIX}/api/events"),
+                admin_headers(),
+                Body::empty(),
+                Some(peer()),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "management SSE {index}");
+        assert!(slot.0.lock().await.is_some());
+        slots.push(slot);
+        responses.push(response);
+    }
+    assert_eq!(state.management_sse_connections.available_permits(), 0);
+
+    let overflow_slot = SseConnectionSlot::default();
+    let overflow = dispatch(
+        State(state.clone()),
+        Some(Extension(Some(peer()))),
+        Some(Extension(overflow_slot.clone())),
+        request(
+            "GET",
+            &format!("{PREFIX}/api/events"),
+            admin_headers(),
+            Body::empty(),
+            Some(peer()),
+        ),
+    )
+    .await;
+    assert_eq!(overflow.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(overflow.headers().contains_key(header::RETRY_AFTER));
+
+    drop(responses);
+    drop(slots);
+    let released = tokio::time::timeout(Duration::from_millis(500), async {
+        while state.management_sse_connections.available_permits() != MAX_SSE_CONNECTIONS {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "management SSE permits leaked after downstream disconnect"
+    );
+    drop(occupied);
+}
+
+#[tokio::test]
 async fn web_proxy_releases_sse_permit_when_downstream_disconnects() {
     let (_dir, app, _) = fixture("gateway-web-proxy-sse-disconnect");
     let (_captured, upstream) = start_web_upstream(&app).await;
@@ -4528,13 +4912,13 @@ async fn web_proxy_releases_sse_permit_when_downstream_disconnects() {
     .unwrap();
     assert_eq!(&first[..], b"data: first\n\n");
     assert_eq!(
-        state.sse_connections.available_permits(),
+        state.upstream_sse_connections.available_permits(),
         MAX_SSE_CONNECTIONS - 1
     );
     drop(stream);
 
     let released = tokio::time::timeout(Duration::from_millis(500), async {
-        while state.sse_connections.available_permits() != MAX_SSE_CONNECTIONS {
+        while state.upstream_sse_connections.available_permits() != MAX_SSE_CONNECTIONS {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

@@ -221,6 +221,41 @@ mod tests {
     }
 
     #[test]
+    fn health_check_can_use_the_native_base_path() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let count = stream.read(&mut request).unwrap();
+            request_tx.send(String::from_utf8_lossy(&request[..count]).into_owned()).unwrap();
+            let body = r#"{"version":"2.3.0"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        assert!(wait_for_version_cancellable_at(
+            port,
+            "2.3.0",
+            1,
+            &|| false,
+            "/app/qwenpaw/web",
+        ));
+        server.join().unwrap();
+        assert!(request_rx
+            .recv()
+            .unwrap()
+            .starts_with("GET /app/qwenpaw/web/api/version HTTP/1.1\r\n"));
+    }
+
+    #[test]
     fn version_pin_matches() {
         assert!(version_matches("2.3.0b2", "2.3.0b2"));
         assert!(version_matches("2.3.0B2", "2.3.0b2"));
@@ -1008,7 +1043,7 @@ mod tests {
         let python = bin.join("python3");
         std::fs::write(
             &python,
-            "#!/bin/bash\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then cp \"$0\" \"$(dirname \"$0\")/uv\"; exit 0; fi\nif [ \"$(basename \"$0\")\" = \"uv\" ]; then\n  [ \"$1\" = \"pip\" ] && [ \"$2\" = \"install\" ] || exit 2\n  [ \"$5\" = \"--python\" ] && [ \"$6\" = \"$(dirname \"$0\")/python3\" ] || exit 2\n  printf new > \"$(dirname \"$0\")/../installed\"\n  exit \"${FAKE_PIP_EXIT:-0}\"\nfi\n[ \"$1\" = \"-c\" ] || exit 2\nprintf '2.0.0\\n'\n",
+            "#!/bin/bash\nif [ \"$1\" = \"-m\" ] && [ \"$2\" = \"pip\" ]; then cp \"$0\" \"$(dirname \"$0\")/uv\"; exit 0; fi\nif [ \"$(basename \"$0\")\" = \"uv\" ]; then\n  [ \"$1\" = \"pip\" ] && [ \"$2\" = \"install\" ] || exit 2\n  [ \"$5\" = \"--python\" ] && [ \"$6\" = \"$(dirname \"$0\")/python3\" ] || exit 2\n  printf 'Successfully installed qwenpaw-2.0.0\\n'\n  printf new > \"$(dirname \"$0\")/../installed\"\n  exit \"${FAKE_PIP_EXIT:-0}\"\nfi\n[ \"$1\" = \"-c\" ] || exit 2\nprintf '2.0.0\\n'\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&python).unwrap().permissions();
@@ -1181,7 +1216,8 @@ else:
 with (root / 'installer-trace').open('a') as trace:
     trace.write(json.dumps({{'module': module, 'argv': sys.argv[1:], 'program': sys.argv[0],
         'cache': os.environ.get('PIP_CACHE_DIR' if module == 'pip' else 'UV_CACHE_DIR'),
-        'index': os.environ.get('PIP_INDEX_URL' if module == 'pip' else 'UV_DEFAULT_INDEX')}}) + '\n')
+        'index': os.environ.get('PIP_INDEX_URL' if module == 'pip' else 'UV_DEFAULT_INDEX'),
+        'trusted_host': os.environ.get('PIP_TRUSTED_HOST')}}) + '\n')
 if (root / ('fail-' + module)).exists():
     sys.exit(1)
 if module == 'pip':
@@ -1211,6 +1247,9 @@ if module == 'pip':
             "uv cache"
         );
 
+        let http_mirror = "http://mirror.example:8080/simple/";
+        state.run_uv(&python, &channel, http_mirror, log).unwrap();
+
         std::fs::write(dir.join("fail-pip"), "").unwrap();
         assert!(state.run_uv(&python, &channel, mirror, log).is_err());
         std::fs::remove_file(dir.join("fail-pip")).unwrap();
@@ -1222,14 +1261,26 @@ if module == 'pip':
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(calls.len(), 7);
-        for (index, module) in ["pip", "uv", "pip", "uv", "pip", "pip", "uv"]
+        assert_eq!(calls.len(), 9);
+        for (index, module) in ["pip", "uv", "pip", "uv", "pip", "uv", "pip", "pip", "uv"]
             .iter()
             .enumerate()
         {
             let call = &calls[index];
             assert_eq!(call["module"], *module);
-            assert_eq!(call["index"], mirror);
+            let expected_mirror = if matches!(index, 4 | 5) {
+                http_mirror
+            } else {
+                mirror
+            };
+            assert_eq!(call["index"], expected_mirror);
+            if *module == "pip" {
+                if index == 4 {
+                    assert_eq!(call["trusted_host"], "mirror.example:8080");
+                } else {
+                    assert!(call["trusted_host"].is_null());
+                }
+            }
             let cache = if *module == "pip" {
                 "pip-cache"
             } else {
@@ -1385,6 +1436,10 @@ if module == 'pip':
         ));
         let snapshot = wait_for_terminal(&st);
         assert_eq!(snapshot.phase, Phase::Done, "{}", snapshot.error);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pip.log")).unwrap(),
+            "Successfully installed qwenpaw-2.0.0\n"
+        );
         assert_eq!(
             std::fs::read_to_string(venv.join("installed")).unwrap(),
             "new"
@@ -2417,6 +2472,27 @@ if module == 'pip':
         let out = run_with_timeout(cmd, std::time::Duration::from_secs(5), "测试命令").unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
+    #[test]
+    fn run_with_timeout_drains_large_child_output_before_exit() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "yes x | head -n 40000"]);
+        let out = run_with_timeout(cmd, std::time::Duration::from_secs(5), "大输出命令").unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.len() > 64 * 1024, "stdout was not drained: {}", out.stdout.len());
+    }
+
+    #[test]
+    fn atomic_write_0600_uses_a_unique_sequence_per_write() {
+        let dir = std::env::temp_dir().join(format!("qp-aw-sequence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("value");
+        std::fs::write(format!("{}.tmp.{}", target.display(), std::process::id()), "stale").unwrap();
+        atomic_write_0600(&target.to_string_lossy(), "fresh").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fresh");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── 工单11 回归:残缺 venv 不得被当成"有旧环境" ──

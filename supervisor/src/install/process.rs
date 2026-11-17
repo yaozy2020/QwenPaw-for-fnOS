@@ -1,5 +1,6 @@
 use super::{atomic_write_0600, InstallState};
 use std::{
+    io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -26,14 +27,19 @@ pub(super) fn wait_for_version(port: u16, target_version: &str, attempts: usize)
     wait_for_version_cancellable(port, target_version, attempts, &|| false)
 }
 
-pub(crate) fn wait_for_version_deadline(
+pub(crate) fn wait_for_version_deadline_at(
     port: u16,
     target_version: &str,
     deadline: std::time::Instant,
+    base_path: &str,
 ) -> bool {
-    wait_for_version_cancellable(port, target_version, usize::MAX, &move || {
-        std::time::Instant::now() >= deadline
-    })
+    wait_for_version_cancellable_at(
+        port,
+        target_version,
+        usize::MAX,
+        &move || std::time::Instant::now() >= deadline,
+        base_path,
+    )
 }
 
 pub(crate) fn wait_for_version_cancellable(
@@ -41,6 +47,16 @@ pub(crate) fn wait_for_version_cancellable(
     target_version: &str,
     attempts: usize,
     cancelled: &dyn Fn() -> bool,
+) -> bool {
+    wait_for_version_cancellable_at(port, target_version, attempts, cancelled, "")
+}
+
+pub(crate) fn wait_for_version_cancellable_at(
+    port: u16,
+    target_version: &str,
+    attempts: usize,
+    cancelled: &dyn Fn() -> bool,
+    base_path: &str,
 ) -> bool {
     use std::io::{Read, Write};
     for _ in 0..attempts {
@@ -62,7 +78,7 @@ pub(crate) fn wait_for_version_cancellable(
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
         let request = format!(
-            "GET /api/version HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            "GET {base_path}/api/version HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
         );
         if stream.write_all(request.as_bytes()).is_err() {
             continue;
@@ -110,6 +126,41 @@ pub(crate) fn wait_for_version_cancellable(
     false
 }
 
+type PipeReader = std::thread::JoinHandle<Vec<u8>>;
+
+fn spawn_pipe_reader<R: Read + Send + 'static>(mut stream: R) -> PipeReader {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stream.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn wait_with_drained_output(
+    child: &mut Child,
+    stdout_reader: Option<PipeReader>,
+    stderr_reader: Option<PipeReader>,
+) -> std::io::Result<Output> {
+    let status = child.wait()?;
+    let stdout = match stdout_reader {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| std::io::Error::other("stdout reader thread terminated unexpectedly"))?,
+        None => Vec::new(),
+    };
+    let stderr = match stderr_reader {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| std::io::Error::other("stderr reader thread terminated unexpectedly"))?,
+        None => Vec::new(),
+    };
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// 在独立进程组中运行短命命令；超时后必须回收整个进程组并 wait 子进程。
 pub(crate) fn run_with_timeout(
     mut cmd: Command,
@@ -122,6 +173,8 @@ pub(crate) fn run_with_timeout(
         .stderr(Stdio::piped())
         .process_group(0);
     let mut child = cmd.spawn()?;
+    let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
+    let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
     let pid = child.id() as i32;
     let mut identity = capture_process_identity(child.id(), pid).ok();
     let started = std::time::Instant::now();
@@ -133,7 +186,7 @@ pub(crate) fn run_with_timeout(
         match child.try_wait()? {
             Some(_) => {
                 terminate_process_group(&mut child, identity)?;
-                return child.wait_with_output();
+                return wait_with_drained_output(&mut child, stdout_reader, stderr_reader);
             }
             None if started.elapsed() >= timeout => {
                 terminate_process_group(&mut child, identity)?;
@@ -327,7 +380,6 @@ impl InstallState {
                     state.starttime = 0;
                     state.executable = None;
                 }
-                atomic_write_0600(&pid_file.to_string_lossy(), &format!("{pid}\n0\n{pgid}\n"))?;
                 return Err(error);
             }
         };
@@ -455,6 +507,8 @@ impl InstallState {
         .stderr(Stdio::piped())
         .process_group(0);
         let mut child = cmd.spawn()?;
+        let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
+        let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
         let pid = child.id();
         let pgid = pid as i32;
         let registration = self.register_process(pid, pgid, pid_file);
@@ -502,7 +556,8 @@ impl InstallState {
                         terminate_process_group(&mut child, self.registered_identity(pid));
                     match cleanup {
                         Ok(()) => {
-                            let output = child.wait_with_output()?;
+                            let output =
+                                wait_with_drained_output(&mut child, stdout_reader, stderr_reader)?;
                             self.clear_or_block(pid, pid_file, label)?;
                             return Ok(output);
                         }
@@ -572,15 +627,10 @@ pub(crate) fn signal_process_group(identity: ProcessIdentity, signal: i32) -> st
     if !matches!(signal, libc::SIGTERM | libc::SIGKILL) {
         return Err(identity_error("unsupported process group signal"));
     }
-    if !verify_process_identity(identity)? {
-        return if process_group_empty(identity.pgid, identity.session)? {
-            Ok(())
-        } else {
-            Err(identity_error(format!(
-                "process group {} remains after its registered leader exited",
-                identity.pgid
-            )))
-        };
+    if !verify_process_identity(identity)?
+        && process_group_empty(identity.pgid, identity.session)?
+    {
+        return Ok(());
     }
     if process_group_empty(identity.pgid, identity.session)? {
         return Ok(());
@@ -610,14 +660,9 @@ pub(crate) fn terminate_process_group(
     if pgid <= 1 || session <= 1 {
         return Err(identity_error("invalid process group/session for cleanup"));
     }
-    if !verify_process_identity(identity)? {
-        if process_group_empty(pgid, session)? {
-            child.wait()?;
-            return Ok(());
-        }
-        return Err(identity_error(format!(
-            "process group {pgid} remains after its registered leader exited"
-        )));
+    if !verify_process_identity(identity)? && process_group_empty(pgid, session)? {
+        child.wait()?;
+        return Ok(());
     }
     if process_group_empty(pgid, session)? {
         child.wait()?;
@@ -670,6 +715,21 @@ mod identity_registration_tests {
     };
 
     #[test]
+    fn identity_capture_failure_does_not_write_zero_starttime_record() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "qwenpaw-unverified-process-{}.pid",
+            std::process::id()
+        ));
+        let state = InstallState::new(std::sync::Arc::new(|_| {}), std::sync::Arc::new(|| Ok(0)));
+        let result = state.register_process(std::process::id(), 0, &pid_file);
+        assert!(result.is_err());
+        assert!(
+            !pid_file.exists(),
+            "unverified identity must not leave a recovery-blocking record"
+        );
+    }
+
+    #[test]
     fn short_lived_child_gone_before_executable_check_is_registered() {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let pid_file = std::env::temp_dir().join(format!(
@@ -714,5 +774,39 @@ mod identity_registration_tests {
         assert!(!verify_process_identity(identity).unwrap());
         assert!(process_group_empty(identity.pgid, identity.session).unwrap());
         assert!(record.is_some_and(|record| record.starts_with(&format!("{pid}\n"))));
+    }
+
+    #[test]
+    fn cleans_a_registered_group_after_its_leader_has_exited() {
+        let mut leader = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & printf started >/dev/null; read _"])
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let pgid = pid as i32;
+        let identity = capture_process_identity(pid, pgid).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while crate::procfs::processes_in_group(pgid, identity.session)
+            .unwrap()
+            .len()
+            < 2
+        {
+            assert!(std::time::Instant::now() < deadline, "descendant did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(leader.stdin.take());
+        leader.wait().unwrap();
+        assert!(!verify_process_identity(identity).unwrap());
+        assert!(!process_group_empty(pgid, identity.session).unwrap());
+
+        let result = terminate_process_group(&mut leader, Some(identity));
+        if result.is_err() {
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        }
+        leader.wait().unwrap();
+        assert!(result.is_ok(), "leader exit left the registered group unrecoverable: {result:?}");
+        assert!(process_group_empty(pgid, identity.session).unwrap());
     }
 }

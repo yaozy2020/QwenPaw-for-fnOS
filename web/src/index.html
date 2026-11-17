@@ -54,16 +54,16 @@
         <span class="btn-label" id="themeText">暗夜</span>
       </button>
 
-      <button type="button" class="btn-outline" id="refreshDashboardBtn" onclick="refreshDashboard()" title="刷新状态和日志" aria-label="刷新状态和日志">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <path d="M23 4v6h-6M1 20v-6h6"/>
-          <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+      <button type="button" class="btn-outline" id="aboutButton" onclick="showAbout()" title="关于与常见问题" aria-label="关于与常见问题" aria-haspopup="dialog" aria-controls="aboutDialog">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>
         </svg>
-        <span class="btn-label">刷新</span>
+        <span class="btn-label">关于</span>
       </button>
       <button type="button" id="taskCenterButton" class="btn btn-secondary" hidden>查看安装任务</button>
-      <a id="btnWebConsole" class="btn btn-primary" href="#overview">
+      <a id="btnWebConsole" class="btn btn-primary" data-web-console href="#overview" aria-label="正在连接服务">
         <span id="webConsoleText">正在连接服务</span>
+        <span id="webConsoleMobileText" aria-hidden="true">连接</span>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d="M5 12h14m-7-7 7 7-7 7"/>
         </svg>
@@ -71,11 +71,11 @@
     </div>
   </header>
 
-  <nav class="section-nav" aria-label="控制台分区">
-    <a href="#overview">概览</a>
-    <a href="#version">版本</a>
-    <a href="#configuration">配置</a>
-    <a href="#logs">日志</a>
+  <nav id="mobileSectionNav" class="section-nav" aria-label="控制台分区">
+    <a href="#overview" data-section="overview">概览</a>
+    <a href="#configuration" data-section="configuration">配置</a>
+    <a href="#authorization" data-section="authorization">授权与备份</a>
+    <a href="#logs" data-section="logs">日志</a>
   </nav>
 
   <main class="main-content">
@@ -86,9 +86,18 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
           </svg>
-          服务概览
+          QwenPaw
         </h2>
-        <span class="card-meta" id="statusUptime"></span>
+        <div class="overview-tools">
+          <a id="overviewWebConsole" class="btn-outline btn-sm" data-web-console href="/app/qwenpaw/web/" hidden>进入 Web 对话</a>
+          <span class="card-meta" id="statusUptime"></span>
+          <button type="button" class="btn-outline btn-xs icon-button" id="refreshDashboardBtn" onclick="refreshDashboard()" title="刷新状态和日志" aria-label="刷新状态和日志">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M23 4v6h-6M1 20v-6h6"/>
+              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="card-body">
         <div id="statusCardMount">
@@ -97,49 +106,80 @@
             <p class="status-description">正在获取运行状态与资源用量…</p>
           </div>
           <div class="stat-grid" aria-label="运行指标">
-            <div class="stat"><div class="stat-value">—</div><div class="stat-label">进程 PID</div></div>
             <div class="stat"><div class="stat-value">—</div><div class="stat-label">CPU 占用</div></div>
             <div class="stat"><div class="stat-value">—</div><div class="stat-label">内存占用</div></div>
           </div>
         </div>
       </div>
+      <div class="overview-details" aria-label="当前配置摘要">
+        <div><span>进程 PID</span><strong id="overviewPid">—</strong></div>
+        <div><span>当前版本</span><strong id="overviewVersion">—</strong></div>
+        <div><span>服务端口</span><strong id="overviewPort">18088</strong></div>
+        <div><span>登录验证</span><strong id="overviewAuth">状态获取中</strong></div>
+      </div>
+      <div class="overview-installer" id="overviewInstaller" hidden>
+        <div class="installer-summary">
+          <div>
+            <span>目标版本</span>
+            <strong id="overviewInstallVersion">推荐 Stable</strong>
+          </div>
+        </div>
+        <div class="installer-actions">
+          <button type="button" class="btn-primary" id="overviewInstallButton" onclick="checkOrUpgrade()">开始安装</button>
+        </div>
+        <p class="card-note">首次建议 Stable；需要 Beta 或历史版本时，可在“版本”分区切换。</p>
+      </div>
       <div class="overview-footer">
         <span class="card-note" id="statusCheckedAt">等待首次同步</span>
         <div class="card-actions">
-          <a class="btn btn-primary btn-sm" id="statusInstallLink" href="#version" hidden>选择版本并安装</a>
           <button class="btn-primary btn-sm" id="btnStartService" onclick="controlService('start')" hidden>启动服务</button>
           <button class="btn-outline btn-sm" id="btnRestartService" onclick="controlService('restart')" hidden>重启服务</button>
           <button class="btn-danger-ghost btn-sm" id="btnStopService" onclick="controlService('stop')" hidden>停止服务</button>
         </div>
       </div>
-      <div class="overview-shortcuts" aria-label="管理快捷入口">
-        <a href="#version"><strong>版本管理</strong><span>安装与更新 <span aria-hidden="true">↗</span></span></a>
-        <a href="#configuration"><strong>访问设置</strong><span>端口与账号 <span aria-hidden="true">↗</span></span></a>
-        <a href="#logs"><strong>运行日志</strong><span>查看与排查 <span aria-hidden="true">↗</span></span></a>
+      <div class="overview-guide" id="overviewGuide" hidden>
+        <h3>首次使用</h3>
+        <ol>
+          <li>在版本管理选择 Stable 稳定版</li>
+          <li>等待下载安装与启动检查完成</li>
+          <li>进入 Web 对话开始使用</li>
+        </ol>
+      </div>
+      <div class="overview-log-preview" aria-label="最近日志预览">
+        <div class="preview-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <polyline points="4 17 10 11 4 5"/>
+            <line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+          最近日志
+        </div>
+        <pre id="overviewLogPreview">暂无日志</pre>
       </div>
     </section>
 
     <!-- 版本与升级(单选卡片 + 检查更新) -->
-    <section class="card" id="version" data-mobile-panel="version" aria-labelledby="versionTitle">
+    <section class="card" id="version" data-mobile-panel="overview" aria-labelledby="versionTitle">
       <div class="card-title">
         <h2 class="card-title-left" id="versionTitle">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 00-2.91-.09z"/>
             <path d="M12 15l-3-3a22 22 0 012-3.95A12.88 12.88 0 0122 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 01-4 2z"/>
           </svg>
-          版本更新
+          部署版本
         </h2>
-        <button type="button" class="btn-outline btn-xs" onclick="checkOnlineVersions()">
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path d="M23 4v6h-6M1 20v-6h6"/>
-            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
-          </svg>
-          检查更新
-        </button>
+        <div class="card-title-actions">
+          <button type="button" class="btn-outline btn-xs" onclick="checkOnlineVersions()">
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M23 4v6h-6M1 20v-6h6"/>
+              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+            </svg>
+            检查更新
+          </button>
+        </div>
       </div>
       <div class="card-body">
         <div class="info-row">
-          <span class="info-label">当前运行</span>
+          <span class="info-label">QwenPaw 内核</span>
           <span class="info-val" id="valVersion">—</span>
         </div>
 
@@ -172,22 +212,10 @@
             </div>
           </div>
           <div id="versionSourceStatus" class="notice notice-danger" role="alert" hidden></div>
-          <div class="ver-cards-container" id="versionCardsContainer">
-            <div class="ver-card-item" onclick="pickVersion('2.3.0b2')">
-              <div class="ver-info-left">
-                <span class="ver-number">v2.3.0b2</span>
-                <span class="ver-tag-pill beta">最新测试 Beta</span>
-              </div>
-              <div class="custom-radio"></div>
-            </div>
-            <div class="ver-card-item active" onclick="pickVersion('2.2.2.post1')">
-              <div class="ver-info-left">
-                <span class="ver-number">v2.2.2.post1</span>
-                <span class="ver-tag-pill stable">推荐稳定 Stable</span>
-              </div>
-              <div class="custom-radio"></div>
-            </div>
+          <div class="ver-cards-container" id="versionCardsContainer" aria-live="polite">
+            <span class="log-empty" role="status">正在加载可用版本…</span>
           </div>
+          <noscript><p class="notice notice-warn">版本安装与服务管理需要启用 JavaScript。</p></noscript>
 
           <!-- 历史版本折叠菜单 -->
           <div class="history-dropdown" id="historyDropdown"></div>
@@ -221,7 +249,7 @@
           <span class="info-label">服务端口</span>
           <div class="row-inline">
             <span class="info-val" id="valPort">18088</span>
-            <button type="button" class="btn-outline btn-xs" onclick="changeServicePort()">修改端口</button>
+            <button type="button" class="btn-outline btn-xs" id="btnChangeServicePort" onclick="changeServicePort()">修改端口</button>
           </div>
         </div>
         <div class="info-row">
@@ -252,6 +280,41 @@
         <button type="button" class="btn-outline btn-sm btn-block" onclick="resetAuth()">重置 QwenPaw 管理员密码</button>
       </div>
     </section>
+
+    <section class="card" id="authorization" data-mobile-panel="authorization" aria-labelledby="authorizationTitle">
+      <div class="card-title">
+        <h2 class="card-title-left" id="authorizationTitle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M3 7a2 2 0 012-2h5l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+          </svg>
+          授权与备份
+        </h2>
+      </div>
+      <div class="card-body">
+        <div id="authorized-dirs">
+          <div class="info-row">
+            <span class="info-label" id="authorizedDirsTitle">工作区目录</span>
+            <div class="row-inline">
+              <button type="button" class="btn-outline btn-xs" id="refreshAuthorizedDirsBtn">刷新</button>
+              <button type="button" class="btn-primary btn-xs" id="addAuthorizedDirBtn">选择飞牛目录</button>
+            </div>
+          </div>
+          <p class="section-subtitle">通过飞牛授权添加项目目录；移除绑定不会删除文件。</p>
+          <p class="card-note" id="authorizedDirsStatus" role="status" aria-live="polite"></p>
+          <div id="authorizedDirsList" aria-live="polite">
+            <span class="log-empty" role="status">正在读取工作区目录…</span>
+          </div>
+        </div>
+        <div class="section-label">数据备份</div>
+        <div class="info-row">
+          <div>
+            <span class="info-label">QwenPaw 备份</span>
+            <p class="card-note">使用上游备份页面创建、导入和恢复；备份可能包含敏感凭证。</p>
+          </div>
+          <button type="button" class="btn-outline btn-xs" id="openBackupBtn" disabled>打开备份管理</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <!-- 实时日志终端 -->
@@ -274,17 +337,11 @@
         <label class="check-label">
           <input type="checkbox" id="autoRefreshCheck" checked onchange="toggleAutoRefresh(this.checked)"> 实时刷新
         </label>
+        <button type="button" class="btn-outline btn-sm" id="exportLogsBtn">导出</button>
         <button type="button" class="btn-outline btn-sm" onclick="clearTerminalLogs()">清空日志</button>
       </div>
     </div>
-    <div class="terminal-body" id="logTerminal"></div>
-    <div class="terminal-footer">
-      <button type="button" class="btn-outline btn-sm" id="logPrevBtn" onclick="logGoPrev()">上一页</button>
-      <span id="logPageIndicator">第 - 页</span>
-      <button type="button" class="btn-outline btn-sm" id="logNextBtn" onclick="logGoNext()">下一页</button>
-      <button type="button" class="btn-outline btn-sm" onclick="logGoLatest()">回到最新</button>
-      <span id="logWindowHint" class="footer-hint" hidden>已到回看窗口边界（2000 行），更早内容请直接查看服务器日志文件</span>
-    </div>
+    <div class="terminal-body" id="logTerminal" role="log" aria-label="QwenPaw 运行日志" aria-live="off" tabindex="0"></div>
   </section>
   </main>
 
@@ -347,12 +404,46 @@
     </div>
   </div>
 
-  <nav id="mobileSectionNav" class="mobile-nav" aria-label="移动端控制台分区">
-    <button type="button" data-section="overview" aria-controls="overview">概览</button>
-    <button type="button" data-section="version" aria-controls="version">版本</button>
-    <button type="button" data-section="configuration" aria-controls="configuration">配置</button>
-    <button type="button" data-section="logs" aria-controls="logs">日志</button>
-  </nav>
+  <dialog id="aboutDialog" class="about-dialog" aria-labelledby="aboutTitle">
+    <div class="about-header">
+      <h2 id="aboutTitle">关于 QwenPaw</h2>
+      <p>QwenPaw for fnOS 是第三方部署外壳，负责安装、运行和运维管理；QwenPaw 本体由所选 PyPI 镜像安装。</p>
+    </div>
+    <div class="about-links" aria-label="项目地址">
+      <a href="https://github.com/agentscope-ai/QwenPaw" target="_blank" rel="noopener noreferrer">
+        <strong>上游 QwenPaw 官网 / 项目</strong><span>github.com/agentscope-ai/QwenPaw</span>
+      </a>
+      <a href="https://github.com/yaozy2020/QwenPaw-for-fnOS" target="_blank" rel="noopener noreferrer">
+        <strong>QwenPaw for fnOS 项目</strong><span>github.com/yaozy2020/QwenPaw-for-fnOS</span>
+      </a>
+    </div>
+    <section class="faq" aria-labelledby="faqTitle">
+      <h3 id="faqTitle">常见问题处理</h3>
+      <details>
+        <summary>无法打开 Web 对话</summary>
+        <p>先在概览确认内核已安装且正在运行，再刷新状态。仍无法打开时，到运行日志检查端口、健康检查和网关错误。</p>
+      </details>
+      <details>
+        <summary>安装或更新失败</summary>
+        <p>检查 NAS 网络与 DNS，在版本管理中切换下载源后重试。已有任务时先打开任务详情，不要重复提交安装。</p>
+      </details>
+      <details>
+        <summary>忘记 QwenPaw 管理员密码</summary>
+        <p>在“配置”中使用“重置 QwenPaw 管理员密码”，然后回到对话端重新设置。该操作不修改飞牛账号、配置或记忆。</p>
+      </details>
+      <details>
+        <summary>升级后出现权限或运行异常</summary>
+        <p>保留日志和用户数据，不要手工删除 venv 或共享目录。记录错误时间与提示，到项目 Issues 附上日志反馈。</p>
+      </details>
+    </section>
+    <form method="dialog" class="about-actions">
+      <button type="submit" class="btn-primary" autofocus>关闭</button>
+    </form>
+  </dialog>
+
+  <div id="webEntryOverlay" class="web-entry-overlay" role="dialog" aria-modal="true" aria-label="QwenPaw Web" hidden>
+    <iframe id="webEntryFrame" title="QwenPaw Web" src="about:blank"></iframe>
+  </div>
 
   <script>//__INLINE_JS__</script>
 </body>

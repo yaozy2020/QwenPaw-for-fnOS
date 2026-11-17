@@ -44,4 +44,6 @@ const html = tpl
   .replace("__BUILD_ID__", () => buildId);
 
 writeFileSync("dist/index.html", html);
+const callback = readFileSync("src/auth-callback.html", "utf8");
+writeFileSync("dist/auth-callback.html", callback);
 console.log(`dist/index.html: ${(html.length / 1024).toFixed(1)} KB (build ${buildId})`);

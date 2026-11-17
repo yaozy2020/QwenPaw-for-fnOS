@@ -326,21 +326,6 @@ cb_run() {
         "$@" bash "${CB_DEST}/cmd/config_callback"
 }
 
-RESERVED_PORTS="$(python3 - "$ROOT/supervisor/src/platform.rs" <<'PYRESERVED'
-import re, sys
-source = open(sys.argv[1], encoding="utf-8").read()
-match = re.search(r"contains\(&value\).*?value\s*==\s*(\d+).*?value\s*==\s*(\d+)", source)
-if not match:
-    raise SystemExit("could not locate the platform's reserved port list")
-print(*match.groups())
-PYRESERVED
-)"
-read -r -a RESERVED_PORT_LIST <<< "$RESERVED_PORTS"
-if [ "${#RESERVED_PORT_LIST[@]}" -ne 2 ]; then
-    bad "无法从 platform.configure 读取完整保留端口列表"
-    CB_READY=0
-fi
-
 if [ "$CB_READY" -eq 1 ]; then
     if [ ! -x "${CB_DEST}/bin/qwenpaw-supervisor" ] \
         || ! cmp -s -- "$TEST_RELEASE_BIN" "${CB_DEST}/bin/qwenpaw-supervisor"; then
@@ -360,17 +345,16 @@ if [ "$CB_READY" -eq 1 ]; then
         bad "config_callback 非法端口失败路径异常: rc=$rc"
     fi
 
-    for reserved in "${RESERVED_PORT_LIST[@]}"; do
-        rc=0
-        cb_run wizard_port="$reserved" >/dev/null 2>&1 || rc=$?
-        if [ "$rc" -ne 0 ] && [ "$(cb_hashes)" = "${cb_before}" ] \
-            && grep -Fq "\"port\": \"${CB_SERVICE_PORT}\"" "${CB_DEST}/ui/config" \
-            && cb_no_service_artifacts; then
-            ok "config_callback 拒绝保留端口 $reserved 且配置/服务状态不变"
-        else
-            bad "config_callback 未在启动前拒绝保留端口 $reserved: rc=$rc"
-        fi
-    done
+    reserved="$CB_SUP_PORT"
+    rc=0
+    cb_run wizard_port="$reserved" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ] && [ "$(cb_hashes)" = "${cb_before}" ] \
+        && grep -Fq "\"port\": \"${CB_SERVICE_PORT}\"" "${CB_DEST}/ui/config" \
+        && cb_no_service_artifacts; then
+        ok "config_callback 拒绝当前管理端口 $reserved 且配置/服务状态不变"
+    else
+        bad "config_callback 未在启动前拒绝当前管理端口 $reserved: rc=$rc"
+    fi
 fi
 
 # ── [8] release 原生监督者真实生命周期、锁与多进程竞争回归 ──

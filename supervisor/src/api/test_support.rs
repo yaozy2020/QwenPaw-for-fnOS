@@ -44,7 +44,7 @@ impl TestDir {
             operations: Arc::new(tokio::sync::Mutex::new(())),
             auth_cache: Arc::new(std::sync::Mutex::new(AuthCache::default())),
             web_proxy: None,
-            supervisor_port: 19090,
+            supervisor_port: 18091,
         }
     }
 }

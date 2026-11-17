@@ -56,6 +56,7 @@ def read_process(pid):
         fields = raw[raw.rfind(")") + 2:].split()
         executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
         metadata = executable.stat()
+        exe_id = (metadata.st_dev, metadata.st_ino)
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
         environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
         return {
@@ -64,7 +65,7 @@ def read_process(pid):
             "state": fields[0],
             "ppid": int(fields[1]),
             "exe": executable,
-            "exe_id": (metadata.st_dev, metadata.st_ino),
+            "exe_id": exe_id,
             "argv": tuple(arg for arg in argv if arg),
             "environ": frozenset(item for item in environ if item),
         }
@@ -74,7 +75,18 @@ def read_process(pid):
 
 def alive(identity):
     current = read_process(identity["pid"])
-    return current is not None and identity_matches(current, identity) and current["state"] not in {"Z", "X"}
+    if current is None:
+        try:
+            raw = Path(f"/proc/{identity['pid']}/stat").read_text()
+            fields = raw[raw.rfind(")") + 2:].split()
+            executable = Path(os.readlink(f"/proc/{identity['pid']}/exe"))
+            deleted = str(executable).endswith(" (deleted)")
+            return (deleted and int(fields[19]) == identity["starttime"]
+                    and executable == Path(str(identity["exe"]) + " (deleted)")
+                    and fields[0] not in {"Z", "X"})
+        except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError, ValueError, OSError):
+            return False
+    return identity_matches(current, identity) and current["state"] not in {"Z", "X"}
 
 
 def identity_matches(current, expected):
@@ -104,18 +116,26 @@ def pidfd_signal(identity, signum, fixture):
     require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
             "safe process cleanup requires pidfd_open and pidfd_send_signal")
     current = read_process(identity["pid"])
-    if current is None or current["state"] in {"Z", "X"}:
+    if current is None:
+        if not alive(identity):
+            return False
+        current = identity
+    elif current["state"] in {"Z", "X"}:
         return False
-    require(identity_matches(current, identity),
+    require(current is identity or identity_matches(current, identity),
             f"refusing to signal changed process identity pid={identity['pid']}")
     require(env_contains(current, "TRIM_PKGVAR", fixture.var),
             f"refusing to signal process outside the temporary TRIM root pid={identity['pid']}")
     pidfd = os.pidfd_open(identity["pid"])
     try:
         current = read_process(identity["pid"])
-        if current is None or current["state"] in {"Z", "X"}:
+        if current is None:
+            if not alive(identity):
+                return False
+            current = identity
+        elif current["state"] in {"Z", "X"}:
             return False
-        require(identity_matches(current, identity),
+        require(current is identity or identity_matches(current, identity),
                 f"process identity changed before pidfd signal pid={identity['pid']}")
         require(env_contains(current, "TRIM_PKGVAR", fixture.var),
                 f"process left the temporary TRIM root before pidfd signal pid={identity['pid']}")
@@ -211,6 +231,10 @@ class Fixture:
 
     @property
     def helper(self):
+        return self.installed_cmd / "qwenpaw-supervisor-helper"
+
+    @property
+    def legacy_var_helper(self):
         return self.var / "qwenpaw-supervisor-helper"
 
     @property
@@ -307,7 +331,7 @@ class Fixture:
     def callback(self, name, output_parent=None, directory=None, **overrides):
         if name in {"upgrade", "uninstall"} and directory is None:
             require(self.installed_helper.is_file(),
-                    f"{name} callback requires an explicitly staged installed sibling helper")
+                    f"{name} callback requires an explicitly staged cmd supervisor")
         path = self.entry_path(name, directory=directory)
         env = self.env.copy()
         env.update({key: str(value) for key, value in overrides.items()})
@@ -502,8 +526,6 @@ class Fixture:
             return ["bash", str(ROOT / "cmd/main"), "stop"]
         if self.installed_helper.is_file():
             return [str(self.installed_helper), "service", "stop"]
-        if self.helper.is_file():
-            return [str(self.helper), "service", "stop"]
         return None
 
     def stop_manager(self):
@@ -584,16 +606,15 @@ def validate_inputs():
         active = [line.strip() for line in executable.splitlines() if line.strip()]
         if action in {"upgrade", "uninstall"}:
             expected = [
-                'if [ -n "${TRIM_PKGVAR:-}" ] && [ -x "${TRIM_PKGVAR}/qwenpaw-supervisor-helper" ]; then',
-                f'exec "${{TRIM_PKGVAR}}/qwenpaw-supervisor-helper" platform {action}',
-                "fi",
                 'if [ -x "${0%/*}/qwenpaw-supervisor" ]; then',
                 f'exec "${{0%/*}}/qwenpaw-supervisor" platform {action}',
                 "fi",
                 "exit 127",
             ]
             require(active == expected,
-                    f"{path.relative_to(ROOT)} must use a persistent helper first, a sibling fallback, and fail closed")
+                    f"{path.relative_to(ROOT)} must use only the packaged cmd supervisor and fail closed")
+            require("qwenpaw-supervisor-helper" not in executable,
+                    f"{path.relative_to(ROOT)} still contains a persistent helper fallback")
         else:
             require(re.search(rf'exec\s+"\$candidate"\s+platform\s+{re.escape(action)}(?:\s|$)', executable),
                     f"{path.relative_to(ROOT)} is not a thin native platform {action} exec callback")
@@ -627,20 +648,16 @@ def stage_callback_dispatch_stub(path, marker):
     os.chmod(path, 0o755)
 
 
-def case_lifecycle_callback_prefers_var_helper(parent, hashes, action):
-    with Fixture(parent, f"callback-var-priority-{action}", hashes) as fixture:
-        wrapper_dir = fixture.root / "callback-wrapper"
-        stage_callback_dispatch_stub(wrapper_dir / "qwenpaw-supervisor", f"selected-sibling-{action}")
-        stage_callback_dispatch_stub(fixture.helper, f"selected-var-{action}")
-
-        code, output = fixture.callback(action, directory=wrapper_dir)
-        require(code == 0, f"{action} callback stub returned {code}: {output}")
-        require(f"selected-var-{action}" in output,
-                f"{action} callback did not prefer the persistent var helper: {output}")
-        require(f"selected-sibling-{action}" not in output,
-                f"{action} callback selected the stale sibling despite a var helper: {output}")
-        require(f"arg=platform\narg={action}" in output,
-                f"{action} callback did not preserve the fixed Rust action arguments: {output}")
+def case_legacy_var_helper_is_never_executed(parent, hashes, action):
+    with Fixture(parent, f"legacy-var-helper-{action}", hashes) as fixture:
+        stage_callback_dispatch_stub(fixture.legacy_var_helper, "unsafe-legacy-var-helper")
+        stage_callback_dispatch_stub(fixture.installed_helper, "trusted-sibling")
+        code, output = fixture.callback(action)
+        require(code == 0, f"{action} trusted sibling stub failed: {output}")
+        require("unsafe-legacy-var-helper" not in output,
+                f"{action} executed the replaceable legacy var helper")
+        require("trusted-sibling" in output,
+                f"{action} did not retain the trusted sibling fallback: {output}")
 
 
 def case_empty_shell(parent, hashes):
@@ -723,7 +740,7 @@ def case_removed_target_without_helper_is_127(parent, hashes):
         fixture.binary.unlink()
         require(not fixture.installed_helper.exists(),
                 "installed callback fixture unexpectedly contains a sibling helper")
-        require(not fixture.helper.exists(), "baseline fixture unexpectedly contains a var helper")
+        require(not fixture.helper.exists(), "baseline fixture unexpectedly contains a callback helper")
         for name in ("upgrade", "uninstall"):
             code, output = fixture.command([str(fixture.entry_path(name))])
             require(code == 127,
@@ -752,18 +769,14 @@ def case_upgrade_init_prefers_candidate_supervisor(parent, hashes):
                 f"upgrade_init executed the old target supervisor instead of the staged candidate: {output}")
         require("wizard_pypi_mirror=official" in output,
                 f"candidate upgrade_init did not preserve mirror output: {output}")
-        require(fixture.helper.is_file(), "candidate upgrade_init did not stage a regular var helper")
-        helper_metadata = fixture.helper.stat()
-        require(stat.S_ISREG(helper_metadata.st_mode), "staged helper is not a regular file")
-        require(stat.S_IMODE(helper_metadata.st_mode) == 0o750,
-                f"staged helper mode is not 0750: {stat.S_IMODE(helper_metadata.st_mode):04o}")
-        require(sha256(fixture.helper) == hashes["supervisor"],
-                "staged helper SHA256 differs from the release supervisor source")
-        require(not list(fixture.var.glob(".qwenpaw-supervisor-helper.*.tmp")),
-                "helper staging left a temporary file")
+        require(not fixture.helper.exists(), "candidate upgrade_init unexpectedly staged a helper")
+        require(not fixture.legacy_var_helper.exists(),
+                "candidate upgrade_init unexpectedly staged a legacy var helper")
+        require(not list(fixture.helper.parent.glob(".qwenpaw-supervisor-helper.*.tmp")),
+                "upgrade-init left a helper temporary file")
 
 
-def case_legacy_upgrade_init_does_not_stage_var_helper(parent, hashes):
+def case_legacy_upgrade_init_does_not_stage_callback_helper(parent, hashes):
     with Fixture(parent, "legacy-upgrade-init", hashes) as fixture:
         marker = "LEGACY_TARGET_UPGRADE_INIT"
         fixture.binary.write_text(
@@ -772,138 +785,11 @@ def case_legacy_upgrade_init_does_not_stage_var_helper(parent, hashes):
         )
         os.chmod(fixture.binary, 0o755)
         installed_cmd = fixture.root / "installed/cmd"
-        code, output = fixture.upgrade_init(directory=installed_cmd)
+        code, output = fixture.upgrade_init(directory=None)
         require(code == 0 and marker in output,
                 f"upgrade_init did not preserve the legacy target fallback (rc={code}): {output}")
         require(not fixture.helper.exists(),
-                "legacy target upgrade_init unexpectedly staged a var helper")
-
-
-def case_installed_callback_falls_back_to_var_helper(parent, hashes):
-    with Fixture(parent, "installed-callback-var-helper", hashes) as fixture:
-        fixture.create_runtime("2.4.1")
-        fixture.pin.write_text("2.4.1\n")
-        code, output = fixture.callback("install")
-        require(code == 0, f"install callback failed while creating the var helper (rc={code}): {output}")
-        installed_cmd = fixture.root / "installed/cmd"
-        installed_cmd.mkdir(parents=True)
-        require(not (installed_cmd / "qwenpaw-supervisor").exists(),
-                "installed callback fixture unexpectedly has its sibling supervisor")
-        code, output = fixture.callback("upgrade", directory=installed_cmd)
-        require(code == 0,
-                f"installed callback did not fall back to the var helper (rc={code}): {output}")
-        require("开始升级回调" in output,
-                f"var-helper callback did not enter the Rust upgrade workflow: {output}")
-
-
-def case_persistent_helper_after_target_removal(parent, hashes):
-    with Fixture(parent, "persistent-helper", hashes) as fixture:
-        fixture.create_runtime("2.4.1")
-        fixture.pin.write_text("2.4.1\n")
-        fixture.user_data.joinpath("config.json").write_text("shared-data-sentinel\n")
-        fixture.user_secret.joinpath("auth.json").write_text("auth-sentinel\n")
-        (fixture.home / "workspace-sentinel").write_text("home-sentinel\n")
-        (fixture.etc / "settings").write_text("etc-sentinel\n")
-        (fixture.var / "var-sentinel").write_text("var-sentinel\n")
-
-        code, output, old_target_marker = stage_candidate_upgrade_helper(fixture)
-        require(code == 0 and old_target_marker not in output,
-                f"candidate upgrade_init did not replace the old target path (rc={code}): {output}")
-        shutil.copy2(SUPERVISOR_SOURCE, fixture.binary)
-        os.chmod(fixture.binary, 0o755)
-
-        installed_cmd = fixture.root / "installed/cmd"
-        installed_cmd.mkdir(parents=True)
-        require(not (installed_cmd / "qwenpaw-supervisor").exists(),
-                "installed callback fixture unexpectedly has its sibling supervisor")
-        fixture.start_manager(expect_kernel=True)
-        prior = fixture.control_status()
-        code, output = fixture.callback("upgrade", directory=installed_cmd)
-        require(code == 0,
-                f"installed callback without a sibling failed to use the var helper (rc={code}): {output}")
-        require("开始升级回调" in output,
-                f"var-helper callback did not enter the Rust upgrade workflow: {output}")
-        require(fixture.control_status()["seq"] == prior["seq"],
-                "healthy var-helper upgrade unexpectedly submitted a runtime install task")
-        require(fixture.venv.joinpath("installed").read_text() == "2.4.1\n",
-                "healthy var-helper upgrade changed the runtime")
-        require(fixture.pin.read_text() == "2.4.1\n",
-                "healthy var-helper upgrade changed the exact version pin")
-        require(not (fixture.control / "pip-started").exists(),
-                "healthy var-helper upgrade invoked pip")
-        fixture.manager_identity()
-        fixture.stop_manager()
-
-        fixture.binary.unlink()
-        require(not fixture.binary.exists(), "target supervisor binary was not removed")
-        code, output = fixture.callback("upgrade", directory=installed_cmd)
-        require(code == 1 and "开始升级回调" in output
-                and "升级后启动监督者失败" in output,
-                f"target-missing callback did not enter Rust and fail closed at manager startup "
-                f"(rc={code}): {output}")
-        require(not (fixture.var / "supervisor.pid").exists(),
-                "upgrade started a long-lived manager from the persistent var helper")
-        require(fixture.helper.is_file(), "failed target upgrade removed the persistent var helper")
-
-        fixture.env.pop("wizard_keep_data", None)
-        code, output = fixture.callback("uninstall", directory=installed_cmd)
-        require(code == 0 and "卸载清理完成" in output,
-                f"installed uninstall callback without sibling failed to use the var helper "
-                f"or default keep mode (rc={code}): {output}")
-        require(fixture.helper.is_file(), "default keep uninstall removed the persistent var helper")
-        require(not fixture.venv.exists(), "default keep uninstall removed the venv")
-        require(fixture.pin.read_text() == "2.4.1\n", "default keep uninstall removed the version pin")
-        require((fixture.home / "workspace-sentinel").read_text() == "home-sentinel\n",
-                "default keep uninstall removed other home data")
-        require((fixture.etc / "settings").read_text() == "etc-sentinel\n",
-                "default keep uninstall removed etc data")
-        require((fixture.var / "var-sentinel").read_text() == "var-sentinel\n",
-                "default keep uninstall removed other var data")
-        require(fixture.user_data.joinpath("config.json").read_text() == "shared-data-sentinel\n",
-                "default keep uninstall changed shared application data")
-        require(fixture.user_secret.joinpath("auth.json").read_text() == "auth-sentinel\n",
-                "default keep uninstall changed authentication data")
-        require(fixture.sentinel.read_text() == "must survive uninstall remove\n",
-                "installed callbacks changed the outer sentinel")
-
-
-def case_helper_remove_cleans_var_after_target_removal(parent, hashes):
-    with Fixture(parent, "persistent-helper-remove", hashes) as fixture:
-        fixture.create_runtime("2.4.1")
-        fixture.pin.write_text("2.4.1\n")
-        code, output = fixture.callback("install")
-        require(code == 0, f"install callback failed while staging remove helper (rc={code}): {output}")
-        require(fixture.helper.is_file(), "remove scenario did not stage helper")
-        fixture.stop_manager()
-        fixture.binary.unlink()
-        installed_cmd = fixture.root / "installed/cmd"
-        installed_cmd.mkdir(parents=True)
-
-        code, output = fixture.callback("uninstall", directory=installed_cmd,
-                                        wizard_keep_data="remove")
-        require(code == 0, f"remove uninstall fallback helper failed (rc={code}): {output}")
-        require(not fixture.var.exists(), "remove uninstall did not clean helper with the existing var scope")
-        require(fixture.share.is_dir(), "remove uninstall removed the shared root")
-        require(fixture.sentinel.read_text() == "must survive uninstall remove\n",
-                "remove uninstall touched the outer sentinel")
-
-
-def case_helper_staging_failures(parent, hashes):
-    with Fixture(parent, "install-helper-staging-failure", hashes) as fixture:
-        fixture.helper.mkdir()
-        code, output = fixture.callback("install")
-        require(code != 0, f"install silently ignored helper staging failure: {output}")
-        require(fixture.helper.is_dir(), "install staging failure replaced the blocking helper directory")
-        require(not list(fixture.var.glob(".qwenpaw-supervisor-helper.*.tmp")),
-                "failed install helper staging left a temporary file")
-
-    with Fixture(parent, "upgrade-init-helper-staging-failure", hashes) as fixture:
-        fixture.helper.mkdir()
-        code, output = fixture.upgrade_init()
-        require(code != 0, f"upgrade_init silently ignored helper staging failure: {output}")
-        require(fixture.helper.is_dir(), "upgrade_init staging failure replaced the blocking helper directory")
-        require(not list(fixture.var.glob(".qwenpaw-supervisor-helper.*.tmp")),
-                "failed upgrade_init helper staging left a temporary file")
+                "legacy target upgrade_init unexpectedly staged a callback helper")
 
 
 def prepare_cross_version_fixture(fixture):
@@ -920,7 +806,7 @@ def prepare_cross_version_fixture(fixture):
         stderr=subprocess.STDOUT, text=True, timeout=10,
     )
     require(result.returncode == 0, f"legacy upgrade_init simulation failed: {result.stdout}")
-    require(not fixture.helper.exists(), "legacy upgrade_init unexpectedly produced a var helper")
+    require(not fixture.helper.exists(), "legacy upgrade_init unexpectedly produced a callback helper")
     shutil.copy2(legacy_binary, fixture.binary)
     os.chmod(fixture.binary, 0o644)
     return fixture.stage_installed_helper()
@@ -936,7 +822,7 @@ def case_cross_version_upgrade_uses_candidate_helper(parent, hashes):
                 f"(rc={code}): {output}")
         require("开始升级回调" in output,
                 f"upgrade callback did not reach the Rust platform workflow: {output}")
-        require(not fixture.helper.exists(), "cross-version upgrade relied on a newly staged var helper")
+        require(not fixture.helper.exists(), "cross-version upgrade relied on a newly staged callback helper")
         require(not (fixture.var / "supervisor.pid").exists(),
                 f"unavailable target started a long-lived manager via {candidate_helper}")
 
@@ -950,7 +836,7 @@ def case_cross_version_uninstall_uses_candidate_helper(parent, hashes):
         require(code == 0 and "卸载清理完成" in output,
                 f"outer helper did not enter the real Rust uninstall flow (rc={code}): {output}")
         require(not fixture.venv.exists(), "outer-helper keep uninstall did not remove the venv")
-        require(not fixture.helper.exists(), "cross-version uninstall depended on a var helper")
+        require(not fixture.helper.exists(), "cross-version uninstall depended on a callback helper")
         require(fixture.user_data.is_dir(), "keep uninstall removed shared user data")
         require(fixture.sentinel.read_text() == "must survive uninstall remove\n",
                 "cross-version uninstall changed the outer sentinel")
@@ -998,7 +884,7 @@ def case_start_fails_closed_without_executable_target(parent, hashes):
         require(code != 0, f"service start accepted a non-executable target binary: {output}")
         require(not (fixture.var / "supervisor.pid").exists(),
                 "service start registered a manager without an executable target")
-        require(not fixture.helper.exists(), "service start staged or launched a var helper")
+        require(not fixture.helper.exists(), "service start staged or launched a callback helper")
 
 
 def case_start_fails_closed_without_target_binary(parent, hashes):
@@ -1009,7 +895,7 @@ def case_start_fails_closed_without_target_binary(parent, hashes):
         require(code != 0, f"service start accepted a missing target binary: {output}")
         require(not (fixture.var / "supervisor.pid").exists(),
                 "service start registered a manager when target/bin was missing")
-        require(not fixture.helper.exists(), "service start staged or launched a var helper")
+        require(not fixture.helper.exists(), "service start staged or launched a callback helper")
 
 
 def case_stop_running_target_without_execute_bit(parent, hashes):
@@ -1251,6 +1137,25 @@ def case_existing_data_skips_init(parent, hashes, marker):
                 "existing-data recovery did not honor the exact pin")
 
 
+def case_uninstall_reaps_orphaned_kernel_after_manager_sigkill(parent, hashes):
+    with Fixture(parent, "uninstall-orphaned-kernel", hashes) as fixture:
+        fixture.create_runtime("2.2.0")
+        fixture.pin.write_text("2.2.0\n")
+        fixture.stage_installed_helper()
+        fixture.start_manager(expect_kernel=True)
+        manager = fixture.manager_identity()
+        runtime = fixture.runtime_identities[-1]
+        pidfd_signal(manager, signal.SIGKILL, fixture)
+        wait_for(lambda: not alive(manager), 2, "manager SIGKILL")
+        require(alive(runtime), "test precondition: kernel did not survive manager SIGKILL")
+
+        code, output = fixture.callback("uninstall", wizard_keep_data="keep")
+
+        require(code == 0, f"orphan uninstall failed (rc={code}): {output}")
+        require(not alive(runtime), "orphaned kernel survived uninstall")
+        require(not fixture.venv.exists(), "orphan uninstall did not remove the runtime")
+
+
 def case_uninstall(parent, hashes, choice):
     with Fixture(parent, f"uninstall-{choice}", hashes) as fixture:
         fixture.create_runtime("2.2.0")
@@ -1290,8 +1195,6 @@ def case_fnos_layout_uninstall(parent, hashes, choice):
         (fixture.home / "workspace-sentinel").write_text("home-sentinel\n")
         (fixture.etc / "settings").write_text("etc-sentinel\n")
         (fixture.var / "var-sentinel").write_text("var-sentinel\n")
-        shutil.copy2(SUPERVISOR_SOURCE, fixture.helper)
-        os.chmod(fixture.helper, 0o750)
         fixture.stage_installed_helper()
         code, output = fixture.callback("uninstall", wizard_keep_data=choice)
         require(code == 0 and "卸载清理完成" in output,
@@ -1305,7 +1208,7 @@ def case_fnos_layout_uninstall(parent, hashes, choice):
         else:
             require(not fixture.venv.exists(), "keep uninstall removed home/venv")
             require(fixture.pin.read_text() == "2.4.1\n", "keep uninstall removed the version pin")
-            require(fixture.helper.is_file(), "keep uninstall removed the var helper")
+            require(not fixture.helper.exists(), "keep uninstall unexpectedly staged a callback helper")
             require((fixture.home / "workspace-sentinel").read_text() == "home-sentinel\n",
                     "keep uninstall removed other home data")
             require((fixture.etc / "settings").read_text() == "etc-sentinel\n",
@@ -1334,6 +1237,23 @@ def case_fnos_layout_upgrade_callback(parent, hashes):
         require(fixture.manager_identity()["exe_id"]
                 == (fixture.binary.stat().st_dev, fixture.binary.stat().st_ino),
                 "real-layout upgrade did not start the packaged target supervisor")
+
+
+def case_candidate_upgrade_readiness_uses_target_identity(parent, hashes):
+    with Fixture(parent, "candidate-upgrade-readiness", hashes) as fixture:
+        fixture.create_runtime("2.4.1")
+        fixture.pin.write_text("2.4.1\n")
+        code, output = fixture.callback("upgrade", directory=fixture.candidate_cmd)
+        require(code == 0,
+                f"candidate callback was rejected by the running gateway readiness gate "
+                f"(rc={code}): {output}")
+        require("start成功" in output,
+                f"candidate upgrade did not reach a verified target supervisor: {output}")
+        require(fixture.venv.joinpath("installed").read_text() == "2.4.1\n",
+                "candidate readiness changed the existing runtime")
+        require(not (fixture.control / "pip-started").exists(),
+                "candidate readiness triggered an unexpected runtime reinstall")
+        fixture.manager_identity()
 
 
 def case_fnos_layout_rejects_wrong_root(parent, hashes):
@@ -1389,8 +1309,7 @@ def case_task_failure(parent, hashes):
         require(fixture.pin.read_bytes() == before_pin, "failed task changed the prior pin")
         require((fixture.venv / "bin/python3").stat().st_ino == active_inode,
                 "failed task did not restore the original active venv")
-        require(sha256(fixture.helper) == sha256(fixture.binary),
-                "failed upgrade left the persistent helper out of sync with the installed target")
+        require(not fixture.helper.exists(), "failed upgrade unexpectedly staged a persistent helper")
         require(not list(fixture.home.glob(".venv.staging.*")), "failed task left a staging directory")
 
 
@@ -1407,8 +1326,8 @@ def main():
                             f"{hashes['runtime']}  {RUNTIME_SOURCE}\n")
         failures = []
         for action in ("upgrade", "uninstall"):
-            run_case(f"{action} callback prefers an existing var helper over its sibling",
-                     lambda action=action: case_lifecycle_callback_prefers_var_helper(
+            run_case(f"{action} callback never executes the legacy var helper",
+                     lambda action=action: case_legacy_var_helper_is_never_executed(
                          parent, hashes, action), failures)
         run_case("empty shell install does not create a venv or run pip",
                  lambda: case_empty_shell(parent, hashes), failures)
@@ -1416,23 +1335,15 @@ def main():
                  lambda: case_empty_shell_upgrade(parent, hashes), failures)
         run_case("lifecycle lock uses writable var when its parent is read-only",
                  lambda: case_lifecycle_lock_with_read_only_parent(parent, hashes), failures)
-        run_case("removed target and absent sibling helper return 127",
+        run_case("removed target and absent cmd supervisor return 127",
                  lambda: case_removed_target_without_helper_is_127(parent, hashes), failures)
-        run_case("upgrade-init runs the candidate supervisor and stages its var helper",
+        run_case("upgrade-init runs the candidate supervisor without staging a helper",
                  lambda: case_upgrade_init_prefers_candidate_supervisor(parent, hashes), failures)
-        run_case("legacy target upgrade-init does not stage a var helper",
-                 lambda: case_legacy_upgrade_init_does_not_stage_var_helper(parent, hashes), failures)
-        run_case("installed callback falls back to an existing var helper",
-                 lambda: case_installed_callback_falls_back_to_var_helper(parent, hashes), failures)
-        run_case("legacy var helper stages but removed target upgrade fails closed and uninstall keeps data",
-                 lambda: case_persistent_helper_after_target_removal(parent, hashes), failures)
-        run_case("remove uninstall cleans the retained helper within the var deletion scope",
-                 lambda: case_helper_remove_cleans_var_after_target_removal(parent, hashes), failures)
-        run_case("helper staging failures make install and upgrade-init nonzero",
-                 lambda: case_helper_staging_failures(parent, hashes), failures)
-        run_case("cross-version upgrade without var helper enters Rust and fails closed on unavailable target",
+        run_case("legacy target upgrade-init does not stage a callback helper",
+                 lambda: case_legacy_upgrade_init_does_not_stage_callback_helper(parent, hashes), failures)
+        run_case("cross-version upgrade without callback helper enters Rust and fails closed on unavailable target",
                  lambda: case_cross_version_upgrade_uses_candidate_helper(parent, hashes), failures)
-        run_case("cross-version uninstall without var helper uses sibling Rust helper",
+        run_case("cross-version uninstall without callback helper uses sibling Rust helper",
                  lambda: case_cross_version_uninstall_uses_candidate_helper(parent, hashes), failures)
         run_case("installed helper starts only the packaged target supervisor",
                  lambda: case_installed_helper_starts_only_target_manager(parent, hashes), failures)
@@ -1461,6 +1372,8 @@ def main():
         for marker in ("config", "workspaces"):
             run_case(f"existing {marker} prevents reinitialization",
                      lambda marker=marker: case_existing_data_skips_init(parent, hashes, marker), failures)
+        run_case("uninstall after manager SIGKILL reaps the orphaned kernel before deletion",
+                 lambda: case_uninstall_reaps_orphaned_kernel_after_manager_sigkill(parent, hashes), failures)
         for choice in ("keep", "remove", "unknown"):
             run_case(f"uninstall {choice} preserves only its permitted deletion scope",
                      lambda choice=choice: case_uninstall(parent, hashes, choice), failures)
@@ -1469,6 +1382,8 @@ def main():
                      lambda choice=choice: case_fnos_layout_uninstall(parent, hashes, choice), failures)
         run_case("real fnOS roots pass the formal upgrade callback",
                  lambda: case_fnos_layout_upgrade_callback(parent, hashes), failures)
+        run_case("candidate upgrade readiness verifies the target instead of the download executable",
+                 lambda: case_candidate_upgrade_readiness_uses_target_identity(parent, hashes), failures)
         run_case("wrong fnOS package root is rejected before deletion",
                  lambda: case_fnos_layout_rejects_wrong_root(parent, hashes), failures)
         run_case("unavailable private UDS fails without offline fallback",

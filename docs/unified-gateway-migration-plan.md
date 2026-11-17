@@ -1,10 +1,11 @@
 # fnOS 统一网关迁移计划
 
-- 当前状态（更新至 2026-11-09）：G0–G3 按已批准范围完成；真实手机 fnOS App 暂不纳入本轮验收，最终手机复测仍待用户。G4 已实施并完成 CGI 退役，当前为 Gateway-only：CGI 文件、生产 CGI 子命令、前端 action fallback、CGI 专属测试与 CI 门禁均已删除。管理控制台与 `qwenpaw.main` 均通过 `/app/qwenpaw/web/` 使用同一 Gateway/Socket，不裸连内核端口，不使用 `target blank`。Rust `web_proxy` 保留上游路径、流式 SSE 与 Bearer Authorization，并区分管理系统 CSRF 与上游请求。WebSocket 返回 501，不宣称完整支持。
-- 当前已发布 RC 与实机验收候选（2026-11-10）：FPK `build/candidates/1.1.2-14-rc1-20261110/qwenpaw-1.1.2-14-x86.fpk`，SHA256 `f6941478e95f5ceb566bf13f9c8b9015928b0eecedb185e0bb553b7be26b2f0d`；包内 musl 静态 supervisor SHA256 `c498d669b8ad227f868349a9e272083a44a329e8966400e3dfd0fbae5d1be44b`。候选统一透传 GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS，对 Gateway 上游写方法检查 Origin/Fetch Metadata，并修复挂载 Location、PawApp 图标比较常量与 SSE 断连配额释放；public 模式下受保护 API 必须先通过 QwenPaw 会话校验，避免上游 loopback 豁免把公开端口变成免鉴权入口，不修改上游配置。Rust 325+13、严格 Clippy、rustfmt、preflight、版本同步、AUDIT_REPORT 与 build/FPK audit 与完整 STRICT_CI 均已通过。1.1.2-12 实机已核对安装身份和独立反代方法矩阵，用户确认统一 Gateway 模型切换不再 405；public 已关闭并复核为 `public=0`、仅 `127.0.0.1:40977`。1.1.2-14 已实机核对版本、全部安装二进制、进程与监听；独立反代 PUT/OPTIONS 与上游一致，统一 Gateway 模型切换已由用户确认。public 临时开启时，无会话及伪造 Bearer 的模型/文件预览请求均为 401，公开登录状态/版本/登录页正常，真实登录后可切换模型；最终已恢复 `public=0`、仅 `127.0.0.1:40977`，直连与反代 `/api/version` 均为 200。候选实机验收已完成。`v1.1.2-rc.1` 已在 main 45c8ae5 的 CI 全绿后发布，Release 工作流成功；GitHub 实际 FPK SHA256 为 `4d02e7b08105cda32f727eea0c702eee13fec74c4538b3c119fa2f92d10b6e8e`，包内 supervisor SHA256 为 `75716d80ffe820ed3c89be5dfdee9fe50ce8cf8138f396bcc5036ded9b41b790`，sidecar 校验通过。Release 重建产物与本地候选分别记录，不宣称字节一致。OPTIONS 无上游 CORS 许可时不宣称跨源通过；原生 restart、手机 App 与生产发布不在该结论内。
+- 当前状态（更新至 2026-11-16）：G0–G3 按已批准范围完成；真实手机 fnOS App 暂不纳入本轮验收，最终手机复测仍待用户。G4 已实施并完成 CGI 退役，当前为 Gateway-only：CGI 文件、生产 CGI 子命令、前端 action fallback、CGI 专属测试与 CI 门禁均已删除。管理控制台通过 `/app/qwenpaw/`，`qwenpaw.main` 通过 `/app/qwenpaw/web/` 直达 QwenPaw 对话，两者共用 Gateway/Socket 和默认 fnOS iframe 会话链；“进入 Web 对话”在 PC 浏览器打开新标签页，在 fnOS App 内打开全屏 iframe。Rust `web_proxy` 保留上游路径、流式 SSE 与 Bearer Authorization，并区分管理系统 CSRF 与上游请求。WebSocket 返回 501，不宣称完整支持。
+- 当前候选、验证结果和待验收项统一见 `docs/session-handoff-2026-11-04.md`；本文不再复制候选摘要。
+- 精确 2.3.0 使用原生 base-path 补丁，FPK 携带完整预构建 Console；未修补版本保留既有兼容路径。独立反代不重复拼接完整前缀。
 - 前端合法 `seq + instance` 使用 `sessionStorage`；页面重建/pageshow 恢复同一任务轮询、不重复 POST，存储不可用时安全降级。语言只在首次初始化时默认中文，不覆盖已有英文。
-- 下文 G0–G3 记录和旧版 G4 计划均为截至 2026-11-08 的阶段历史，不能覆盖本状态或作为当前待办；保留以供审计。历史直接原位降级被拒绝的记录不改变现行受支持回退步骤。文档更新不执行平台操作。
-- 范围：当前已将管理控制台和 QwenPaw 主 Web 入口统一接入 fnOS Gateway；QwenPaw 本体与管理核心保持独立，代理只处理 Web 路径，不把内核端口直接暴露给浏览器。
+- 下文 G0–G3 记录和旧版 G4 计划是阶段历史，不能覆盖当前状态或作为当前待办。旧 FPK 路径仅作审计记录，不表示本地产物仍保留；历史直接原位降级被拒绝的记录不改变现行受支持回退步骤。
+- 范围：管理控制台和 QwenPaw 主 Web 入口统一接入 fnOS Gateway；QwenPaw 本体与管理核心保持独立，代理只处理 Web 路径，不把内核端口直接暴露给浏览器。
 
 ## G0 只读核查记录（2026-11-04，VM 实测前）
 
@@ -58,7 +59,7 @@ Rust supervisor：静态控制台 + 管理 HTTP/API + 会话/CSRF校验
 - `app/ui/config` 同时为 `qwenpaw.console` 和 `qwenpaw.main` 配置 `/app/qwenpaw` 与 `app.sock`；两入口共享同一 Gateway/Socket。生产 CGI、CGI 子命令及旧前端 action fallback 已删除。
 - G3 按用户批准的范围完成；真实手机 fnOS App 暂不纳入本轮，最终手机复测待用户。fnOS logout 后旧会话仍有效属于已知平台问题，用户确认不阻塞应用验收，不能声称会话已撤销或已修复。
 
-候选和生产发布是不同状态：当前 1.1.1-6 测试候选经官方 update 后远端为 `running`，无内核、无未决事务，但不代表生产发布。
+候选和生产发布是不同状态：当前 `1.2.5-1` 仅有计划候选路径，已构建；已完成本地门禁；未部署到正式应用，不代表生产发布。旧版候选的 `running` 状态只属于各自历史记录。
 
 ## 2. 设计原则与不变量
 
@@ -190,7 +191,7 @@ Rust supervisor：静态控制台 + 管理 HTTP/API + 会话/CSRF校验
 
 ### 历史快照：G3 候选期主入口切换与故障恢复（截至 2026-11-08；1.1.1-3 A/B/C/D 已通过，当时整体未退出）
 
-以下复选项和详细结果只描述 2026-11-08 当时状态。**当前状态截至 2026-11-09：**G3 按已批准范围完成，G4 已实施并退役生产 CGI；当前 1.1.1-6 仅为测试候选，不是生产发布。手机 App 最终复测仍待用户且不阻塞当前验收，fnOS logout 后旧会话仍有效是已知平台问题；未完成的生产发布门禁保留为独立事项。
+以下复选项和详细结果只描述 2026-11-08 当时状态。**历史状态（截至 2026-11-09）：**G3 按已批准范围完成，G4 已实施并退役生产 CGI；当时 1.1.1-6 仅为测试候选，不是生产发布。手机 App 最终复测仍待用户且不阻塞当时验收，fnOS logout 后旧会话仍有效是已知平台问题；未完成的生产发布门禁保留为独立事项。当前 `1.2.5-1` 计划候选与状态见本文顶部。
 
 - [x] release candidate 的 `qwenpaw.console` 主入口切换到 Gateway URL/Socket；候选 FPK 保留 CGI bridge 作为迁移期回退物料。
 - [x] 前序真实应用验收已通过管理员/普通用户/伪造头/CSRF，以及桌面 Gateway 与 Socket stop/start；1.1.1-3 本轮正式 UI 安装/升级、keep/remove 卸载、helper-first 基线、连续 stop/start/start/reconnect、Socket fail-closed 与恢复和同一 FPK 重装恢复均已通过。
@@ -205,11 +206,11 @@ Rust supervisor：静态控制台 + 管理 HTTP/API + 会话/CSRF校验
 
 2026-11-08 本地 Gateway / WebKit / process identity 测试证据：当前最终候选 FPK 为 `build/candidates/1.1.1-3-gateway-g3-20261108/qwenpaw-1.1.1-3-x86.fpk`，SHA256 `94679e4d8343c1bf341e8a1cc2a1451a9ad0ad3296d2fc668deab456db601b51`，supervisor SHA256 `2829f1a4079139f166f78478de804d3f619226d646ea93d58d0965718dbc4400`；该包已通过 build/preflight/audit，并经官方 update 单次升级在远端验收。`supervisor/src/install/process.rs` RED/GREEN 证据 `/tmp/qwenpaw-g3-process-identity-20261107/`，install 87、runtime 5、严格 Clippy、user namespace 全 crate 276+13 通过。WebKit 日志 `/tmp/qwenpaw-gateway-webkit-20261107/e2e-webkit-https.log`；Chromium Gateway 2/2 已由主控复验通过。A/B/C/D 及 remove/重装证据总目录为 `/tmp/qwenpaw-g3-1.1.1-3-20261108/`；真实上游及内核卸载记录分别见 `/tmp/qwenpaw-g3-real-upstream-20261107/` 与 `/tmp/qwenpaw-g3-real-upstream-20261108/kernel-uninstall-final-20261108.json`。
 
-**历史 G3 退出标准/结论（截至 2026-11-08）：**测试设备连续重启、平台 stop/start、包升级、manager SIGKILL 后官方 start、Gateway 重连、当时迁移期 CGI 与 Gateway 行为及授权一致性、受支持旧包回退等作为当时的阶段退出条件。1.1.1-3 已按记录通过 A/B/C/D、remove/重装、既有回退和生命周期子项及本地 WebKit/Chromium 浏览器兼容回归；手机 App 暂不纳入本轮。UI logout 后旧 `ost` cookie 仍有效，未观察到服务端 session revoke；官方 PyPI 直连和部分完整生产路径/错误矩阵仍未完成。**截至 2026-11-09 当前状态：**G3 按批准范围完成，G4 已实施并退役 CGI。尚未完成的生产发布门禁不改变 G3/G4 状态；手机复测仍待用户且不阻塞当前验收。
+**历史 G3 退出标准/结论（截至 2026-11-08）：**测试设备连续重启、平台 stop/start、包升级、manager SIGKILL 后官方 start、Gateway 重连、当时迁移期 CGI 与 Gateway 行为及授权一致性、受支持旧包回退等作为当时的阶段退出条件。1.1.1-3 已按记录通过 A/B/C/D、remove/重装、既有回退和生命周期子项及本地 WebKit/Chromium 浏览器兼容回归；手机 App 暂不纳入本轮。UI logout 后旧 `ost` cookie 仍有效，未观察到服务端 session revoke；官方 PyPI 直连和部分完整生产路径/错误矩阵仍未完成。**历史状态（截至 2026-11-09）：**G3 按批准范围完成，G4 已实施并退役 CGI。尚未完成的生产发布门禁不改变当时 G3/G4 状态；手机复测仍待用户且不阻塞当时验收。当前 `1.2.5-1` 计划候选已构建，已完成本地门禁；未部署到正式应用，见本文顶部。
 
 ### G4：正式退役 CGI（已实施）
 
-状态更新至 2026-11-09：G4 已完成，当前生产管理 Web 为 Gateway-only。此次同步按现存工作树记录实际架构；它不表示 1.1.1-6 已作为生产版本发布。
+状态更新至 2026-11-15：G4 已完成，当前生产管理 Web 为 Gateway-only。此次同步按现存工作树记录实际架构；`1.2.5-1` 是已构建的测试候选，不表示已作为生产版本发布。
 
 - `app/ui/config` 已切至 Gateway；`qwenpaw.console` 与 `qwenpaw.main` 通过 `/app/qwenpaw/web/` 使用同一 Gateway/Socket。
 - `web/src/api.ts` 已移除 api.cgi 地址推导和 action fallback；管理系统 CSRF 与代理至 QwenPaw 的上游请求区分处理。
@@ -289,11 +290,11 @@ G4 已将 CGI 专属测试入口和 CI 步骤替换/删除，Gateway 回归留�
 
 ## 7. 完成定义
 
-**当前状态（2026-11-09）：**生产管理 Web 已完成 CGI→Gateway-only 迁移，G4 已实施；G0–G3 按已批准范围完成。当前测试候选为 1.1.1-6，远端经官方 update 后为 `running`，不是生产发布。真实手机 fnOS App 最终复测仍待用户；fnOS logout 后旧会话仍有效是已知平台问题，用户确认不阻塞应用验收。官方 PyPI 直连 15 分钟无输出超时，阿里云真实上游安装/卸载通过但不等于官方 PyPI 直连通过。
+**当前状态（2026-11-15）：**生产管理 Web 已完成 CGI→Gateway-only 迁移，G4 已实施；G0–G3 按已批准范围完成。当前测试候选为 `1.2.5-1`，路径 `build/candidates/1.2.5-1-settings-panel-20261115/`，已构建并完成本地门禁与真实隔离升级；未部署到正式应用，不是生产发布。真实 Android App 尚未验收；远端独立反代 public=false，未做该端口复测。fnOS logout 后旧会话仍有效是已知平台问题，用户确认不阻塞应用验收。官方 PyPI 直连 15 分钟无输出超时，阿里云真实上游安装/卸载通过但不等于官方 PyPI 直连通过。精确 2.3.0 使用 PR #8719 原生 base-path，未修补版本保留既有字符串兼容路径，上游正式包含修复前仍属临时下游补丁。
 
 ### 历史发布门禁快照（截至 2026-11-08）
 
-以下复选项和状态摘要保留当时验收记录；CGI 退役及 1.1.1-6 候选状态请以本文顶部的 2026-11-09 当前摘要为准。
+以下复选项和状态摘要保留历史验收记录；当前候选与 CGI 状态请以本文顶部的 2026-11-13 当前摘要为准。
 
 - [x] 已批准最低/目标版本 `1.2.0800` 的完整应用 Gateway 路径、用户身份/权限及 Gateway Socket stop/start 有真实平台证据；本轮同一未刷新面板的 stop/start 自动恢复也通过。
 - [x] 已实测完整应用管理页面/API 经 Gateway 可达（包括内核未安装时 status/logs 仍正常响应）。
@@ -308,4 +309,4 @@ G4 已将 CGI 专属测试入口和 CI 步骤替换/删除，Gateway 回归留�
 - [x] 历史完整受支持旧包回退链（1.1.1-2/667 阶段）已通过：先确认无未决事务及 schema/layout 兼容，再经官方保留数据卸载流程卸载当前版、安装并验证精确旧包，最后仅提交一次官方升级并验证最终版。数据范围仅按已取得的路径和 metadata 证据描述；不得据此宣称整个 appdata metadata 不变或共享文件内容已校验。直接原位降级被拒绝仅证明按设计禁止，不是有效回退演练；不得再次尝试直接原位降级。原始记录：`/tmp/qwenpaw-g3-supported-rollback-20261107/`。
 - [ ] 最终 FPK 不含 CGI 的条件未满足：CGI 仍是候选回退物料；CGI 退役、CI/审计清理和全部支持版本验证尚未开始。
 
-**历史状态快照（截至 2026-11-08）：最低 `os_min_version=1.2.0800` 已批准并写入 manifest；G0/G1 已完成，G2 本地实现、Chromium 回归和候选包内复验已完成；当时 1.1.1-3 已从 1.1.1-2 经官方 update 单次升级并完成远端 A/B/C/D 验收：完整请求矩阵、连续 stop/start/start/reconnect、真实 app.sock stale/active/占位文件/软链接/unknown owner fail-closed 与恢复、阿里云真实上游、manager SIGKILL→官方 start 接管、remove 范围和同一 FPK 重装均通过。最终 App Center 为 `1.1.1-3 running`，唯一 manager、Gateway HTTP 200、无 QwenPaw 内核/未决事务/18088 listener，双 UDS 为 `0600`、UID/GID `994/989`。匿名/伪造会话仅返回平台 HTTP 200 `text/plain` `invalid token`，不构成授权通过；真实手机 fnOS App 暂不纳入本轮 G3、不作为阻塞；UI logout 已导航至 `/login` 并重新登录，但未观察到 logout/logoff 等非 GET 请求，`ost` 仍保留，旧 cookie 的 Gateway page/status/SSE 仍为 HTTP 200 的有效 HTML/JSON/SSE。官方 PyPI 直连、完整生产路径/错误矩阵和发布门禁仍未完成；当时记录 G3 未整体退出、G4 尚未开始且 CGI 仍保留。历史直接原位降级被平台按设计拒绝，不是回退失败或平台异常，不得再次尝试。本快照不覆盖当前状态：截至 2026-11-09，G3 已按已批准范围完成，G4 已实施并退役生产 CGI；当前测试候选 1.1.1-6 及远端状态见本文顶部，仍不代表生产发布。本次仅更新文档，未执行平台操作。**
+**历史状态快照（截至 2026-11-08）：最低 `os_min_version=1.2.0800` 已批准并写入 manifest；G0/G1 已完成，G2 本地实现、Chromium 回归和候选包内复验已完成；当时 1.1.1-3 已从 1.1.1-2 经官方 update 单次升级并完成远端 A/B/C/D 验收：完整请求矩阵、连续 stop/start/start/reconnect、真实 app.sock stale/active/占位文件/软链接/unknown owner fail-closed 与恢复、阿里云真实上游、manager SIGKILL→官方 start 接管、remove 范围和同一 FPK 重装均通过。最终 App Center 为 `1.1.1-3 running`，唯一 manager、Gateway HTTP 200、无 QwenPaw 内核/未决事务/18088 listener，双 UDS 为 `0600`、UID/GID `994/989`。匿名/伪造会话仅返回平台 HTTP 200 `text/plain` `invalid token`，不构成授权通过；真实手机 fnOS App 暂不纳入本轮 G3、不作为阻塞；UI logout 已导航至 `/login` 并重新登录，但未观察到 logout/logoff 等非 GET 请求，`ost` 仍保留，旧 cookie 的 Gateway page/status/SSE 仍为 HTTP 200 的有效 HTML/JSON/SSE。官方 PyPI 直连、完整生产路径/错误矩阵和发布门禁仍未完成；当时记录 G3 未整体退出、G4 尚未开始且 CGI 仍保留。历史直接原位降级被平台按设计拒绝，不是回退失败或平台异常，不得再次尝试。本快照不覆盖当前状态：截至 2026-11-09，G3 已按已批准范围完成，G4 已实施并退役生产 CGI；当时 1.1.1-6 测试候选及远端状态仅是历史记录，不代表生产发布。当前 `1.2.5-1` 计划候选已构建，已完成本地门禁；未部署到正式应用，见本文顶部。本次仅更新文档，未执行平台操作。**

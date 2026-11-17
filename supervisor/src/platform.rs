@@ -13,7 +13,7 @@ use std::{
 use crate::{
     cli::{PlatformAction, ServiceAction},
     config::Config,
-    control, helper,
+    control,
     runtime_settings::SettingsPatch,
     service,
 };
@@ -30,33 +30,11 @@ pub fn run(action: PlatformAction, cfg: &Config) -> i32 {
             0
         }
         PlatformAction::UpgradeInit => {
-            let output = upgrade_init(&cfg.var_dir);
-            match helper::stage_current_executable(&cfg.var_dir) {
-                Ok(()) => {
-                    print!("{output}");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("升级初始化无法暂存 supervisor helper: {error}");
-                    1
-                }
-            }
+            print!("{}", upgrade_init(&cfg.var_dir));
+            0
         }
         PlatformAction::Install => finish_operation(cfg, "安装", install_callback),
-        PlatformAction::Upgrade => {
-            let status = finish_operation(cfg, "升级", upgrade_callback);
-            if status != 0 {
-                if let Err(error) = helper::restore_installed(&cfg.var_dir, &cfg.supervisor_binary)
-                {
-                    log_message(
-                        cfg,
-                        &format!("ERROR: 升级失败后恢复 helper 失败: {error}"),
-                        true,
-                    );
-                }
-            }
-            status
-        }
+        PlatformAction::Upgrade => finish_operation(cfg, "升级", upgrade_callback),
         PlatformAction::Uninstall => crate::uninstall::run(cfg),
         PlatformAction::MirrorGet => {
             let (status, response) = crate::mirror::get_json(&cfg.var_dir);
@@ -119,9 +97,10 @@ fn install_callback(cfg: &Config) -> Result<(), String> {
     let log_level = env::var("wizard_log_level").unwrap_or_default();
     configure_patch(&port, &log_level, cfg.listen_port)?;
     prepare_var_directory(cfg)?;
-    helper::stage_current_executable(&cfg.var_dir)?;
     let mirror_seed = env::var("wizard_pypi_mirror").unwrap_or_else(|_| "aliyun".into());
     mirror_seed_if_needed(cfg, &mirror_seed)?;
+    service::stop_for_reinstall(cfg)
+        .map_err(|error| format!("安装前停止已登记服务失败: {error}"))?;
 
     if service::run(ServiceAction::Status, cfg) != 0 {
         apply_platform_permissions(cfg, true)?;
@@ -162,7 +141,11 @@ fn upgrade_callback(cfg: &Config) -> Result<(), String> {
             false,
         ),
     }
-    if service::run(ServiceAction::Start, cfg) != 0 {
+    let start_status = std::process::Command::new(&cfg.supervisor_binary)
+        .args(["service", "start"])
+        .status()
+        .map_err(|error| format!("升级后启动监督者失败: {error}"))?;
+    if !start_status.success() {
         return Err("升级后启动监督者失败".into());
     }
     log_message(cfg, "start成功", false);
@@ -184,10 +167,22 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
         Err(_) if active_venv && health["runtime"]["installed"].as_bool() == Some(true) => false,
         Err(error) => return Err(error),
     };
+    let pin = read_pin_state(&cfg.var_dir)?;
     let plan = if installed {
-        RuntimePlan::Keep
+        let mut plan = RuntimePlan::Keep;
+        if lifecycle == Lifecycle::Upgrade {
+            if let PinState::Exact(version) = &pin {
+                let channel = crate::install::InstallChannel::Exact(version.clone());
+                if let Some(patch) = crate::install::base_path_patch::for_channel(&channel)? {
+                    if patch.needs_apply(Path::new(&cfg.kernel_venv))? {
+                        plan = RuntimePlan::Repair(version.clone());
+                    }
+                }
+            }
+        }
+        plan
     } else {
-        let plan = runtime_plan(false, active_venv, read_pin_state(&cfg.var_dir)?)?;
+        let plan = runtime_plan(false, active_venv, pin)?;
         if let RuntimePlan::Repair(version) = &plan {
             if running_import_failure_matches_pin(&health, version) {
                 return Ok(());
@@ -238,10 +233,17 @@ fn runtime_is_installed(response: &serde_json::Value) -> Result<bool, String> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "监督者 runtime-health 响应缺少 version".to_string())?;
     if installed && version.trim().is_empty() {
+        let running_and_reachable = runtime.get("running").and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && runtime
+                .get("reachable")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
         if runtime
             .get("metadata_repairable")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
+            || running_and_reachable
         {
             return Ok(false);
         }
@@ -263,10 +265,6 @@ fn running_import_failure_matches_pin(response: &serde_json::Value, pin: &str) -
             .get("version")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|version| version.trim().is_empty())
-        || runtime
-            .get("metadata_repairable")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
         || runtime.get("running").and_then(serde_json::Value::as_bool) != Some(true)
         || runtime
             .get("reachable")
@@ -652,12 +650,12 @@ fn configure_patch(
         if port.len() > 5
             || !port.bytes().all(|byte| byte.is_ascii_digit())
             || port.parse::<u16>().map_or(true, |value| {
-                !(1024..=65535).contains(&value) || value == 19090 || value == 19091
+                !(1024..=65535).contains(&value) || value == supervisor_port
             })
         {
-            return Err(
-                "ERROR: 端口无效（有效范围 1024-65535，不可使用监督者保留端口 19090/19091）".into(),
-            );
+            return Err(format!(
+                "ERROR: 端口无效（有效范围 1024-65535，不可使用当前管理端口 {supervisor_port}）"
+            ));
         }
         Some(port.parse::<u16>().expect("validated ASCII port"))
     };
@@ -866,29 +864,38 @@ mod tests {
 
     #[test]
     fn validates_legacy_configure_input_without_normalizing_values() {
-        assert!(configure_patch("", "", 19090).unwrap().is_none());
-        let patch = configure_patch("01024", "trace", 19090).unwrap().unwrap();
+        assert!(configure_patch("", "", 18091).unwrap().is_none());
+        let patch = configure_patch("01024", "trace", 18091).unwrap().unwrap();
         assert_eq!(patch.port, Some(1024));
         assert_eq!(patch.log_level.as_deref(), Some("trace"));
         assert_eq!(
-            configure_patch("65535", "critical", 19090)
+            configure_patch("65535", "critical", 18091)
                 .unwrap()
                 .unwrap()
                 .port,
             Some(65535)
         );
+        for allowed in [19090, 19091] {
+            assert_eq!(
+                configure_patch(&allowed.to_string(), "", 18091)
+                    .unwrap()
+                    .unwrap()
+                    .port,
+                Some(allowed)
+            );
+        }
 
         for invalid in [
-            "1", "1023", "19090", "19091", "65536", "10000x", "+18088", " 18088", "180880",
+            "1", "1023", "18091", "65536", "10000x", "+18088", " 18088", "180880",
         ] {
             assert!(
-                configure_patch(invalid, "", 19090).is_err(),
+                configure_patch(invalid, "", 18091).is_err(),
                 "accepted port {invalid:?}"
             );
         }
         for invalid in ["INFO", "verbose", " info", "debug "] {
             assert!(
-                configure_patch("", invalid, 19090).is_err(),
+                configure_patch("", invalid, 18091).is_err(),
                 "accepted level {invalid:?}"
             );
         }
@@ -1190,7 +1197,6 @@ mod tests {
         for (field, value) in [
             ("installed", serde_json::json!(false)),
             ("version", serde_json::json!("2.4.1")),
-            ("metadata_repairable", serde_json::json!(false)),
             ("running", serde_json::json!(false)),
             ("reachable", serde_json::json!(false)),
             ("running", serde_json::Value::Null),
@@ -1202,10 +1208,26 @@ mod tests {
             assert!(!kept, "field={field}");
             assert!(request.is_none(), "unexpected HTTP request for {field}");
         }
-        assert!(runtime_is_installed(&serde_json::json!({
-            "runtime": {"installed": true, "version": "", "metadata_repairable": false}
-        }))
-        .is_err());
+        let mut live_runtime = repairable_running_runtime();
+        live_runtime["metadata_repairable"] = serde_json::json!(false);
+        assert_eq!(
+            runtime_is_installed(&serde_json::json!({"runtime": live_runtime})),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn running_reachable_runtime_probes_live_version_even_when_metadata_is_repairable() {
+        let mut runtime = repairable_running_runtime();
+        runtime["metadata_repairable"] = serde_json::json!(false);
+        let (kept, request, _) = live_version_probe(
+            runtime,
+            "200 OK",
+            br#"{"version":"2.4.1"}"#,
+            std::time::Duration::ZERO,
+        );
+        assert!(kept);
+        assert!(request.is_some());
     }
 
     #[test]

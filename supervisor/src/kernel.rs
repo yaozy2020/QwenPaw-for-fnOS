@@ -223,22 +223,21 @@ impl KernelManager {
     }
 
     fn kernel_version_with_timeout(&self, timeout: Duration) -> String {
+        let log_level = self.log_level();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .version_cache_at
+            .map(|at| at.elapsed() < Duration::from_secs(60))
+            .unwrap_or(false)
         {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state
-                .version_cache_at
-                .map(|at| at.elapsed() < Duration::from_secs(5))
-                .unwrap_or(false)
-            {
-                return state.version_cache.clone();
-            }
+            return state.version_cache.clone();
         }
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
         let runtime = crate::runtime::RuntimeAdapter::new(
             &self.cfg.venv_dir,
             &self.cfg.share_dir,
             &self.cfg.etc_dir,
-            self.log_level(),
+            log_level,
         );
         let cmd = runtime.metadata_command_for(Path::new(&bin));
         let version =
@@ -249,7 +248,6 @@ impl KernelManager {
                 }
                 _ => String::new(),
             };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.version_cache = version.clone();
         state.version_cache_at = Some(Instant::now());
         version
@@ -379,6 +377,9 @@ impl KernelManager {
             .append(true)
             .open(&self.cfg.log_file)
             .map_err(|e| format!("open kernel log: {e}"))?;
+        if crate::install::base_path_patch::active(Path::new(&self.cfg.venv_dir)) {
+            cmd.env("QWENPAW_BASE_PATH", "/app/qwenpaw/web");
+        }
         cmd.stdout(std::process::Stdio::from(
             log.try_clone()
                 .map_err(|e| format!("clone kernel log: {e}"))?,
@@ -414,6 +415,14 @@ impl KernelManager {
         Ok(pid)
     }
 
+    pub(crate) fn base_path(&self) -> &'static str {
+        if crate::install::base_path_patch::active(Path::new(&self.cfg.venv_dir)) {
+            "/app/qwenpaw/web"
+        } else {
+            ""
+        }
+    }
+
     /// 启动后健康检查:进程存活且 /api/version 在总期限内返回当前版本。
     /// "进程已创建"不等于"服务成功" —— 改端口/重置认证的成功判定以此为准,
     /// 失败路径据此回滚(超时视为失败,由调用方处理)。
@@ -431,7 +440,13 @@ impl KernelManager {
         {
             return false;
         }
-        crate::install::wait_for_version_deadline(self.port(), &expected_version, deadline)
+        let base_path = self.base_path();
+        crate::install::wait_for_version_deadline_at(
+            self.port(),
+            &expected_version,
+            deadline,
+            base_path,
+        )
     }
 
     /// 三段式停止:组 TERM(宽限 10s)→ 单 KILL → 组 KILL 清扫。
@@ -477,31 +492,22 @@ impl KernelManager {
                 procfs::IdentityStatus::Unknown(error) => diagnostics.push(error),
             }
         }
-        if target <= 0 || target_identity.is_none() || !processes.contains_key(&target) {
-            if !diagnostics.is_empty() {
-                self.record_stop_failure(
-                    target,
-                    target_identity,
-                    processes.values().copied().collect(),
-                    diagnostics,
-                );
-                return;
-            }
-            let candidates = procfs::rediscover_all(self.port(), target);
-            target = candidates.into_iter().max().unwrap_or(0);
-            if target > 0 {
-                match procfs::process_identity(target) {
-                    Ok(Some(identity)) => {
-                        target_identity = Some(identity);
-                        merge_identity(&mut processes, identity);
+        match procfs::rediscover_all_in_venv(self.port(), target, &self.cfg.venv_dir) {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    match procfs::process_identity(candidate) {
+                        Ok(Some(identity)) => merge_identity(&mut processes, identity),
+                        Ok(None) => diagnostics.push(format!(
+                            "rediscovered kernel PID {candidate} exited before identity check"
+                        )),
+                        Err(error) => diagnostics.push(error),
                     }
-                    Ok(None) => diagnostics.push(format!(
-                        "rediscovered kernel PID {target} exited before identity check"
-                    )),
-                    Err(error) => diagnostics.push(error),
                 }
             }
+            Err(error) => diagnostics.push(error),
         }
+        target = processes.keys().copied().max().unwrap_or(0);
+        target_identity = processes.get(&target).copied();
         if !diagnostics.is_empty() {
             self.record_stop_failure(
                 target,
@@ -792,6 +798,42 @@ impl KernelManager {
         state.last_stop_clean = true;
     }
 
+    pub fn stop_for_uninstall(&self) -> Result<(), String> {
+        let candidates = procfs::rediscover_all_in_venv(self.port(), 0, &self.cfg.venv_dir)?;
+        for pid in candidates {
+            let Some(identity) = procfs::process_identity(pid)? else {
+                continue;
+            };
+            {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                state.tracked = pid;
+                state.tracked_identity = Some(identity);
+                state.pending_stop.clear();
+                state.cache_pid = 0;
+                state.cache_at = None;
+            }
+            self.stop_sync();
+            if !self.last_stop_clean() {
+                let diagnostics = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .stop_diagnostics
+                    .join("; ");
+                return Err(format!("停止孤儿内核 PID {pid} 失败: {diagnostics}"));
+            }
+        }
+        let remaining = procfs::rediscover_all_in_venv(self.port(), 0, &self.cfg.venv_dir)?;
+        if !remaining.is_empty() {
+            return Err(format!("卸载前仍有内核进程存活: {remaining:?}"));
+        }
+        match std::fs::remove_file(&self.cfg.pid_file) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("清理内核 PID 文件失败: {error}")),
+        }
+    }
+
     /// 内核状态:受管 pid 失效时 /proc 重新发现并收养(结果缓存 2s)。
     pub fn status_now(&self) -> KernelStatus {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -805,14 +847,47 @@ impl KernelManager {
         let mut adopted = false;
         let pid;
         if !cache_valid {
-            let all = procfs::rediscover_all(self.port(), st.tracked);
-            let best = all.iter().copied().max().unwrap_or(0);
-            if best > 0 && best != st.tracked {
-                adopted = true;
+            let discovered = procfs::rediscover_all_in_venv(self.port(), 0, &self.cfg.venv_dir)
+                .and_then(|all| {
+                    let best = all.iter().copied().max().unwrap_or(0);
+                    if best == 0 {
+                        return Ok((0, None));
+                    }
+                    match procfs::process_identity(best) {
+                        Ok(Some(identity)) => Ok((best, Some(identity))),
+                        Ok(None) => Err(format!(
+                            "rediscovered kernel PID {best} exited before status identity check"
+                        )),
+                        Err(error) => Err(error),
+                    }
+                });
+            let (best, identity) = match discovered {
+                Ok(discovered) => discovered,
+                Err(error) => {
+                    if let Ok(mut log) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&self.cfg.log_file)
+                    {
+                        use std::io::Write as _;
+                        let _ = writeln!(log, "[kernel] status rediscovery failed: {error}");
+                    }
+                    (0, None)
+                }
+            };
+            if best != st.tracked {
+                adopted = best > 0;
                 st.tracked = best;
-                st.tracked_identity = procfs::process_identity(best).ok().flatten();
-                st.started_wall = procfs::started_wall(best);
-                let _ = crate::install::atomic_write_0600(&self.cfg.pid_file, &format!("{best}\n"));
+                st.tracked_identity = identity;
+                st.started_wall = if best > 0 {
+                    procfs::started_wall(best)
+                } else {
+                    None
+                };
+                if best > 0 {
+                    let _ =
+                        crate::install::atomic_write_0600(&self.cfg.pid_file, &format!("{best}\n"));
+                }
             }
             pid = st.tracked;
             st.cache_pid = pid;
@@ -863,7 +938,7 @@ mod tests {
         let python = dir.join("venv/bin/python3");
         std::fs::write(
             &python,
-            "#!/bin/bash\nprintf 'call\\n' >> \"$(dirname \"$0\")/calls\"\nprintf '2.3.0\\n'\n",
+            "#!/bin/bash\nprintf 'call\\n' >> \"$(dirname \"$0\")/calls\"\nsleep 0.1\nprintf '2.3.0\\n'\n",
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&python).unwrap().permissions();
@@ -891,13 +966,23 @@ mod tests {
             1
         );
         kernel.invalidate_version();
-        assert_eq!(kernel.kernel_version(), "2.3.0");
+        let kernel = std::sync::Arc::new(kernel);
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let kernel = kernel.clone();
+                std::thread::spawn(move || kernel.kernel_version())
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), "2.3.0");
+        }
         assert_eq!(
             std::fs::read_to_string(dir.join("venv/bin/calls"))
                 .unwrap()
                 .lines()
                 .count(),
-            2
+            2,
+            "concurrent cache misses must share one metadata probe"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1287,6 +1372,112 @@ mod lifecycle_tests {
                 .all(|pid| !is_test_helper(*pid, &helper_script, &helper_token)),
             "final stop must terminate every helper started by the test: {all_helper_pids:?}"
         );
+    }
+
+    fn install_discoverable_python(
+        dir: &crate::api::test_support::TestDir,
+        state: &crate::api::AppState,
+    ) -> PathBuf {
+        let bin = std::path::Path::new(&state.home_dir).join("venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let python = bin.join("python3");
+        std::fs::copy("/usr/bin/python3", &python).unwrap();
+        let package = dir.0.join("qwenpaw");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(
+            package.join("__main__.py"),
+            r#"import os, pathlib, time
+root = pathlib.Path(os.environ['QWENPAW_TEST_ROOT'])
+(root / ('ready-' + str(os.getpid()))).write_text('ready')
+time.sleep(3600)
+"#,
+        )
+        .unwrap();
+        python
+    }
+
+    fn spawn_discoverable_kernel(
+        dir: &crate::api::test_support::TestDir,
+        python: &Path,
+        port: u16,
+    ) -> crate::api::test_support::ChildGuard {
+        use std::os::unix::process::CommandExt;
+
+        let child = std::process::Command::new(python)
+            .args(["-m", "qwenpaw", "app", "--port", &port.to_string()])
+            .env("PYTHONPATH", &dir.0)
+            .env("QWENPAW_TEST_ROOT", &dir.0)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !dir.0.join(format!("ready-{pid}")).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "kernel fixture PID {pid} did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        crate::api::test_support::ChildGuard(child)
+    }
+
+    #[test]
+    fn ordinary_stop_terminates_every_instance_from_the_configured_venv() {
+        let dir = crate::api::test_support::TestDir::new("stop-all-venv-instances");
+        let port = crate::api::test_support::free_port();
+        let state = dir.state(port);
+        let python = install_discoverable_python(&dir, &state);
+        let first = spawn_discoverable_kernel(&dir, &python, port);
+        let second = spawn_discoverable_kernel(&dir, &python, port);
+        let first_identity = procfs::process_identity(first.0.id() as i32)
+            .unwrap()
+            .expect("first fixture identity");
+        let second_identity = procfs::process_identity(second.0.id() as i32)
+            .unwrap()
+            .expect("second fixture identity");
+        let mut discovered = procfs::rediscover_all_in_venv(
+            port,
+            0,
+            &std::path::Path::new(&state.home_dir)
+                .join("venv")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        discovered.sort_unstable();
+        let mut expected = vec![first.0.id() as i32, second.0.id() as i32];
+        expected.sort_unstable();
+        assert_eq!(discovered, expected);
+
+        state.kernel.stop_sync();
+
+        assert!(state.kernel.last_stop_clean());
+        assert_eq!(
+            procfs::identity_status(first_identity),
+            procfs::IdentityStatus::Gone
+        );
+        assert_eq!(
+            procfs::identity_status(second_identity),
+            procfs::IdentityStatus::Gone
+        );
+    }
+
+    #[test]
+    fn same_port_process_outside_venv_is_neither_adopted_nor_stopped() {
+        let dir = crate::api::test_support::TestDir::new("ignore-external-kernel");
+        let port = crate::api::test_support::free_port();
+        let state = dir.state(port);
+        let python = install_discoverable_python(&dir, &state);
+        let external = dir.0.join("external-python3");
+        std::fs::copy(python, &external).unwrap();
+        let foreign = spawn_discoverable_kernel(&dir, &external, port);
+
+        let status = state.kernel.status_now();
+        state.kernel.stop_sync();
+
+        assert_eq!(status.pid, 0);
+        assert!(!status.adopted);
+        assert!(procfs::process_alive(foreign.0.id() as i32));
     }
 
     #[test]

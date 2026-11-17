@@ -1,11 +1,11 @@
 # QwenPaw FPK — 审计报告
 
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
-> 数据源：manifest / cmd / wizard / app / .github / git tags。
+> 数据源：manifest / cmd / wizard / app / supervisor Gateway testdata / .github / git tags。
 
-## 当前版本：v1.2.0-8
+## 当前版本：v1.2.7-7
 
-- **生成时间**：2026-11-11 23:42:33 +0800
+- **生成时间**：2026-11-17 10:46:07 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -44,6 +44,26 @@
 | `wizard/install` | install |
 | `wizard/uninstall` | uninstall |
 | `wizard/upgrade` | upgrade |
+
+## QwenPaw 2.3.0 base-path 与预构建 Console 补丁载荷
+
+- 上游 PR：`#8719`（临时下游兼容，不表示上游已合并）
+- 后端及预构建 Console 差异文件：915 个，原始数据 35,239,765 字节
+- manifest SHA256：`b953393bccab8d3e265f9f7ee3018cfde039908fefa4a611fd99f3e08d4d67ec`
+- FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite
+
+## Gateway 源码回归夹具
+
+> 以下文件是源码测试夹具，不属于 FPK 物料清单。
+
+| 文件 | SHA256 | 用途 |
+|:-----|:-------|:-----|
+| `supervisor/src/gateway/testdata/qwenpaw-2.2.2.post1-chat.css` | `ffdc67228cded582e85575fd3e6d69f6b4fb381392e540a39c16646384e0fc87` | Gateway 上游路径/协议回归夹具 |
+| `supervisor/src/gateway/testdata/qwenpaw-2.2.2.post1-entry.js` | `e35db2c040031038762fc91d0f08b1747d1c346e20140c1b5ae13b6a90da9354` | Gateway 上游路径/协议回归夹具 |
+| `supervisor/src/gateway/testdata/qwenpaw-2.2.2.post1-index.html` | `7c2f6cc4bdc8bbd242d41c998bd841884b26a12a5c4eb5d4dc8feffdb80400ef` | Gateway 上游路径/协议回归夹具 |
+| `supervisor/src/gateway/testdata/qwenpaw-2.2.2.post1-login.js` | `b2b0449357aaec831093bf65ffc78d1e10f92ed2b5faeb9ab37cf39f0e2e3969` | Gateway 上游路径/协议回归夹具 |
+| `supervisor/src/gateway/testdata/qwenpaw-2.3.0-chat.js` | `b37737563f7518211bd1f06ffd1bf5a54d9d05c5f536a84af42ee9991a8f2473` | Gateway 上游路径/协议回归夹具 |
+| `supervisor/src/gateway/testdata/qwenpaw-2.3.0-login-logo.js` | `0e76446ec7641a8543a7b3bb582abc000cb149038b0d8627405746551de9bb47` | QwenPaw 2.3.0 登录 Logo 路径回归；不代表完整 base-path 契约 |
 
 ## CI/CD
 
