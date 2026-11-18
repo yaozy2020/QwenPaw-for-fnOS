@@ -528,6 +528,7 @@ fn handle_request(mut stream: TcpStream, venv: &Path, pid: u32) -> io::Result<()
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
+    let path = path.strip_prefix("/app/qwenpaw/web").unwrap_or(path);
     if method == "GET" && path == "/api/version" {
         let version = installed_version(venv)?;
         append_health_record(venv, pid, &version)?;
@@ -644,16 +645,26 @@ mod tests {
         fs::create_dir_all(&venv).unwrap();
         fs::write(venv.join("installed"), "2.3.0\n").unwrap();
 
-        let version = request(&venv, "/api/version");
-        assert!(version.starts_with("HTTP/1.1 200 OK"), "{version}");
-        assert!(version.ends_with("{\"version\":\"2.3.0\"}"), "{version}");
+        for prefix in ["", "/app/qwenpaw/web"] {
+            let version = request(&venv, &format!("{prefix}/api/version"));
+            assert!(version.starts_with("HTTP/1.1 200 OK"), "{version}");
+            assert!(version.ends_with("{\"version\":\"2.3.0\"}"), "{version}");
 
-        let auth = request(&venv, "/api/auth/status");
-        assert!(auth.starts_with("HTTP/1.1 200 OK"), "{auth}");
-        assert!(
-            auth.ends_with("{\"enabled\":true,\"has_users\":true}"),
-            "{auth}"
-        );
+            let auth = request(&venv, &format!("{prefix}/api/auth/status"));
+            assert!(auth.starts_with("HTTP/1.1 200 OK"), "{auth}");
+            assert!(
+                auth.ends_with("{\"enabled\":true,\"has_users\":true}"),
+                "{auth}"
+            );
+        }
+        for path in [
+            "/app/qwenpaw/web-other/api/version",
+            "/other/api/version",
+            "/app/qwenpaw/web/app/qwenpaw/web/api/version",
+        ] {
+            let response = request(&venv, path);
+            assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        }
         fs::remove_dir_all(venv).unwrap();
     }
 

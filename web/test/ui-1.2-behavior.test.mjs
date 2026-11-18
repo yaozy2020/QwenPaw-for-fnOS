@@ -1,7 +1,8 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { chromium, expect } from "@playwright/test";
@@ -18,6 +19,10 @@ if (browserUnavailable && (process.env.STRICT_CI === "1" || process.env.CI || pr
 }
 let html;
 let browser;
+const screenshotDirectory = process.env.QWENPAW_UI_ARTIFACT_DIR
+  || (process.platform === "win32"
+    ? "C:/Users/Docker/AppData/Local/QwenPawDevTools/perf13-ui"
+    : "/tmp/qwenpaw-perf13-ui");
 
 const browserTest = (name, fn) => browserUnavailable
   ? test(name, { skip: browserUnavailable }, fn)
@@ -25,6 +30,7 @@ const browserTest = (name, fn) => browserUnavailable
 
 before(async () => {
   if (browserUnavailable) return;
+  await mkdir(screenshotDirectory, { recursive: true });
   const [template, css, bundled] = await Promise.all([
     readFile(new URL("../src/index.html", import.meta.url), "utf8"),
     readFile(new URL("../src/style.css", import.meta.url), "utf8"),
@@ -50,7 +56,7 @@ async function fixture(t, options = {}) {
     logs: ["原始服务日志"],
     installLogs: ["本任务日志"],
     clearStatus: 200,
-    posts: [], logQueries: [], requestPaths: [], statusPolls: 0, statusRequests: 0,
+    posts: [], logQueries: [], liveLogQueries: [], requestPaths: [], statusPolls: 0, statusRequests: 0,
     ...options,
   };
   const context = await browser.newContext({ viewport: options.viewport, deviceScaleFactor: options.deviceScaleFactor, javaScriptEnabled: options.javaScriptEnabled, userAgent: options.userAgent });
@@ -103,8 +109,10 @@ async function fixture(t, options = {}) {
       return route.fulfill({ json: { success: true, logs: state.installLogs } });
     }
     if (path === "logs") {
+      state.liveLogQueries.push(Number(url.searchParams.get("tail")));
+      const logs = structuredClone(state.logs);
       if (state.logsHeld) await state.logsHeld;
-      return route.fulfill({ json: { success: true, logs: state.logs } });
+      return route.fulfill({ json: { success: true, logs } });
     }
     if (path === "mirror") return route.fulfill({ json: { success: true, mirror: "" } });
     return route.fulfill({ status: 404, json: { success: false } });
@@ -135,8 +143,49 @@ const desktop = { width: 1440, height: 900 };
 const runningStatus = {
   success: true, installed: true, running: true, pid: 421,
   startAt: Math.floor(Date.now() / 1000) - 3600, cpu: 1.5, memKB: 102400,
-  version: "2.0.0", authStatus: "protected", install: { running: false },
+  version: "2.0.0", port: 18088, authEnabled: true, authStatus: "protected", install: { running: false },
 };
+
+function installStatusEventHost() {
+  window.testHidden = false;
+  Object.defineProperty(document, "hidden", { configurable: true, get: () => window.testHidden });
+  window.setTestHidden = hidden => {
+    window.testHidden = hidden;
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+  const originalSetInterval = window.setInterval;
+  const originalClearInterval = window.clearInterval;
+  window.intervalCallbacks = new Map();
+  window.setInterval = (callback, delay, ...args) => {
+    const id = originalSetInterval(callback, delay, ...args);
+    window.intervalCallbacks.set(id, { callback, delay });
+    return id;
+  };
+  window.clearInterval = id => {
+    window.intervalCallbacks.delete(id);
+    originalClearInterval(id);
+  };
+  window.fireInterval = delay => {
+    for (const timer of window.intervalCallbacks.values()) {
+      if (timer.delay === delay) timer.callback();
+    }
+  };
+  class FakeEventSource {
+    static instances = [];
+    listeners = new Map();
+    constructor(url) { this.url = url; FakeEventSource.instances.push(this); }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    emit(type, data) { this.listeners.get(type)?.({ data }); }
+    close() { this.closed = true; }
+  }
+  window.EventSource = FakeEventSource;
+}
+
+async function emitSnapshot(page, snapshot, index = 0) {
+  await page.evaluate(({ snapshot, index }) => {
+    window.EventSource.instances[index].emit("snapshot", JSON.stringify(snapshot));
+  }, { snapshot, index });
+}
 
 browserTest("revealed notices keep the icon beside the message", async t => {
   const { page } = await fixture(t, { viewport: desktop, versions: { success: false, message: "mirror down" } });
@@ -337,7 +386,124 @@ browserTest("mobile log terminal fills the page and preserves manual scrolling",
   await page.evaluate(() => window.fetchLogs());
   await expect(terminal).toContainText("日志 161");
   assert.equal(await terminal.evaluate(element => element.scrollTop), 0, "reading older logs must not jump to the bottom");
-  await page.screenshot({ path: "/tmp/qwenpaw-mobile-log-final.png", fullPage: true });
+  await page.screenshot({ path: join(screenshotDirectory, "qwenpaw-mobile-log-final.png"), fullPage: true });
+});
+
+browserTest("unchanged log windows preserve DOM nodes, selection and manual scroll without mutations", async t => {
+  const logs = Array.from({ length: 160 }, (_, index) => index % 2 ? `日志 ${index + 1}` : { message: `日志 ${index + 1}` });
+  const { page, state } = await fixture(t, { viewport: desktop, logs });
+  await page.goto(origin + prefix);
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal).toContainText("日志 160");
+  await terminal.evaluate(element => {
+    element.scrollTop = 0;
+    window.originalLogNode = element.firstChild;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element.firstChild);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    window.logMutations = [];
+    window.logObserver = new MutationObserver(records => window.logMutations.push(...records.map(record => record.type)));
+    window.logObserver.observe(element, { subtree: true, childList: true, characterData: true });
+    window.logObserver.observe(document.getElementById("overviewLogPreview"), { subtree: true, childList: true, characterData: true });
+  });
+  state.logs = structuredClone(logs.slice(-100));
+  await page.evaluate(async () => { for (let index = 0; index < 3; index++) await window.fetchLogs(); });
+  const unchanged = await terminal.evaluate(element => ({
+    sameNode: element.firstChild === window.originalLogNode,
+    selection: window.getSelection().toString(), top: element.scrollTop,
+    mutations: window.logMutations,
+  }));
+  assert.equal(unchanged.sameNode, true);
+  assert.equal(unchanged.selection, "日志 1");
+  assert.equal(unchanged.top, 0);
+  assert.deepEqual(unchanged.mutations, []);
+  assert.deepEqual(state.liveLogQueries, [2000, 100, 100, 100]);
+
+  state.logs = [...logs.slice(-99), { message: "日志 161" }];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal).toContainText("日志 161");
+  assert.equal(await terminal.evaluate(element => element.scrollTop), 0);
+  await terminal.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  state.logs = [...logs.slice(-98), { message: "日志 161" }, "日志 162"];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal).toContainText("日志 162");
+  assert.equal(await terminal.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop <= 2), true);
+});
+
+browserTest("log windows remain bounded and rotation replaces unrelated history", async t => {
+  const logs = Array.from({ length: 2000 }, (_, index) => `行 ${index + 1}`);
+  const { page, state } = await fixture(t, { viewport: desktop, logs });
+  await page.goto(origin + prefix);
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal.locator("div")).toHaveCount(2000);
+  state.logs = [...logs.slice(-99), "行 2001"];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal.locator("div")).toHaveCount(2000);
+  await expect(terminal.locator("div").first()).toHaveText("行 2");
+  await expect(terminal.locator("div").last()).toHaveText("行 2001");
+  state.logs = ["轮转后的日志"];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal.locator("div")).toHaveCount(1);
+  await expect(terminal).toHaveText("轮转后的日志");
+});
+
+browserTest("log clear discards held pre-clear responses, preserves failed clears and fetches a fresh window", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop });
+  await page.goto(origin + prefix);
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal).toContainText("原始服务日志");
+  state.clearStatus = 503;
+  await page.evaluate(() => { window.pendingClear = window.clearTerminalLogs(); });
+  await page.locator("#modalConfirmBtn").click();
+  await page.evaluate(() => window.pendingClear);
+  await expect(terminal).toContainText("原始服务日志");
+  await expect(page.locator("#toast")).toContainText("删除日志失败");
+  state.clearStatus = 200;
+  let release;
+  state.logs = ["清空前的慢响应"];
+  state.logsHeld = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const requests = state.liveLogQueries.length;
+  await page.evaluate(() => { window.pendingLogs = window.fetchLogs(); });
+  await expect.poll(() => state.liveLogQueries.length).toBe(requests + 1);
+  await page.evaluate(() => { window.pendingClear = window.clearTerminalLogs(); });
+  await page.locator("#modalConfirmBtn").click();
+  await page.evaluate(() => window.pendingClear);
+  await expect(terminal).toContainText("当前无日志输出");
+  release();
+  state.logsHeld = null;
+  await page.evaluate(() => window.pendingLogs);
+  await expect(terminal).not.toContainText("清空前的慢响应");
+  await expect(page.locator("#overviewLogPreview")).toHaveText("暂无日志");
+  state.logs = ["清空后的新日志"];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal).toHaveText("清空后的新日志");
+  assert.equal(state.liveLogQueries.at(-1), 2000);
+});
+
+browserTest("slow log polling coalesces ticks and foreground recovery without parallel reads", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop, initScript: installStatusEventHost });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
+  let release;
+  state.logsHeld = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const requests = state.liveLogQueries.length;
+  await page.evaluate(() => { for (let index = 0; index < 20; index++) window.fireInterval(15000); });
+  await expect.poll(() => state.liveLogQueries.length).toBe(requests + 1);
+  await page.evaluate(() => {
+    window.setTestHidden(true);
+    window.setTestHidden(false);
+    for (let index = 0; index < 20; index++) window.fireInterval(15000);
+  });
+  assert.equal(state.liveLogQueries.length, requests + 1);
+  state.logs = ["恢复后新日志"];
+  state.logsHeld = null;
+  release();
+  await expect(page.locator("#logTerminal")).toHaveText("恢复后新日志");
+  assert.equal(state.liveLogQueries.length, requests + 2, "all pending ticks collapse to one follow-up read");
 });
 
 browserTest("log export downloads the complete visible history window", async t => {
@@ -592,7 +758,7 @@ browserTest("195px viewport keeps section headings and overview content readable
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 195);
   assert.deepEqual(headings.map(({ section }) => section), ["overview", "configuration", "authorization", "logs"]);
   await page.addStyleTag({ content: "[data-mobile-panel] { display: flex !important; } .grid { display: flex !important; flex-direction: column; }" });
-  await page.screenshot({ path: "/tmp/qwenpaw-console-20261113/supplement-browser-zoom-200-390x844-full.png", fullPage: true });
+  await page.screenshot({ path: join(screenshotDirectory, "supplement-browser-zoom-200-390x844-full.png"), fullPage: true });
 });
 
 browserTest("brand title and header navigation remain readable at 200 percent text size", async t => {
@@ -1428,34 +1594,114 @@ browserTest("late status success and failure cannot overwrite a newer snapshot",
   await expect(page.locator("#statusBadge")).toContainText("运行中");
 });
 
-browserTest("initial SSE refreshes status and later snapshots arrive without polling", async t => {
-  const { page, state } = await fixture(t, {
-    status: runningStatus,
-    initScript: () => {
-      class FakeEventSource {
-        static instances = [];
-        constructor(url) {
-          this.url = url;
-          FakeEventSource.instances.push(this);
-        }
-        addEventListener(type, listener) {
-          if (type === "snapshot") this.snapshotListener = listener;
-        }
-        close() { this.closed = true; }
-      }
-      window.EventSource = FakeEventSource;
-    },
-  });
+browserTest("initial and later SSE snapshots update the dashboard without another status GET", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
   await page.goto(origin + prefix);
   await expect(page.locator("#statusBadge")).toContainText("运行中");
-  const stream = await page.evaluate(() => window.EventSource.instances[0]?.url);
-  assert.equal(stream, "/app/qwenpaw/api/events");
-  const stopped = { ...state.status, running: false, pid: "0", startAt: 0, cpu: 0, memKB: 0 };
-  state.status = stopped;
-  await page.evaluate(data => {
-    window.EventSource.instances[0].snapshotListener({ data: JSON.stringify(data) });
-  }, stopped);
+  assert.equal(await page.evaluate(() => window.EventSource.instances[0].url), "/app/qwenpaw/api/events");
+  assert.equal(state.statusRequests, 1, "keep the initial status GET");
+  await emitSnapshot(page, { ...runningStatus, pid: "777" });
+  await expect(page.locator("#overviewPid")).toHaveText("777");
+  const stopped = { ...runningStatus, running: false, pid: "0", startAt: 0, cpu: 0, memKB: 0 };
+  await emitSnapshot(page, stopped);
   await expect(page.locator("#statusBadge")).toContainText("已停止", { timeout: 500 });
+  await expect(page.locator("#btnStartService")).toBeVisible();
+  assert.equal(state.statusRequests, 1, "snapshot contents must be used even when GET would still report running");
+});
+
+for (const outcome of ["success", "failure"]) {
+  browserTest(`SSE wins over an in-flight status GET ${outcome}`, async t => {
+    const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+    await page.goto(origin + prefix);
+    await expect(page.locator("#overviewPid")).toHaveText("421");
+    let release;
+    state.statusCode = outcome === "failure" ? 503 : 200;
+    state.status = { ...runningStatus, running: false, pid: "0" };
+    state.statusHeld = new Promise(resolve => { release = resolve; });
+    t.after(() => release());
+    const requests = state.statusRequests;
+    await page.evaluate(() => { window.pendingStatus = window.fetchStatus(); });
+    await expect.poll(() => state.statusRequests).toBe(requests + 1);
+    await emitSnapshot(page, { ...runningStatus, pid: "888" });
+    await expect(page.locator("#overviewPid")).toHaveText("888");
+    assert.equal(state.statusRequests, requests + 1);
+    release();
+    await page.evaluate(() => window.pendingStatus);
+    await expect(page.locator("#overviewPid")).toHaveText("888");
+    await expect(page.locator("#statusBadge")).toContainText("运行中");
+  });
+}
+
+browserTest("malformed SSE bursts recover once and cannot turn unknown data into a stopped service", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.goto(origin + prefix);
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+  let release;
+  state.statusCode = 503;
+  state.statusHeld = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const before = state.statusRequests;
+  await page.evaluate(() => {
+    const stream = window.EventSource.instances[0];
+    for (let index = 0; index < 20; index++) {
+      for (const data of ["{", "null", "[]", '{"ok":false}', '{"success":true,"running":false}',
+        '{"success":true,"installed":true,"running":"false"}']) stream.emit("snapshot", data);
+      stream.emit("error");
+    }
+  });
+  await expect.poll(() => state.statusRequests).toBe(before + 1);
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+  release();
+  await expect(page.locator("#statusBadge")).toContainText("状态不可达");
+  await page.evaluate(() => {
+    for (let index = 0; index < 20; index++) window.EventSource.instances[0].emit("snapshot", "{}");
+  });
+  assert.equal(state.statusRequests, before + 1, "failed recovery must not cause an event GET storm");
+  state.statusCode = 200;
+  await emitSnapshot(page, { ...runningStatus, pid: "999" });
+  await expect(page.locator("#overviewPid")).toHaveText("999");
+  assert.equal(state.statusRequests, before + 1);
+  await page.evaluate(() => window.fireInterval(30000));
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+  assert.equal(state.statusRequests, before + 2, "the 30-second fallback remains available after invalid events");
+  assert.deepEqual(pageErrors, []);
+});
+
+browserTest("SSE disconnect and foreground resume recover while closed-stream callbacks stay ignored", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#overviewPid")).toHaveText("421");
+  state.status = { ...runningStatus, pid: 777 };
+  const requests = state.statusRequests;
+  await page.evaluate(() => window.EventSource.instances[0].emit("error"));
+  await expect(page.locator("#overviewPid")).toHaveText("777");
+  assert.equal(state.statusRequests, requests + 1, "disconnection performs a bounded status recovery");
+  await emitSnapshot(page, { ...runningStatus, pid: "888" });
+  await expect(page.locator("#overviewPid")).toHaveText("888");
+  assert.equal(state.statusRequests, requests + 1, "reconnected snapshots do not GET again");
+
+  await page.evaluate(() => window.setTestHidden(true));
+  assert.equal(await page.evaluate(() => window.EventSource.instances[0].closed), true);
+  await emitSnapshot(page, { ...runningStatus, pid: "111" });
+  await page.evaluate(() => { window.fireInterval(15000); window.fireInterval(30000); });
+  await expect(page.locator("#overviewPid")).toHaveText("888");
+  assert.equal(state.statusRequests, requests + 1);
+  state.status = { ...runningStatus, pid: 999 };
+  await page.evaluate(() => window.setTestHidden(false));
+  await expect(page.locator("#overviewPid")).toHaveText("999");
+  assert.equal(state.statusRequests, requests + 2, "foreground resume refreshes immediately");
+  assert.equal(await page.evaluate(() => window.EventSource.instances.length), 2);
+  await emitSnapshot(page, { ...runningStatus, pid: "111" });
+  await expect(page.locator("#overviewPid")).toHaveText("999");
+  await emitSnapshot(page, { ...runningStatus, pid: "1000" }, 1);
+  await expect(page.locator("#overviewPid")).toHaveText("1000");
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(new Event("pageshow"));
+  });
+  assert.equal(await page.evaluate(() => window.EventSource.instances.length), 2, "resume must not duplicate a live stream");
 });
 
 browserTest("install submits the version confirmed before an asynchronous selection change", async t => {

@@ -103,7 +103,7 @@ fn install_callback(cfg: &Config) -> Result<(), String> {
         .map_err(|error| format!("安装前停止已登记服务失败: {error}"))?;
 
     if service::run(ServiceAction::Status, cfg) != 0 {
-        apply_platform_permissions(cfg, true)?;
+        apply_platform_permissions(cfg, Lifecycle::Install)?;
     }
     if configure(cfg, &port, &log_level) != 0 {
         return Err("平台端口或日志设置未能通过监督者事务应用".into());
@@ -122,7 +122,7 @@ fn upgrade_callback(cfg: &Config) -> Result<(), String> {
     }
     log_message(cfg, "stop成功", false);
 
-    apply_platform_permissions(cfg, true)?;
+    apply_platform_permissions(cfg, Lifecycle::Upgrade)?;
     log_message(cfg, "权限应用完成", false);
 
     match env::current_exe() {
@@ -423,8 +423,25 @@ fn platform_owner() -> Result<Option<PlatformOwner>, String> {
     }))
 }
 
-fn apply_platform_permissions(cfg: &Config, include_home: bool) -> Result<(), String> {
+fn apply_platform_permissions(cfg: &Config, lifecycle: Lifecycle) -> Result<(), String> {
     let owner = platform_owner()?;
+    let runtime = crate::runtime::RuntimeAdapter::new(
+        &cfg.kernel_venv,
+        &cfg.share_dir,
+        &cfg.etc_dir,
+        &cfg.kernel_log_level,
+    );
+    let existing_install = lifecycle == Lifecycle::Upgrade
+        || env::var("TRIM_APP_STATUS").is_ok_and(|status| status == "UPGRADE")
+        || Path::new(&cfg.kernel_venv).exists()
+        || Path::new(&cfg.var_dir).join("qwenpaw-version").exists()
+        || runtime
+            .has_initial_data()
+            .map_err(|error| format!("检查已有用户数据失败: {error}"))?;
+    if existing_install {
+        return secure_upgrade_permissions(Path::new(&cfg.var_dir), Path::new(&cfg.home_dir), owner)
+            .map_err(|error| format!("设置管理文件权限失败: {error}"));
+    }
     let roots = [
         (PathBuf::from(&cfg.var_dir), 0o750, 0o640, true),
         (PathBuf::from(&cfg.etc_dir), 0o755, 0o640, false),
@@ -436,9 +453,6 @@ fn apply_platform_permissions(cfg: &Config, include_home: bool) -> Result<(), St
         (PathBuf::from(&cfg.share_dir), 0o750, 0o600, true),
     ];
     for (path, directory_mode, file_mode, private_files) in roots {
-        if path == Path::new(&cfg.home_dir) && !include_home {
-            continue;
-        }
         if path == Path::new(&cfg.var_dir) && path.exists() {
             let active_socket = control::socket_path(&cfg.var_dir);
             if active_socket.exists() && service::run(ServiceAction::Status, cfg) == 0 {
@@ -449,6 +463,73 @@ fn apply_platform_permissions(cfg: &Config, include_home: bool) -> Result<(), St
             .map_err(|error| format!("设置应用权限失败 {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+// Upgrades may replace the runtime, but must not normalize user data permissions.
+// Only these supervisor-owned records (and top-level venv journals) are managed here.
+fn secure_upgrade_permissions(
+    var: &Path,
+    home: &Path,
+    owner: Option<PlatformOwner>,
+) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(var)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::other("应用 var 路径不是实际目录"));
+    }
+    set_owner(var, owner)?;
+    fs::set_permissions(var, fs::Permissions::from_mode(0o750))?;
+    for name in [
+        "supervisor-token",
+        "qwenpaw-version",
+        "supervisor.lock",
+        ".qwenpaw-lifecycle.lock",
+        "supervisor-control.sock",
+        "supervisor.pid",
+        "supervisor.pid.starttime",
+        "kernel.pid",
+        "install.pid",
+        "shutdown-generation.json",
+        "settings-transaction.json",
+        "web-proxy-transaction.json",
+        "auth-reset.json",
+        "kernel-uninstall.json",
+    ] {
+        secure_management_file(&var.join(name), owner)?;
+    }
+    match fs::symlink_metadata(home) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            for entry in fs::read_dir(home)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(".venv.transaction.") && name.ends_with(".json") {
+                    secure_management_file(&entry.path(), owner)?;
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(io::Error::other("应用 home 路径不是实际目录")),
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+fn secure_management_file(path: &Path, owner: Option<PlatformOwner>) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() && !metadata.file_type().is_socket() {
+        return Err(io::Error::other(format!(
+            "管理权限目标不是普通文件或 Socket: {}",
+            path.display()
+        )));
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    set_owner(path, owner)
 }
 
 fn secure_tree(
@@ -849,6 +930,82 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), b"preserve contents");
         fs::remove_dir_all(var).unwrap();
+    }
+
+    #[test]
+    fn upgrade_permissions_preserve_user_trees_and_secure_only_management_records() {
+        use std::os::unix::{fs::MetadataExt, net::UnixListener};
+
+        let root = temp_var("upgrade-permissions");
+        let var = root.join("var");
+        let home = root.join("home");
+        let user_files = [
+            root.join("share/config.json"),
+            root.join("share/workspaces/memory.db"),
+            root.join("share/.qwenpaw.secret/auth.json"),
+            root.join("etc/local.env"),
+            home.join("local files/tool.sh"),
+            var.join("local files/private.lock"),
+        ];
+        for path in &user_files {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"legacy bytes\0\xff").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o640)).unwrap();
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o710)).unwrap();
+        }
+        let before = user_files.map(|path| {
+            let metadata = fs::metadata(&path).unwrap();
+            (path, metadata.mode(), metadata.uid(), metadata.gid(), metadata.mtime_nsec())
+        });
+        let private = [
+            var.join("supervisor-token"),
+            var.join("qwenpaw-version"),
+            var.join("settings-transaction.json"),
+            var.join("web-proxy-transaction.json"),
+            home.join(".venv.transaction.1.2.json"),
+        ];
+        for path in &private {
+            fs::write(path, b"keep management bytes\n").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let socket = var.join("supervisor-control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+
+        secure_upgrade_permissions(&var, &home, None).unwrap();
+
+        for (path, mode, uid, gid, mtime_nsec) in before {
+            let metadata = fs::metadata(&path).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"legacy bytes\0\xff");
+            assert_eq!(metadata.mode(), mode, "{}", path.display());
+            assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
+            assert_eq!(metadata.mtime_nsec(), mtime_nsec);
+            assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777, 0o710);
+        }
+        for path in private {
+            assert_eq!(fs::read(&path).unwrap(), b"keep management bytes\n");
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+        }
+        assert_eq!(fs::metadata(socket).unwrap().mode() & 0o777, 0o600);
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upgrade_permissions_reject_management_symlinks_without_changing_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_var("upgrade-permission-link");
+        let var = root.join("var");
+        fs::create_dir_all(&var).unwrap();
+        let outside = root.join("outside-user-data");
+        fs::write(&outside, b"keep bytes").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&outside, var.join("supervisor-token")).unwrap();
+        assert!(secure_upgrade_permissions(&var, &root.join("home"), None).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"keep bytes");
+        assert_eq!(fs::metadata(outside).unwrap().permissions().mode() & 0o777, 0o640);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

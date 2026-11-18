@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -26,6 +28,8 @@ CALLBACKS = {
     "uninstall": (ROOT / "cmd/uninstall_callback", "uninstall"),
 }
 TERMINAL_PHASES = {"done", "failed"}
+CASE_FILTER = ""
+CASE_COUNT = 0
 
 
 def require(condition, message):
@@ -193,6 +197,8 @@ class Fixture:
         for key in (
             "QWENPAW_CRASH_POINT", "QWENPAW_ENABLE_CRASH_POINT", "QWENPAW_RACE_READY_FILE",
             "QWENPAW_RACE_GO_FILE", "QWENPAW_TEST_RUNTIME_INSTALL_VERSION",
+            "QWENPAW_BASE_PATH_PATCH", "QWENPAW_TEST_BAD_PYTHON_INODE",
+            "QWENPAW_TEST_REINSTALL_PID", "TRIM_USERNAME", "TRIM_GROUPNAME",
         ):
             self.env.pop(key, None)
         self.env.update({
@@ -587,6 +593,13 @@ def validate_inputs():
     hashes = {"supervisor": sha256(SUPERVISOR_SOURCE), "runtime": sha256(RUNTIME_SOURCE)}
     print(f"release supervisor source: {SUPERVISOR_SOURCE}\nSHA256: {hashes['supervisor']}")
     print(f"release test runtime source: {RUNTIME_SOURCE}\nSHA256: {hashes['runtime']}")
+    validate_shell_contracts()
+    require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
+            "safe process cleanup requires pidfd_open and pidfd_send_signal")
+    return hashes
+
+
+def validate_shell_contracts():
     upgrade_init = ROOT / "cmd/upgrade_init"
     upgrade_init_source = upgrade_init.read_text(encoding="utf-8")
     upgrade_init_active = [
@@ -625,12 +638,13 @@ def validate_inputs():
         forbidden = re.compile(r"\b(?:curl|python3?|pip3?|rm|chown|chmod|kill|sed|awk|grep|find|mkdir|mv|sync|sleep)\b")
         require(not forbidden.search(executable),
                 f"{path.relative_to(ROOT)} contains lifecycle business or external tooling")
-    require(hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"),
-            "safe process cleanup requires pidfd_open and pidfd_send_signal")
-    return hashes
 
 
 def run_case(name, function, failures):
+    global CASE_COUNT
+    if CASE_FILTER and CASE_FILTER.casefold() not in name.casefold():
+        return
+    CASE_COUNT += 1
     try:
         function()
         print(f"[  OK ] {name}")
@@ -1313,8 +1327,367 @@ def case_task_failure(parent, hashes):
         require(not list(fixture.home.glob(".venv.staging.*")), "failed task left a staging directory")
 
 
+# Old shell layout samples, not claims that an old FPK was executed here.
+LEGACY_UPGRADE_SAMPLES = (
+    ("1.1", "2.2.2.post1", b"Version: 2.2.2.post1\r\n", "config", None),
+    ("1.2", "2.3.0", b"2.3.0\n", "workspaces", None),
+    ("1.2-marker", "2.3.0", b"version: 2.3.0\n", "config", b"1" * 64 + b"\n"),
+)
+BASE_PATH_MARKER = ".qwenpaw-base-path-patch"
+NATIVE_RUNTIME_RECORDS = frozenset({".qwenpaw-test-runtime.pid", ".qwenpaw-test-runtime-health"})
+# Explicit supervisor/installer artifacts only: user *.log/*.lock and local files stay checked.
+UPGRADE_VAR_RUNTIME = frozenset({
+    "supervisor-token", "qwenpaw-version", "supervisor.lock", ".qwenpaw-lifecycle.lock",
+    "supervisor-control.sock", "supervisor.pid", "supervisor.pid.starttime", "kernel.pid",
+    "install.pid", "shutdown-generation.json", "qwenpaw-config.log", "supervisor.log",
+    "qwenpaw.log", "qwenpaw-upgrade.log", "qwenpaw-upgrade.log.pip", "pip-cache", "uv-cache",
+})
+
+
+def file_set_snapshot(root, excluded=(), include_root=True):
+    records = {}
+
+    def visit(path, relative):
+        if relative in excluded:
+            return
+        metadata = path.lstat()
+        record = {"mode": stat.S_IMODE(metadata.st_mode),
+                  "uid": metadata.st_uid, "gid": metadata.st_gid}
+        if stat.S_ISDIR(metadata.st_mode):
+            record["type"] = "directory"
+            # Directory mtimes change when the explicitly excluded runtime is replaced.
+            if relative or include_root:
+                records[relative] = record
+            for child in sorted(path.iterdir()):
+                visit(child, f"{relative}/{child.name}" if relative else child.name)
+            return
+        record.update({"mtime_ns": metadata.st_mtime_ns, "size": metadata.st_size})
+        if stat.S_ISREG(metadata.st_mode):
+            record.update({"type": "file", "sha256": sha256(path)})
+        elif stat.S_ISLNK(metadata.st_mode):
+            record.update({"type": "symlink", "target": os.readlink(path)})
+        else:
+            raise AssertionError(f"unexpected non-data entry in snapshot: {path}")
+        records[relative] = record
+
+    visit(root, "")
+    return records
+
+
+def upgrade_data_snapshot(fixture):
+    scopes = {
+        "share": file_set_snapshot(fixture.share),
+        "etc": file_set_snapshot(fixture.etc),
+        "home": file_set_snapshot(fixture.home, {"venv"}),
+        "var": file_set_snapshot(fixture.var, UPGRADE_VAR_RUNTIME, include_root=False),
+        "authorized": file_set_snapshot(fixture.root / "authorized-local"),
+        "outside-sentinel": file_set_snapshot(fixture.sentinel),
+    }
+    return {f"{scope}/{name}": record for scope, files in scopes.items()
+            for name, record in files.items()}
+
+
+def require_same_file_set(before, after, label):
+    removed = sorted(before.keys() - after.keys())
+    added = sorted(after.keys() - before.keys())
+    changed = sorted(name for name in before.keys() & after.keys() if before[name] != after[name])
+    require(not removed and not added and not changed,
+            f"{label}: removed={removed[:5]}, added={added[:5]}, changed={changed[:5]}")
+
+
+def seed_legacy_user_data(fixture, marker):
+    authorized = fixture.root / "authorized-local"
+    files = {
+        fixture.user_data / "memory.db": (b"SQLite format 3\0legacy-memory\xff\0", 0o640),
+        fixture.user_data / "auth.json": (b'{"users":["legacy"],"salt":"keep"}\n', 0o600),
+        fixture.user_data / "local files/用户笔记.txt": ("用户原始内容\r\n".encode(), 0o644),
+        fixture.user_data / "local files/tool.sh": (b"#!/bin/sh\nexit 17\n", 0o751),
+        fixture.user_secret / "auth.json": (b'{"password_hash":"fixture-only","sessions":[1]}\n', 0o640),
+        fixture.etc / ".qwenpaw/config.json": (b'{"locale":"en","custom":true}\n', 0o600),
+        fixture.etc / "local.env": (b"KEEP=legacy\n", 0o640),
+        fixture.home / "local files/model.bin": (bytes(range(256)) * 4, 0o640),
+        fixture.home / "local files/user.log": (b"user file, not a supervisor log\n", 0o644),
+        fixture.var / "local files/private.lock": (b"user-owned lock content\n", 0o640),
+        fixture.var / "service_port": (f"{fixture.service_port}\n".encode(), 0o640),
+        fixture.var / "qwenpaw-log-level": (b"info\n", 0o644),
+        fixture.var / "pip-mirror": (b"http://127.0.0.1:9/simple\n", 0o640),
+        authorized / "project/notes.md": (b"authorized directory must survive\n", 0o640),
+        authorized / "project/.auth": (b"authorized-local-secret\0", 0o600),
+    }
+    project_dirs = [{"path": str(authorized / "project"), "label": "legacy authorized"}]
+    config = json.dumps({"language": "en", "project_dirs": project_dirs}, ensure_ascii=False).encode() + b"\n"
+    if marker == "config":
+        files[fixture.user_data / "config.json"] = (config, 0o640)
+    else:
+        files[fixture.user_data / "workspaces/default/config.json"] = (config, 0o600)
+    for index, (path, (data, mode)) in enumerate(files.items()):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        os.chmod(path, mode)
+        timestamp = 1_600_000_000_000_000_000 + index * 1_000_000_000
+        os.utime(path, ns=(timestamp, timestamp))
+    for root in (fixture.share, fixture.etc, fixture.home, authorized):
+        for directory, _, _ in os.walk(root):
+            path = Path(directory)
+            if path == fixture.venv or fixture.venv in path.parents:
+                continue
+            os.chmod(path, 0o710 if path.name == "local files" else 0o750)
+    (fixture.user_data / "authorized-project").symlink_to(authorized / "project", target_is_directory=True)
+    fixture.sentinel.write_bytes(b"outside every TRIM data root\0\xff\n")
+    os.chmod(fixture.sentinel, 0o640)
+    (fixture.var / "supervisor-token").write_text("legacy-test-token\n")
+    os.chmod(fixture.var / "supervisor-token", 0o644)
+
+
+def seed_legacy_runtime(fixture, sample, *, bad_import=False):
+    _, version, pin, _, patch_marker = sample
+    fixture.create_runtime(version, bad_import=bad_import)
+    fixture.pin.write_bytes(pin)
+    os.chmod(fixture.pin, 0o600)
+    if patch_marker is not None:
+        path = fixture.venv / BASE_PATH_MARKER
+        path.write_bytes(patch_marker)
+        os.chmod(path, 0o600)
+    fixture.env["SUPERVISOR_AUTOSTART"] = "0"
+    fixture.stage_installed_helper()
+
+
+def stage_upgrade_patch(fixture, *, corrupt=False):
+    root = fixture.app / "www/patches/qwenpaw-2.3.0-base-path"
+    payload = root / "payload/console/index.html"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    contents = b"<!doctype html><title>isolated 1.3 payload</title>\n"
+    payload.write_bytes(contents + (b"corrupted" if corrupt else b""))
+    manifest = {"schema_version": 1, "base_version": "2.3.0", "console_complete": True,
+                "files": [{"path": "console/index.html", "original_sha256": None,
+                           "sha256": hashlib.sha256(contents).hexdigest()}]}
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    (root / "manifest.json").write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest(), contents
+
+
+def stage_upgrade_python(fixture, *, fail_bootstrap=False):
+    # Keep the existing shell adapter style: all runtime commands delegate to the
+    # native test binary; only package fixture directories / failure injection are added.
+    base = fixture.root / "upgrade-python"
+    real = base.with_name(base.name + ".real")
+    shutil.copy2(fixture.runtime_source, real)
+    os.chmod(real, 0o755)
+    shim = """#!/bin/bash
+set -eu
+if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
+  "$0.real" "$@"
+  cp -- "$0" "$3/bin/python3"
+  cp -- "$0.real" "$3/bin/python3.real"
+  mkdir -p -- "$3/lib/python3.12/site-packages/qwenpaw"
+  exit 0
+fi
+if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
+  printf '%s\\n' "$*" >> "$QWENPAW_TEST_CONTROL/bootstrap-argv"
+  if [ -f "$QWENPAW_TEST_CONTROL/fail-bootstrap" ]; then
+    printf 'attempted\\n' >> "$QWENPAW_TEST_CONTROL/bootstrap-attempts"
+    printf 'ERROR: injected offline uv bootstrap failure\\n' >&2
+    exit 42
+  fi
+fi
+exec "$0.real" "$@"
+"""
+    base.write_text(shim, encoding="utf-8")
+    os.chmod(base, 0o755)
+    fixture.env["QWENPAW_PYTHON_BIN"] = str(base)
+    if fail_bootstrap:
+        (fixture.control / "fail-bootstrap").write_text("yes\n")
+
+
+@contextmanager
+def legacy_upgrade_fixture(parent, name, hashes):
+    # Keep the fnOS-layout control UDS below sockaddr_un's 108-byte path limit.
+    short_name = "lu-" + hashlib.sha256(name.encode()).hexdigest()[:10]
+    with Fixture(parent, short_name, hashes, fnos_layout=True) as fixture, \
+            Fixture(parent, short_name + "-outside", hashes) as outside:
+        print(f"legacy fixture {name}: {fixture.root}")
+        # A separate native listener with its own TRIM identity catches broad
+        # process cleanup; it does not provide health for the tested installation.
+        outside.create_runtime("9.9.9")
+        with (outside.root / "runtime.log").open("wb") as output:
+            process = subprocess.Popen(
+                [str(outside.venv / "bin/python3"), "-m", "qwenpaw", "app",
+                 "--port", str(outside.service_port)], env=outside.env,
+                stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                outside.wait_kernel()
+                sentinel = outside.runtime_identities[-1]
+                # cargo test rebuilds the debug binary, not the release fixture.
+                # Verify the selected native server's prefix contract before the
+                # transaction so a stale release binary cannot mimic a health bug.
+                for route, expected in (
+                        ("/app/qwenpaw/web/api/version", {"version": "9.9.9"}),
+                        ("/app/qwenpaw/web/api/auth/status", {"enabled": True, "has_users": True})):
+                    try:
+                        with urllib.request.urlopen(
+                                f"http://127.0.0.1:{outside.service_port}{route}", timeout=2) as response:
+                            payload = json.loads(response.read(4096))
+                        require(payload == expected, f"unexpected prefix payload: {payload}")
+                    except Exception as error:
+                        raise AssertionError(
+                            f"selected native test runtime lacks the fixed prefix contract ({route}): {error}; "
+                            f"source={RUNTIME_SOURCE} sha256={hashes['runtime']}; rebuild with "
+                            "cargo build --locked --release --bin qwenpaw-test-runtime") from error
+                require(alive(sentinel), "prefix preflight lost the registered native runtime identity")
+                yield fixture
+                require(alive(sentinel), "upgrade stopped the unrelated registered native sentinel")
+            finally:
+                outside.close()
+                process.wait(timeout=5)
+
+
+def require_upgrade_data_preserved(fixture, before):
+    require_same_file_set(before, upgrade_data_snapshot(fixture), "upgrade user data loss or metadata change")
+    require(not (fixture.control / "init-count").exists(), "upgrade reran init on legacy user data")
+    for path in (fixture.var / "supervisor-token", fixture.var / "supervisor-control.sock", fixture.pin):
+        if path.exists():
+            require(stat.S_IMODE(path.stat().st_mode) == 0o600,
+                    f"upgrade failed to secure management file: {path.name}")
+    for pattern in (".venv.staging.*", ".venv.rollback.*", ".venv.transaction.*.json"):
+        require(not list(fixture.home.glob(pattern)), f"upgrade left unfinished runtime artifact: {pattern}")
+
+
+def case_legacy_upgrade_keep(parent, hashes, sample):
+    with legacy_upgrade_fixture(parent, "legacy-upgrade-keep-" + sample[0], hashes) as fixture:
+        seed_legacy_runtime(fixture, sample)
+        seed_legacy_user_data(fixture, sample[3])
+        before = upgrade_data_snapshot(fixture)
+        runtime = file_set_snapshot(fixture.venv)
+        pin = fixture.pin.read_bytes()
+        code, output = fixture.callback("upgrade")
+        require(code == 0, f"legacy keep upgrade failed: {output[-1600:]}")
+        fixture.manager_identity()
+        require(fixture.control_status()["seq"] == 0, "legacy keep unexpectedly installed a runtime")
+        require_same_file_set(runtime, file_set_snapshot(fixture.venv), "legacy keep changed runtime")
+        require(fixture.pin.read_bytes() == pin, "legacy keep normalized the old pin unexpectedly")
+        require(not (fixture.control / "pip-started").exists(), "legacy keep invoked installer")
+        require_upgrade_data_preserved(fixture, before)
+
+
+def case_legacy_upgrade_exact(parent, hashes, sample):
+    with legacy_upgrade_fixture(parent, "legacy-upgrade-exact-" + sample[0], hashes) as fixture:
+        seed_legacy_runtime(fixture, sample, bad_import=sample[1] != "2.3.0")
+        seed_legacy_user_data(fixture, sample[3])
+        before = upgrade_data_snapshot(fixture)
+        expected_patch = None
+        if sample[1] == "2.3.0":
+            expected_patch = stage_upgrade_patch(fixture)
+            stage_upgrade_python(fixture)
+        old_inode = (fixture.venv / "bin/python3").stat().st_ino
+        code, output = fixture.callback("upgrade")
+        require(code == 0, f"legacy exact rebuild failed: {output[-1600:]}")
+        fixture.manager_identity()
+        task = fixture.wait_task()
+        require(task["seq"] == 1 and task["phase"] == "done" and not task["recovery_required"],
+                f"legacy exact rebuild did not commit cleanly: {task}")
+        require((fixture.venv / "installed").read_text().strip() == sample[1],
+                "legacy exact rebuild guessed another version")
+        require(fixture.pin.read_text() == sample[1] + "\n", "legacy exact rebuild changed pinned version")
+        require((fixture.venv / "bin/python3").stat().st_ino != old_inode, "legacy runtime was not rebuilt")
+        require((fixture.control / "pip-started").exists(), "exact rebuild never reached native installer")
+        if expected_patch is not None:
+            fingerprint, contents = expected_patch
+            require((fixture.venv / BASE_PATH_MARKER).read_text() == fingerprint + "\n",
+                    "old or missing marker did not commit the new payload fingerprint")
+            require((fixture.venv / "lib/python3.12/site-packages/qwenpaw/console/index.html").read_bytes()
+                    == contents, "new staged payload was not activated")
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{fixture.service_port}/app/qwenpaw/web/api/version", timeout=2) as response:
+                require(json.loads(response.read())["version"] == sample[1], "prefix health version mismatch")
+        fixture.wait_kernel()
+        require_upgrade_data_preserved(fixture, before)
+        fixture.stop_manager()
+        with socket.socket() as client:
+            require(client.connect_ex(("127.0.0.1", fixture.service_port)) != 0,
+                    "stopped native runtime still owns its health listener")
+        require_upgrade_data_preserved(fixture, before)
+
+
+def case_legacy_upgrade_failure(parent, hashes, failure):
+    sample = LEGACY_UPGRADE_SAMPLES[-1]
+    with legacy_upgrade_fixture(parent, "legacy-upgrade-failure-" + failure, hashes) as fixture:
+        seed_legacy_runtime(fixture, sample)
+        seed_legacy_user_data(fixture, sample[3])
+        stage_upgrade_patch(fixture, corrupt=failure == "preflight")
+        stage_upgrade_python(fixture, fail_bootstrap=failure == "bootstrap")
+        if failure == "network":
+            (fixture.control / "fail-pip").write_text("offline installer failure\n")
+        before = upgrade_data_snapshot(fixture)
+        old_runtime = file_set_snapshot(fixture.venv, NATIVE_RUNTIME_RECORDS)
+        old_pin = file_set_snapshot(fixture.pin)
+        code, output = fixture.callback("upgrade")
+        require(code != 0, f"injected {failure} failure was reported successful")
+        fixture.manager_identity()
+        if failure == "preflight":
+            require("哈希不匹配" in output, f"payload preflight failure was not reached: {output[-1600:]}")
+            require(fixture.control_status()["seq"] == 0, "preflight failure submitted a runtime install")
+            require(not (fixture.control / "bootstrap-argv").exists(), "preflight failure ran bootstrap")
+        else:
+            task = fixture.wait_task()
+            require(task["seq"] == 1 and task["phase"] == "failed" and not task["recovery_required"],
+                    f"{failure} failure did not safely roll back: {task}")
+            witness = "bootstrap-attempts" if failure == "bootstrap" else "pip-attempts"
+            require((fixture.control / witness).is_file(), f"{failure} injection was not reached")
+            if failure == "bootstrap":
+                require(not (fixture.control / "pip-started").exists(), "failed bootstrap reached package install")
+        require_same_file_set(old_runtime, file_set_snapshot(fixture.venv, NATIVE_RUNTIME_RECORDS),
+                              f"{failure} changed old runtime")
+        require_same_file_set(old_pin, file_set_snapshot(fixture.pin), f"{failure} changed old pin")
+        if failure != "preflight":
+            fixture.wait_kernel()
+        require_upgrade_data_preserved(fixture, before)
+        # Rollback must leave the original native runtime usable, not just a marker.
+        code, output = fixture.command([str(fixture.binary), "service", "stop"])
+        require(code == 0, f"post-failure stop failed: {output[-800:]}")
+        fixture.env["SUPERVISOR_AUTOSTART"] = "1"
+        fixture.start_manager(expect_kernel=True)
+        require_upgrade_data_preserved(fixture, before)
+
+
+def case_legacy_upgrade_without_exact_pin(parent, hashes, raw_pin):
+    label = "missing" if raw_pin is None else raw_pin.decode().strip().replace(":", "-")
+    with legacy_upgrade_fixture(parent, "legacy-upgrade-no-exact-" + label, hashes) as fixture:
+        sample = LEGACY_UPGRADE_SAMPLES[0]
+        seed_legacy_runtime(fixture, sample, bad_import=True)
+        seed_legacy_user_data(fixture, sample[3])
+        if raw_pin is None:
+            fixture.pin.unlink()
+        else:
+            fixture.pin.write_bytes(raw_pin)
+        before = upgrade_data_snapshot(fixture)
+        old_runtime = file_set_snapshot(fixture.venv, NATIVE_RUNTIME_RECORDS)
+        code, output = fixture.callback("upgrade")
+        require(code != 0 and "拒绝" in output, f"invalid pin did not fail closed: {output[-1600:]}")
+        fixture.manager_identity()
+        require(fixture.control_status()["seq"] == 0, "invalid pin submitted a guessed install")
+        require(not (fixture.control / "pip-started").exists(), "invalid pin invoked package installer")
+        require(not list(fixture.home.glob(".venv.staging.*")), "invalid pin prepared a guessed runtime")
+        require(fixture.pin.read_bytes() == raw_pin if raw_pin is not None else not fixture.pin.exists(),
+                "invalid pin was replaced with a guessed version")
+        require_same_file_set(old_runtime, file_set_snapshot(fixture.venv, NATIVE_RUNTIME_RECORDS),
+                              "invalid pin changed runtime")
+        require_upgrade_data_preserved(fixture, before)
+
+
 def main():
+    global CASE_FILTER, CASE_COUNT
+    parser = argparse.ArgumentParser(description="Isolated native platform callback regression")
+    parser.add_argument("--filter", default="", help="run cases whose name contains this text")
+    parser.add_argument("--shell-contract-only", action="store_true",
+                        help="check thin callbacks without starting or requiring native binaries")
+    args = parser.parse_args()
+    CASE_FILTER, CASE_COUNT = args.filter, 0
     try:
+        if args.shell_contract_only:
+            require(not args.filter, "--filter cannot be combined with --shell-contract-only")
+            validate_shell_contracts()
+            print("test-platform-callbacks: shell contracts passed (native scenarios not run)")
+            return 0
         hashes = validate_inputs()
     except Exception as error:
         print(f"[FAIL ] platform callback input validation: {error}")
@@ -1325,6 +1698,17 @@ def main():
         manifest.write_text(f"{hashes['supervisor']}  {SUPERVISOR_SOURCE}\n"
                             f"{hashes['runtime']}  {RUNTIME_SOURCE}\n")
         failures = []
+        for sample in LEGACY_UPGRADE_SAMPLES:
+            run_case(f"legacy-upgrade {sample[0]} healthy keep preserves all user data and modes",
+                     lambda sample=sample: case_legacy_upgrade_keep(parent, hashes, sample), failures)
+            run_case(f"legacy-upgrade {sample[0]} exact {sample[1]} rebuild preserves all user data and modes",
+                     lambda sample=sample: case_legacy_upgrade_exact(parent, hashes, sample), failures)
+        for failure in ("preflight", "bootstrap", "network"):
+            run_case(f"legacy-upgrade {failure} failure rolls back runtime with zero data loss",
+                     lambda failure=failure: case_legacy_upgrade_failure(parent, hashes, failure), failures)
+        for raw_pin in (None, b"latest\n", b"beta\n", b"Version: >=2.2\n"):
+            run_case(f"legacy-upgrade rejects non-exact pin {raw_pin!r} without guessing latest",
+                     lambda raw_pin=raw_pin: case_legacy_upgrade_without_exact_pin(parent, hashes, raw_pin), failures)
         for action in ("upgrade", "uninstall"):
             run_case(f"{action} callback never executes the legacy var helper",
                      lambda action=action: case_legacy_var_helper_is_never_executed(
@@ -1390,10 +1774,13 @@ def main():
                  lambda: case_uds_failure(parent, hashes), failures)
         run_case("failed native install task returns nonzero and rolls back",
                  lambda: case_task_failure(parent, hashes), failures)
-        if failures:
-            print(f"test-platform-callbacks: {len(failures)} scenario(s) failed")
+        if CASE_COUNT == 0:
+            print(f"[FAIL ] no platform callback scenarios match --filter {CASE_FILTER!r}")
             return 1
-    print("test-platform-callbacks: ALL CHECKS PASSED")
+        if failures:
+            print(f"test-platform-callbacks: {len(failures)} of {CASE_COUNT} scenario(s) failed")
+            return 1
+    print(f"test-platform-callbacks: {CASE_COUNT} scenario(s) passed")
     return 0
 
 

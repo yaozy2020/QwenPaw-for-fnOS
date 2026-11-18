@@ -31,7 +31,6 @@ from ..constant import (
     WORKING_DIR,
 )
 from ..envs import load_envs_into_environ
-from ..hub.static_files import CompressedStaticFiles
 from ..local_models.manager import LocalModelManager
 from ..providers.provider_manager import ProviderManager
 from ..utils.daily_telemetry import start_daily_telemetry
@@ -47,6 +46,7 @@ from .base_path import (
     ConsoleIndexResponse,
     normalize_base_path,
 )
+from .console_static import ConsoleStaticFiles
 from .auth import (
     AuthMiddleware,
     RuntimeBoundaryMiddleware,
@@ -1051,7 +1051,7 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
     if _assets_dir.is_dir():
         app.mount(
             "/assets",
-            CompressedStaticFiles(directory=str(_assets_dir)),
+            ConsoleStaticFiles(directory=str(_assets_dir)),
             name="assets",
         )
 
@@ -1085,10 +1085,15 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
             except (OSError, ValueError):
                 return _serve_console_index()
             if file_stat and stat.S_ISREG(file_stat.st_mode):
+                if Path(static_file) == _CONSOLE_INDEX:
+                    return _serve_console_index()
+                headers = (
+                    _INDEX_NO_CACHE_HEADERS
+                    if Path(static_file).suffix.lower() in (".html", ".htm")
+                    else {"Cache-Control": "public, max-age=300"}
+                )
                 return FileResponse(
-                    static_file,
-                    stat_result=file_stat,
-                    headers={"Cache-Control": "public, max-age=300"},
+                    static_file, stat_result=file_stat, headers=headers,
                 )
 
         return _serve_console_index()

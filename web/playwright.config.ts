@@ -11,6 +11,9 @@ const baseURL = `${secureWebKitGateway ? "https" : "http"}://127.0.0.1:${port}/a
 const localChromium = browserEngine === "chromium"
   ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (process.env.CI ? undefined : "/usr/bin/chromium")
   : undefined;
+const localWebKit = browserEngine === "webkit"
+  ? process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE
+  : undefined;
 
 if (!Number.isInteger(port) || port < 1024 || port > 65535) {
   throw new Error(`Invalid QWENPAW_BROWSER_PORT: ${process.env.QWENPAW_BROWSER_PORT}`);
@@ -18,6 +21,10 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 if (localChromium && !existsSync(localChromium)) {
   throw new Error(`PLAYWRIGHT_CHROMIUM_EXECUTABLE does not exist: ${localChromium}`);
 }
+if (localWebKit && !existsSync(localWebKit)) {
+  throw new Error(`PLAYWRIGHT_WEBKIT_EXECUTABLE does not exist: ${localWebKit}`);
+}
+const executablePath = localChromium || localWebKit;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -33,7 +40,7 @@ export default defineConfig({
     browserName: browserEngine,
     headless: true,
     ignoreHTTPSErrors: secureWebKitGateway,
-    launchOptions: localChromium ? { executablePath: localChromium } : {},
+    launchOptions: executablePath ? { executablePath } : {},
     trace: "off",
     screenshot: "off",
     video: "off",

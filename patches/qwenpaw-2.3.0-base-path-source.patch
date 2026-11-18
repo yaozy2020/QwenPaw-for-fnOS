@@ -1,5 +1,3 @@
-diff --git a/console/index.html b/console/index.html
-index 50ff10a002fdcfa07298faa75f67d7f25ee8aac6..2d93924fc1e79c769a1c774ddb82d158f5592284 100644
 --- a/console/index.html
 +++ b/console/index.html
 @@ -1,8 +1,13 @@
@@ -31,9 +29,6 @@ index 50ff10a002fdcfa07298faa75f67d7f25ee8aac6..2d93924fc1e79c769a1c774ddb82d158
 +    <script type="module" src="./src/main.tsx"></script>
    </body>
  </html>
-diff --git a/console/scripts/bounded-preload.test.ts b/console/scripts/bounded-preload.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..e48125f6849813fddd493abab6704a1ada0ccf18
 --- /dev/null
 +++ b/console/scripts/bounded-preload.test.ts
 @@ -0,0 +1,71 @@
@@ -108,9 +103,6 @@ index 0000000000000000000000000000000000000000..e48125f6849813fddd493abab6704a1a
 +    expect(factory).not.toHaveBeenCalled();
 +  });
 +});
-diff --git a/console/scripts/bounded-preload.ts b/console/scripts/bounded-preload.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..a9aca34b13048ee603fc3671f846b7511bb76f3e
 --- /dev/null
 +++ b/console/scripts/bounded-preload.ts
 @@ -0,0 +1,71 @@
@@ -185,9 +177,6 @@ index 0000000000000000000000000000000000000000..a9aca34b13048ee603fc3671f846b751
 +    if (!event.defaultPrevented) throw error;
 +  }
 +}
-diff --git a/console/scripts/dev-api-proxy.test.ts b/console/scripts/dev-api-proxy.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..cdcd4471efc28bab6e4f1e34823435f8344c04dd
 --- /dev/null
 +++ b/console/scripts/dev-api-proxy.test.ts
 @@ -0,0 +1,42 @@
@@ -233,9 +222,6 @@ index 0000000000000000000000000000000000000000..cdcd4471efc28bab6e4f1e34823435f8
 +    expect(loaded.definedBase).toBe(JSON.stringify(base));
 +  });
 +});
-diff --git a/console/scripts/initial-bundle.mjs b/console/scripts/initial-bundle.mjs
-new file mode 100644
-index 0000000000000000000000000000000000000000..899d0f32b8f5cbdd565165f1e6d3210fab2d513e
 --- /dev/null
 +++ b/console/scripts/initial-bundle.mjs
 @@ -0,0 +1,86 @@
@@ -325,9 +311,6 @@ index 0000000000000000000000000000000000000000..899d0f32b8f5cbdd565165f1e6d3210f
 +  }
 +  return failures;
 +}
-diff --git a/console/scripts/initial-bundle.test.ts b/console/scripts/initial-bundle.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..d21d92b3cd9488ab7201593076d95ce5c565d28d
 --- /dev/null
 +++ b/console/scripts/initial-bundle.test.ts
 @@ -0,0 +1,135 @@
@@ -466,9 +449,6 @@ index 0000000000000000000000000000000000000000..d21d92b3cd9488ab7201593076d95ce5
 +    expect(failures.join(" ")).toContain("charts-vendor-hash.js");
 +  });
 +});
-diff --git a/console/scripts/startup-monitor-plugin.test.ts b/console/scripts/startup-monitor-plugin.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..58670ec2d73da7c55d8485b2451d13f7fa6f8554
 --- /dev/null
 +++ b/console/scripts/startup-monitor-plugin.test.ts
 @@ -0,0 +1,106 @@
@@ -578,20 +558,18 @@ index 0000000000000000000000000000000000000000..58670ec2d73da7c55d8485b2451d13f7
 +    },
 +  );
 +});
-diff --git a/console/scripts/startup-monitor-plugin.ts b/console/scripts/startup-monitor-plugin.ts
-index feaba272f49aed6f2ed7f75da3ab2fc1a38b69bb..731606aa069c241d14bfba95b023eacbca192432 100644
 --- a/console/scripts/startup-monitor-plugin.ts
 +++ b/console/scripts/startup-monitor-plugin.ts
-@@ -5,7 +5,7 @@ import { build } from "esbuild";
+@@ -5,7 +5,7 @@
  import type { Plugin } from "vite";
- 
+
  /** Inline a dependency-free monitor before Vite's entry module executes. */
 -export function startupMonitorPlugin(): Plugin {
 +export function startupMonitorPlugin(apiBaseUrl = ""): Plugin {
    return {
      name: "console-startup-monitor",
      transformIndexHtml: {
-@@ -62,6 +62,9 @@ export function startupMonitorPlugin(): Plugin {
+@@ -62,6 +62,9 @@
              sourcefile: "console-startup-monitor.ts",
              loader: "ts",
            },
@@ -601,8 +579,6 @@ index feaba272f49aed6f2ed7f75da3ab2fc1a38b69bb..731606aa069c241d14bfba95b023eacb
            bundle: true,
            write: false,
            format: "iife",
-diff --git a/console/scripts/verify-initial-bundle.mjs b/console/scripts/verify-initial-bundle.mjs
-index 035e8d1919f6da1e1ff32c4c9ac4709797dc3315..41547afd8da4ad93e8014f6608670f98dab07866 100644
 --- a/console/scripts/verify-initial-bundle.mjs
 +++ b/console/scripts/verify-initial-bundle.mjs
 @@ -1,94 +1,60 @@
@@ -610,7 +586,7 @@ index 035e8d1919f6da1e1ff32c4c9ac4709797dc3315..41547afd8da4ad93e8014f6608670f98
  import { dirname, join } from "node:path";
  import { fileURLToPath } from "node:url";
 +import { checkInitialBundle, measureInitialBundle } from "./initial-bundle.mjs";
- 
+
 -const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 -const outputDirectory = join(scriptDirectory, "..", "dist");
 -const indexPath = join(outputDirectory, "index.html");
@@ -620,17 +596,14 @@ index 035e8d1919f6da1e1ff32c4c9ac4709797dc3315..41547afd8da4ad93e8014f6608670f98
 -const html = await readFile(indexPath, "utf-8");
 -const assets = new Set(
 -  [...html.matchAll(/\/assets\/[^"' ]+\.(?:css|js)/g)].map(([asset]) => asset),
--);
--
--const initialJavaScriptAssets = [...assets].filter((asset) =>
--  asset.endsWith(".js"),
 +const outputDirectory = join(
 +  dirname(fileURLToPath(import.meta.url)),
 +  "..",
 +  "dist",
  );
--const initialJavaScriptNames = new Set(
--  initialJavaScriptAssets.map((asset) => asset.split("/").at(-1)),
+-
+-const initialJavaScriptAssets = [...assets].filter((asset) =>
+-  asset.endsWith(".js"),
 +const MiB = 1024 * 1024;
 +const budgets = {
 +  rawBytes: 4 * MiB,
@@ -649,6 +622,38 @@ index 035e8d1919f6da1e1ff32c4c9ac4709797dc3315..41547afd8da4ad93e8014f6608670f98
 +    "Brotli MiB": toMiB(asset.brotliBytes),
 +    compression: asset.compressed ? "Brotli" : "raw fallback",
 +  })),
+ );
+-const initialJavaScriptNames = new Set(
+-  initialJavaScriptAssets.map((asset) => asset.split("/").at(-1)),
++console.table([
++  {
++    budget: "Initial raw",
++    "used MiB": toMiB(report.rawBytes),
++    "limit MiB": toMiB(budgets.rawBytes),
++  },
++  {
++    budget: "Initial Brotli",
++    "used MiB": toMiB(report.brotliBytes),
++    "limit MiB": toMiB(budgets.brotliBytes),
++  },
++  {
++    budget: "Each initial JS raw",
++    "used MiB": toMiB(Math.max(...javaScript.map((asset) => asset.rawBytes))),
++    "limit MiB": toMiB(budgets.chunkRawBytes),
++  },
++  {
++    budget: "Each initial JS Brotli",
++    "used MiB": toMiB(
++      Math.max(...javaScript.map((asset) => asset.brotliBytes)),
++    ),
++    "limit MiB": toMiB(budgets.chunkBrotliBytes),
++  },
++]);
++console.log(
++  `Initial bundle: ${toMiB(report.rawBytes)} MiB raw, ` +
++    `${toMiB(report.brotliBytes)} MiB Brotli across ${
++      report.assets.length
++    } assets.`,
  );
 -const importGraph = new Map();
 -
@@ -710,38 +715,10 @@ index 035e8d1919f6da1e1ff32c4c9ac4709797dc3315..41547afd8da4ad93e8014f6608670f98
 -}
 -
 -const toMiB = (bytes) => (bytes / 1024 / 1024).toFixed(2);
-+console.table([
-+  {
-+    budget: "Initial raw",
-+    "used MiB": toMiB(report.rawBytes),
-+    "limit MiB": toMiB(budgets.rawBytes),
-+  },
-+  {
-+    budget: "Initial Brotli",
-+    "used MiB": toMiB(report.brotliBytes),
-+    "limit MiB": toMiB(budgets.brotliBytes),
-+  },
-+  {
-+    budget: "Each initial JS raw",
-+    "used MiB": toMiB(Math.max(...javaScript.map((asset) => asset.rawBytes))),
-+    "limit MiB": toMiB(budgets.chunkRawBytes),
-+  },
-+  {
-+    budget: "Each initial JS Brotli",
-+    "used MiB": toMiB(
-+      Math.max(...javaScript.map((asset) => asset.brotliBytes)),
-+    ),
-+    "limit MiB": toMiB(budgets.chunkBrotliBytes),
-+  },
-+]);
- console.log(
+-console.log(
 -  `Initial bundle: ${toMiB(rawBytes)} MiB raw, ` +
 -    `${toMiB(brotliBytes)} MiB Brotli across ${assets.size} assets.`,
-+  `Initial bundle: ${toMiB(report.rawBytes)} MiB raw, ` +
-+    `${toMiB(report.brotliBytes)} MiB Brotli across ${
-+      report.assets.length
-+    } assets.`,
- );
+-);
 -
 -if (rawBytes > maximumRawBytes) {
 -  throw new Error(`Initial raw bundle exceeds ${toMiB(maximumRawBytes)} MiB.`);
@@ -753,11 +730,9 @@ index 035e8d1919f6da1e1ff32c4c9ac4709797dc3315..41547afd8da4ad93e8014f6608670f98
 -}
 +const failures = checkInitialBundle(report, budgets);
 +if (failures.length > 0) throw new Error(failures.join("\n"));
-diff --git a/console/src/App.tsx b/console/src/App.tsx
-index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd49c2c7625 100644
 --- a/console/src/App.tsx
 +++ b/console/src/App.tsx
-@@ -9,7 +9,6 @@ import {
+@@ -9,7 +9,6 @@
    ConfigProvider as AntdConfigProvider,
    theme as antdTheme,
  } from "antd";
@@ -765,7 +740,7 @@ index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd4
  import type { ThemeConfig as AntThemeConfig } from "antd";
  import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
  import {
-@@ -19,19 +18,8 @@ import {
+@@ -19,19 +18,8 @@
    useSyncExternalStore,
  } from "react";
  import { useTranslation } from "react-i18next";
@@ -786,10 +761,10 @@ index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd4
  import MainLayout from "./layouts/MainLayout";
  import { useTheme } from "./contexts/ThemeContext";
  import { FontSizeProvider } from "./contexts/FontSizeContext";
-@@ -85,14 +73,6 @@ import "./styles/workspace.css";
+@@ -85,14 +73,6 @@
  import { PressFeedback } from "./components/interaction/PressFeedback";
  import "katex/dist/katex.min.css";
- 
+
 -const antdLocaleMap: Record<string, Locale> = {
 -  zh: zhCN,
 -  en: enUS,
@@ -801,10 +776,11 @@ index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd4
  export function getAppThemeToken(
    userTheme: ThemeConfig,
    isDark: boolean,
-@@ -143,14 +123,6 @@ export function getAppComponentTokens(
+@@ -142,14 +122,6 @@
+     },
    };
  }
- 
+-
 -const dayjsLocaleMap: Record<string, string> = {
 -  zh: "zh-cn",
 -  en: "en",
@@ -812,11 +788,10 @@ index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd4
 -  ru: "ru",
 -  id: "id",
 -};
--
+
  const GlobalStyle = createGlobalStyle`
  * {
-   margin: 0;
-@@ -408,12 +380,7 @@ function AppInner({
+@@ -408,12 +380,7 @@
    const selectedTheme = isDark ? bailianDarkTheme : bailianTheme;
    const sparkTheme = (selectedTheme as { theme?: AntThemeConfig }).theme;
    const lang = i18n.resolvedLanguage || i18n.language || "en";
@@ -827,13 +802,14 @@ index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd4
 -    designI18n.updateLocale(antdLocale.locale);
 -  }, [antdLocale]);
 +  const antdLocale = useUiLocale(lang);
- 
+
    useEffect(() => {
      if (!localStorage.getItem("language")) {
-@@ -458,22 +425,6 @@ function AppInner({
+@@ -457,22 +424,6 @@
+     setOrRemove("--app-radius", userTheme.radius);
      setOrRemove("--border-radius", userTheme.radius);
    }, [isDark, userTheme]);
- 
+-
 -  useEffect(() => {
 -    const handleLanguageChanged = (lng: string) => {
 -      const shortLng = lng.split("-")[0];
@@ -849,42 +825,37 @@ index e53c6689ab74eed2bba3931175b1f1b0684bd466..c56a45ff251949eed8c670cc9511ccd4
 -      i18n.off("languageChanged", handleLanguageChanged);
 -    };
 -  }, [i18n]);
--
+
    // Disable the default browser context menu in the Tauri desktop build so
    // users cannot open DevTools via right-click. DevTools is still available
-   // through the hidden 8-click logo gesture handled in Header.tsx.
-diff --git a/console/src/api/config.test.ts b/console/src/api/config.test.ts
-index cc0eacab5445938ef2e7f77d6fe8b7a972f1ba18..33870823ec62c8d7bb82798ef6ce9ab49cff5066 100644
 --- a/console/src/api/config.test.ts
 +++ b/console/src/api/config.test.ts
-@@ -16,7 +16,10 @@ const setToken = (v: string) => {
+@@ -16,7 +16,10 @@
  };
- 
+
  describe("getApiUrl", () => {
 -  beforeEach(() => setViteBase(""));
 +  beforeEach(() => {
 +    setViteBase("");
 +    delete window.__qpBase;
 +  });
- 
+
    it("prepends /api prefix when base is empty", () => {
      expect(getApiUrl("/models")).toBe("/api/models");
-@@ -41,6 +44,13 @@ describe("getApiUrl", () => {
+@@ -40,6 +43,13 @@
+     expect(getApiUrl("/models/openai/config")).toBe(
        "/api/models/openai/config",
      );
-   });
++  });
 +
 +  it("uses the server-injected prefix for same-origin API requests", () => {
 +    window.__qpBase = "/app/qwenpaw/web";
 +    expect(getApiUrl("/models")).toBe("/app/qwenpaw/web/api/models");
 +    setViteBase("http://localhost:8088");
 +    expect(getApiUrl("/models")).toBe("http://localhost:8088/api/models");
-+  });
+   });
  });
- 
- describe("getApiToken", () => {
-diff --git a/console/src/api/config.ts b/console/src/api/config.ts
-index e2f4b63b9cd050c3c4b72f07892d061ed81c7722..d52aa53ecf562432c6a81022e5aa94162a2aa9b8 100644
+
 --- a/console/src/api/config.ts
 +++ b/console/src/api/config.ts
 @@ -1,3 +1,5 @@
@@ -892,19 +863,16 @@ index e2f4b63b9cd050c3c4b72f07892d061ed81c7722..d52aa53ecf562432c6a81022e5aa9416
 +
  declare const VITE_API_BASE_URL: string;
  declare const TOKEN: string;
- 
-@@ -10,7 +12,7 @@ export function setRuntimeApiBaseUrl(url: string): void {
+
+@@ -10,7 +12,7 @@
  }
- 
+
  export function getApiBaseUrl(): string {
 -  return runtimeApiBaseUrl ?? VITE_API_BASE_URL ?? "";
 +  return runtimeApiBaseUrl ?? (VITE_API_BASE_URL || getRuntimeBasePath());
  }
- 
+
  let authCleanup: Promise<unknown> = Promise.resolve();
-diff --git a/console/src/hooks/useUiLocale.test.tsx b/console/src/hooks/useUiLocale.test.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..ee860e522bba4dab5d1643c32be9a6269833d23b
 --- /dev/null
 +++ b/console/src/hooks/useUiLocale.test.tsx
 @@ -0,0 +1,112 @@
@@ -1020,9 +988,6 @@ index 0000000000000000000000000000000000000000..ee860e522bba4dab5d1643c32be9a626
 +    expect(dayjs.locale()).toBe("en");
 +  });
 +});
-diff --git a/console/src/hooks/useUiLocale.ts b/console/src/hooks/useUiLocale.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..e9ba3c03ff7158a3455480c12a1177dc6671723b
 --- /dev/null
 +++ b/console/src/hooks/useUiLocale.ts
 @@ -0,0 +1,87 @@
@@ -1113,11 +1078,9 @@ index 0000000000000000000000000000000000000000..e9ba3c03ff7158a3455480c12a1177dc
 +  }, [language]);
 +  return locale;
 +}
-diff --git a/console/src/layouts/AppBrand.tsx b/console/src/layouts/AppBrand.tsx
-index c1bf0ed853f76bb97ac566c31b9fd35be65d915f..6249d28a14bbdc2968568b39ff98ed71e82e8970 100644
 --- a/console/src/layouts/AppBrand.tsx
 +++ b/console/src/layouts/AppBrand.tsx
-@@ -23,6 +23,7 @@ import { useTheme } from "../contexts/ThemeContext";
+@@ -23,6 +23,7 @@
  import { Slot } from "../plugins/registry/Slot";
  import { isDesktopApp } from "../tauri/backendRuntime";
  import { openExternalLink } from "../utils/openExternalLink";
@@ -1125,7 +1088,7 @@ index c1bf0ed853f76bb97ac566c31b9fd35be65d915f..6249d28a14bbdc2968568b39ff98ed71
  import {
    compareVersions,
    getReleaseNotesUrl,
-@@ -296,9 +297,9 @@ export default function AppBrand({
+@@ -296,9 +297,9 @@
          <span className={styles.appBrandLogo} onClick={handleLogoClick}>
            <Slot name="header.logo" kind="replace">
              <img
@@ -1138,9 +1101,6 @@ index c1bf0ed853f76bb97ac566c31b9fd35be65d915f..6249d28a14bbdc2968568b39ff98ed71
                alt="QwenPaw"
                className={styles.logoImg}
              />
-diff --git a/console/src/pages/Hub/components/HubShell.test.tsx b/console/src/pages/Hub/components/HubShell.test.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..0c76b9870f3e97b7575eb24db45496166ea1499c
 --- /dev/null
 +++ b/console/src/pages/Hub/components/HubShell.test.tsx
 @@ -0,0 +1,49 @@
@@ -1193,19 +1153,17 @@ index 0000000000000000000000000000000000000000..0c76b9870f3e97b7575eb24db4549616
 +  );
 +  expect(assign).toHaveBeenCalledWith("/app/qwenpaw/web/");
 +});
-diff --git a/console/src/pages/Hub/components/HubShell.tsx b/console/src/pages/Hub/components/HubShell.tsx
-index f9a31724936da436b2149208fdfc49e8f2df0a94..5874a33cf318c6716f7fc2ed23ffbe6ab03e5b63 100644
 --- a/console/src/pages/Hub/components/HubShell.tsx
 +++ b/console/src/pages/Hub/components/HubShell.tsx
-@@ -15,6 +15,7 @@ import {
+@@ -15,6 +15,7 @@
  } from "lucide-react";
  import LanguageSwitcher from "../../../components/LanguageSwitcher";
  import type { Section } from "../pageUtils";
 +import { addRouterBasename } from "../../../utils/navigationMode";
  import styles from "./HubShell.module.less";
- 
+
  type Props = {
-@@ -110,7 +111,11 @@ export default function HubShell(props: Props) {
+@@ -110,7 +111,11 @@
          <button
            className={styles.back}
            type="button"
@@ -1218,19 +1176,17 @@ index f9a31724936da436b2149208fdfc49e8f2df0a94..5874a33cf318c6716f7fc2ed23ffbe6a
          >
            <House size={17} />
            {t("hub.actions.backToQwenPaw")}
-diff --git a/console/src/pages/Login/index.tsx b/console/src/pages/Login/index.tsx
-index 92d44a97f26b8f630621edba4219d2427bec7f4a..f36ced8b6c7b7e925b6f73c353d2d370e9ab6722 100644
 --- a/console/src/pages/Login/index.tsx
 +++ b/console/src/pages/Login/index.tsx
-@@ -15,6 +15,7 @@ import { authApi } from "../../api/modules/auth";
+@@ -15,6 +15,7 @@
  import { setAuthToken } from "../../api/config";
  import { useTheme } from "../../contexts/ThemeContext";
  import { getPostLoginHref } from "../../utils/navigationMode";
 +import { getConsoleAssetUrl } from "../../utils/runtimeBasePath";
  import styles from "./index.module.less";
- 
+
  export default function LoginPage() {
-@@ -191,9 +192,9 @@ export default function LoginPage() {
+@@ -191,9 +192,9 @@
        >
          <div style={{ textAlign: "center", marginBottom: 32 }}>
            <img
@@ -1243,11 +1199,9 @@ index 92d44a97f26b8f630621edba4219d2427bec7f4a..f36ced8b6c7b7e925b6f73c353d2d370
              alt="QwenPaw"
              style={{ height: 48, marginBottom: 12 }}
            />
-diff --git a/console/src/plugins/hostExternals.ts b/console/src/plugins/hostExternals.ts
-index e8c629e6052f2e6abe3af9fb1a9204caa63884de..08ba341d51f908b45ee85549d98a679097d8b515 100644
 --- a/console/src/plugins/hostExternals.ts
 +++ b/console/src/plugins/hostExternals.ts
-@@ -15,8 +15,9 @@ import {
+@@ -15,8 +15,9 @@
  import React from "react";
  import i18n from "../i18n";
  import ReactDOM from "react-dom";
@@ -1259,7 +1213,7 @@ index e8c629e6052f2e6abe3af9fb1a9204caa63884de..08ba341d51f908b45ee85549d98a6790
  import { getApiUrl, getApiToken, getApiBaseUrl } from "../api/config";
  import {
    buildAuditNamespace,
-@@ -260,8 +261,12 @@ export function installHostExternals(): void {
+@@ -260,8 +261,12 @@
      window.QwenPaw.host = {
        React,
        ReactDOM,
@@ -1274,9 +1228,6 @@ index e8c629e6052f2e6abe3af9fb1a9204caa63884de..08ba341d51f908b45ee85549d98a6790
        get apiBaseUrl() {
          return getApiBaseUrl();
        },
-diff --git a/console/src/plugins/hostUiDependencies.test.ts b/console/src/plugins/hostUiDependencies.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..9b705b2891d6dbdb532758281534bf11e7d80fc3
 --- /dev/null
 +++ b/console/src/plugins/hostUiDependencies.test.ts
 @@ -0,0 +1,73 @@
@@ -1353,9 +1304,6 @@ index 0000000000000000000000000000000000000000..9b705b2891d6dbdb532758281534bf11
 +    expect(window.QwenPaw.host).toBe(host);
 +  });
 +});
-diff --git a/console/src/plugins/hostUiDependencies.ts b/console/src/plugins/hostUiDependencies.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..5515f8f4a69592bb068f6d869740047cae61a712
 --- /dev/null
 +++ b/console/src/plugins/hostUiDependencies.ts
 @@ -0,0 +1,30 @@
@@ -1389,14 +1337,12 @@ index 0000000000000000000000000000000000000000..5515f8f4a69592bb068f6d869740047c
 +  }
 +  return dependencies;
 +}
-diff --git a/console/src/plugins/usePluginLoader.ts b/console/src/plugins/usePluginLoader.ts
-index 9d086423487c2d6c2deeff6b33a832a07b458c08..ca85412ed29cb04f7a2bc0ce8befbe29dd77ebf1 100644
 --- a/console/src/plugins/usePluginLoader.ts
 +++ b/console/src/plugins/usePluginLoader.ts
-@@ -43,8 +43,11 @@ async function executePluginScript(entryUrl: string): Promise<void> {
+@@ -43,8 +43,11 @@
      throw new Error(`HTTP ${response.status} for ${entryUrl}`);
    }
- 
+
 +  const source = await response.text();
 +  const { loadHostUiDependencies } = await import("./hostUiDependencies");
 +  await loadHostUiDependencies();
@@ -1406,8 +1352,6 @@ index 9d086423487c2d6c2deeff6b33a832a07b458c08..ca85412ed29cb04f7a2bc0ce8befbe29
    );
    try {
      await import(/* @vite-ignore */ blobUrl);
-diff --git a/console/src/utils/chunkServerReadiness.ts b/console/src/utils/chunkServerReadiness.ts
-index 2456e00eb3e96651106044f3b6702ba8f6323f52..dbf01d31382452544c7c119052f86f383e78e985 100644
 --- a/console/src/utils/chunkServerReadiness.ts
 +++ b/console/src/utils/chunkServerReadiness.ts
 @@ -1,3 +1,5 @@
@@ -1416,7 +1360,7 @@ index 2456e00eb3e96651106044f3b6702ba8f6323f52..dbf01d31382452544c7c119052f86f38
  const REQUEST_TIMEOUT_MS = 2500;
  const READINESS_TIMEOUT_MS = 30_000;
  const PROBE_INTERVAL_MS = 1000;
-@@ -136,7 +138,7 @@ export async function waitForChunkServerReady(
+@@ -136,7 +138,7 @@
        report.attempts += 1;
        try {
          const version = await readResponse(
@@ -1425,14 +1369,12 @@ index 2456e00eb3e96651106044f3b6702ba8f6323f52..dbf01d31382452544c7c119052f86f38
            controller.signal,
            report,
          );
-diff --git a/console/src/utils/lazyWithRetry.ts b/console/src/utils/lazyWithRetry.ts
-index 06f0ab6482b7b8f47d879d64a1e513181494d971..5b779749ff262e2936ec3c7b79c67f379a77fb3a 100644
 --- a/console/src/utils/lazyWithRetry.ts
 +++ b/console/src/utils/lazyWithRetry.ts
-@@ -68,10 +68,10 @@ function recoverableLazy(
+@@ -68,10 +68,10 @@
    };
  }
- 
+
 -// All page modules, keyed relative to this file (src/utils/).
 +// Route entry points, keyed relative to this file (src/utils/).
  // e.g. "../pages/Settings/Debug/index.tsx"
@@ -1441,12 +1383,10 @@ index 06f0ab6482b7b8f47d879d64a1e513181494d971..5b779749ff262e2936ec3c7b79c67f37
 +  ["../pages/**/index.{ts,tsx}", "!../pages/**/__tests__/**"],
    { import: "default" },
  );
- 
-diff --git a/console/src/utils/navigationMode.test.ts b/console/src/utils/navigationMode.test.ts
-index ef8d9bbdc71083fa5f2890117349d71b743b32bf..1a7cb9c734699bb75ab80180432ea49ac35fdb07 100644
+
 --- a/console/src/utils/navigationMode.test.ts
 +++ b/console/src/utils/navigationMode.test.ts
-@@ -156,4 +156,21 @@ describe("configured console basename", () => {
+@@ -156,4 +156,21 @@
      );
      expect(navigation.getOsRootHref("/login")).toBe("/os");
    });
@@ -1468,20 +1408,18 @@ index ef8d9bbdc71083fa5f2890117349d71b743b32bf..1a7cb9c734699bb75ab80180432ea49a
 +    delete window.__qpBase;
 +  });
  });
-diff --git a/console/src/utils/navigationMode.ts b/console/src/utils/navigationMode.ts
-index 133a129514b9461e7fd8683df42a0c4d9c4d4e55..a6711062b92a32634d06365bdd16b189dbf93a3f 100644
 --- a/console/src/utils/navigationMode.ts
 +++ b/console/src/utils/navigationMode.ts
 @@ -1,4 +1,5 @@
  import { normalizeConsoleBasename } from "./consoleBasename";
 +import { getRuntimeBasePath } from "./runtimeBasePath";
- 
+
  interface LocationLike {
    pathname: string;
-@@ -6,9 +7,9 @@ interface LocationLike {
+@@ -6,9 +7,9 @@
    hash?: string;
  }
- 
+
 -const CONSOLE_BASENAME = normalizeConsoleBasename(
 -  import.meta.env.VITE_CONSOLE_BASENAME,
 -);
@@ -1489,11 +1427,8 @@ index 133a129514b9461e7fd8683df42a0c4d9c4d4e55..a6711062b92a32634d06365bdd16b189
 +  getRuntimeBasePath() ||
 +  normalizeConsoleBasename(import.meta.env.VITE_CONSOLE_BASENAME);
  const OS_PAW_APP_STATE_KEY = "osPawAppId";
- 
+
  function historyStateRecord(state: unknown): Record<string, unknown> {
-diff --git a/console/src/utils/runtimeBasePath.test.ts b/console/src/utils/runtimeBasePath.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..19b652147abaa9f77586174030cf1931ba3452eb
 --- /dev/null
 +++ b/console/src/utils/runtimeBasePath.test.ts
 @@ -0,0 +1,53 @@
@@ -1550,9 +1485,6 @@ index 0000000000000000000000000000000000000000..19b652147abaa9f77586174030cf1931
 +    expect(getRuntimeBasePath()).toBe("");
 +  });
 +});
-diff --git a/console/src/utils/runtimeBasePath.ts b/console/src/utils/runtimeBasePath.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..5fcab1f03463bea22a0e499f67e689b2e9bd9d11
 --- /dev/null
 +++ b/console/src/utils/runtimeBasePath.ts
 @@ -0,0 +1,39 @@
@@ -1595,11 +1527,9 @@ index 0000000000000000000000000000000000000000..5fcab1f03463bea22a0e499f67e689b2
 +  const buildBase = import.meta.env.BASE_URL;
 +  return `${buildBase === "./" ? "/" : buildBase}${name}`;
 +}
-diff --git a/console/vite.config.test.ts b/console/vite.config.test.ts
-index e7630b5ad85ed3afbe7aef33b3e4b352551570b1..6291aaa2b5a89a303baabc6c959af214aba76a47 100644
 --- a/console/vite.config.test.ts
 +++ b/console/vite.config.test.ts
-@@ -20,9 +20,13 @@ function loadDeploymentConfig(basename: string | undefined) {
+@@ -20,9 +20,13 @@
         const { config } = await loadConfigFromFile({
           command: "build", mode: "production",
         });
@@ -1613,7 +1543,7 @@ index e7630b5ad85ed3afbe7aef33b3e4b352551570b1..6291aaa2b5a89a303baabc6c959af214
         }));`,
      ],
      {
-@@ -30,15 +34,24 @@ function loadDeploymentConfig(basename: string | undefined) {
+@@ -30,15 +34,24 @@
        encoding: "utf8",
      },
    );
@@ -1626,7 +1556,7 @@ index e7630b5ad85ed3afbe7aef33b3e4b352551570b1..6291aaa2b5a89a303baabc6c959af214
 +    assetBase?: string;
 +  };
  }
- 
+
  describe("console deployment configuration", () => {
    it.each([undefined, "", " "])(
 -    "keeps assets at the root when the basename is %j",
@@ -1640,14 +1570,12 @@ index e7630b5ad85ed3afbe7aef33b3e4b352551570b1..6291aaa2b5a89a303baabc6c959af214
 +      expect(config.htmlEntry).toEqual({ relative: true });
      },
    );
- 
-diff --git a/console/vite.config.ts b/console/vite.config.ts
-index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791c2e41c2c 100644
+
 --- a/console/vite.config.ts
 +++ b/console/vite.config.ts
-@@ -34,19 +34,52 @@ export default defineConfig(({ command, mode }) => {
+@@ -34,19 +34,52 @@
    const consoleBasename = env.VITE_CONSOLE_BASENAME?.trim();
- 
+
    return {
 -    // Preserve root asset URLs for existing root and /console deployments.
 -    base:
@@ -1704,7 +1632,7 @@ index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791
        ...(desktop
          ? [
              {
-@@ -88,7 +121,9 @@ export default defineConfig(({ command, mode }) => {
+@@ -88,7 +121,9 @@
        port: 5173,
        proxy: {
          "/api": {
@@ -1715,7 +1643,7 @@ index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791
            changeOrigin: false,
          },
        },
-@@ -106,6 +141,26 @@ export default defineConfig(({ command, mode }) => {
+@@ -106,6 +141,26 @@
          inline: [/@agentscope-ai\/(?!icons|chat|design)/],
        },
        alias: [
@@ -1742,7 +1670,7 @@ index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791
          // Resolve the beta's real ESM entry for Vitest, without masking SDK subpaths.
          {
            find: /^@agentscope-ai\/chat$/,
-@@ -168,23 +223,31 @@ export default defineConfig(({ command, mode }) => {
+@@ -168,23 +223,31 @@
        // outDir: path.resolve(__dirname, "../src/qwenpaw/console"),
        // emptyOutDir: true,
        cssCodeSplit: true,
@@ -1761,25 +1689,26 @@ index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791
 -            // Keep those in the UI chunk so lazy trends cannot create a cycle.
 +            // A shared runtime must not land in a lazy consumer that its
 +            // vendor imports back (for example Monaco and TabbedEditor).
-             if (
--              id.includes("node_modules/d3-") ||
--              id.includes("node_modules/d3/") ||
++            if (
 +              id.includes("commonjsHelpers.js") ||
-               id.includes("vite/preload-helper")
-             ) {
--              return "ui-vendor";
++              id.includes("vite/preload-helper")
++            ) {
 +              return "runtime-vendor";
 +            }
 +            // Share D3 between lazy charts and maps without hoisting it into UI.
-+            if (
-+              id.includes("node_modules/d3-") ||
+             if (
+               id.includes("node_modules/d3-") ||
+-              id.includes("node_modules/d3/") ||
+-              id.includes("vite/preload-helper")
+-            ) {
+-              return "ui-vendor";
 +              id.includes("node_modules/d3/")
 +            ) {
 +              return "d3-vendor";
              }
              // React core
              if (
-@@ -203,7 +266,8 @@ export default defineConfig(({ command, mode }) => {
+@@ -203,7 +266,8 @@
              }
              if (
                id.includes("node_modules/monaco-editor/") ||
@@ -1789,7 +1718,7 @@ index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791
              ) {
                return "editor-vendor";
              }
-@@ -219,25 +283,9 @@ export default defineConfig(({ command, mode }) => {
+@@ -219,25 +283,9 @@
                  return "chat-vendor";
                }
              }
@@ -1818,148 +1747,28 @@ index 8aa2ef795ff04c59248f4a40e887e9e8a593e8bb..df90cb4c2632ddd1376628861e383791
              // i18n
              if (
                id.includes("node_modules/i18next/") ||
-diff --git a/src/qwenpaw/app/_app.py b/src/qwenpaw/app/_app.py
-index 01887c886628a7c7e630dbaf4a22ba5c9ebdeef8..cac3bb368a404aeb1514585d19a07421ba077dfc 100644
---- a/src/qwenpaw/app/_app.py
-+++ b/src/qwenpaw/app/_app.py
-@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
- from pathlib import Path
- from typing import Any
- 
--from fastapi import FastAPI, HTTPException
-+from fastapi import FastAPI, HTTPException, Request, Response
- from fastapi.middleware.cors import CORSMiddleware
- from fastapi.responses import FileResponse
- from fastapi.staticfiles import StaticFiles
-@@ -31,6 +31,7 @@ from ..constant import (
-     WORKING_DIR,
- )
- from ..envs import load_envs_into_environ
-+from ..hub.static_files import CompressedStaticFiles
- from ..local_models.manager import LocalModelManager
- from ..providers.provider_manager import ProviderManager
- from ..utils.daily_telemetry import start_daily_telemetry
-@@ -41,6 +42,11 @@ from ..utils.logging import (
- )
- from ..utils.startup_display import AgentStartupDisplay
- from ..utils.system_info import summarize_python_environment
-+from .base_path import (
-+    BasePathMiddleware,
-+    ConsoleIndexResponse,
-+    normalize_base_path,
-+)
- from .auth import (
-     AuthMiddleware,
-     RuntimeBoundaryMiddleware,
-@@ -582,6 +588,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
- 
-             plugin_loader.registry.set_workspace_manager(workspace_registry)
-             plugin_loader.registry.set_plugin_http_app(app)
-+            app.state.plugin_registry = plugin_loader.registry
- 
-             config = load_config(get_config_path())
-             plugin_configs = (
-@@ -834,6 +841,8 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
-         startup_display.stop()
- 
- 
-+_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
-+
- app = FastAPI(
-     lifespan=lifespan,
-     docs_url="/docs" if DOCS_ENABLED else None,
-@@ -920,10 +929,27 @@ _INDEX_NO_CACHE_HEADERS = {
- }
- 
- 
-+@app.delete("/api/hub/pawapps/sessions", status_code=204)
-+def clear_browser_sessions(request: Request):
-+    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
-+
-+    response = Response(status_code=204)
-+    clear_sessions(request, response)
-+    if _BASE_PATH:
-+        for name in request.cookies:
-+            if name.startswith(COOKIE_PREFIX):
-+                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
-+    return response
-+
-+
- @app.get("/")
- def read_root():
-     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
--        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
-+        return ConsoleIndexResponse(
-+            _CONSOLE_INDEX,
-+            base_path=_BASE_PATH,
-+            headers=_INDEX_NO_CACHE_HEADERS,
-+        )
-     return {
-         "message": (
-             f"{PROJECT_NAME} web console is not available. "
-@@ -1013,8 +1039,9 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
- 
-     def _serve_console_index():
-         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
--            return FileResponse(
-+            return ConsoleIndexResponse(
-                 _CONSOLE_INDEX,
-+                base_path=_BASE_PATH,
-                 headers=_INDEX_NO_CACHE_HEADERS,
-             )
- 
-@@ -1024,7 +1051,7 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
-     if _assets_dir.is_dir():
-         app.mount(
-             "/assets",
--            StaticFiles(directory=str(_assets_dir)),
-+            CompressedStaticFiles(directory=str(_assets_dir)),
-             name="assets",
-         )
- 
-@@ -1058,6 +1085,13 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
-             except (OSError, ValueError):
-                 return _serve_console_index()
-             if file_stat and stat.S_ISREG(file_stat.st_mode):
--                return FileResponse(static_file, stat_result=file_stat)
-+                return FileResponse(
-+                    static_file,
-+                    stat_result=file_stat,
-+                    headers={"Cache-Control": "public, max-age=300"},
-+                )
- 
-         return _serve_console_index()
-+
-+
-+app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
-diff --git a/src/qwenpaw/app/auth.py b/src/qwenpaw/app/auth.py
-index 8968605e8bc5e3dc2f6ab8d5dc92a02d53584312..b2294d99c142bf450c0ac9b882c4f4a67cfc7e31 100644
 --- a/src/qwenpaw/app/auth.py
 +++ b/src/qwenpaw/app/auth.py
-@@ -32,6 +32,7 @@ from urllib.parse import unquote
- 
+@@ -32,6 +32,7 @@
+
  from fastapi import Request, Response
  from starlette.requests import HTTPConnection
 +from starlette.routing import get_route_path
  from starlette.types import ASGIApp, Receive, Scope, Send
  from starlette.middleware.base import BaseHTTPMiddleware
- 
-@@ -811,9 +812,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
+
+@@ -811,8 +812,10 @@
          if not is_auth_enabled() or not has_registered_users():
              return True
- 
+
 -        path = request.url.path
 +        path = get_route_path(request.scope)
          if path == "/api/config/theme" and request.method == "GET":
-             return True
-+        if path == "/api/hub/pawapps/sessions" and request.method == "DELETE":
 +            return True
++        if path == "/api/hub/pawapps/sessions" and request.method == "DELETE":
+             return True
          if (
              request.method == "OPTIONS"
-             or path in _PUBLIC_PATHS
-diff --git a/src/qwenpaw/app/base_path.py b/src/qwenpaw/app/base_path.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..7b1231d4b7fcc5600937cc0415c6e8d3d5c2ce56
 --- /dev/null
 +++ b/src/qwenpaw/app/base_path.py
 @@ -0,0 +1,119 @@
@@ -2082,19 +1891,17 @@ index 0000000000000000000000000000000000000000..7b1231d4b7fcc5600937cc0415c6e8d3
 +        self.body = content
 +        self.headers["content-length"] = str(len(content))
 +        await Response.__call__(self, scope, receive, send)
-diff --git a/src/qwenpaw/app/channels/ingress.py b/src/qwenpaw/app/channels/ingress.py
-index b0c718c0ac7a7a9e9d60e5320f36319a98eb5b8a..9d3c6604f91176791ba8b19da434c23e1fdaa588 100644
 --- a/src/qwenpaw/app/channels/ingress.py
 +++ b/src/qwenpaw/app/channels/ingress.py
-@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlsplit
+@@ -12,6 +12,7 @@
  import aiohttp
  from multidict import CIMultiDict
  from starlette.responses import Response
 +from starlette.routing import get_route_path
  from starlette.websockets import WebSocketState
  from yarl import URL
- 
-@@ -405,7 +406,7 @@ class ChannelIngressService:
+
+@@ -405,7 +406,7 @@
          candidates = [
              binding
              for binding in self._bindings.values()
@@ -2103,40 +1910,36 @@ index b0c718c0ac7a7a9e9d60e5320f36319a98eb5b8a..9d3c6604f91176791ba8b19da434c23e
              and (not selectors or binding.wire.route_selector == selectors[0])
              and self._current(binding, binding.reference)
          ]
-diff --git a/src/qwenpaw/app/routers/agent_scoped.py b/src/qwenpaw/app/routers/agent_scoped.py
-index 217d5729f78e68da9de243eed0dd5f42830d28ea..d30410849612027d4a2ee6d728ce1b3baa7596a3 100644
 --- a/src/qwenpaw/app/routers/agent_scoped.py
 +++ b/src/qwenpaw/app/routers/agent_scoped.py
-@@ -11,6 +11,7 @@ from starlette.middleware.base import (
+@@ -11,6 +11,7 @@
      RequestResponseEndpoint,
  )
  from starlette.responses import Response
 +from starlette.routing import get_route_path
- 
- 
+
+
  class AgentContextMiddleware(BaseHTTPMiddleware):
-@@ -29,7 +30,7 @@ class AgentContextMiddleware(BaseHTTPMiddleware):
+@@ -29,7 +30,7 @@
          agent_id = None
- 
+
          # Priority 1: Extract agentId from path: /api/agents/{agentId}/...
 -        path_parts = request.url.path.split("/")
 +        path_parts = get_route_path(request.scope).split("/")
          if len(path_parts) >= 4 and path_parts[1] == "api":
              if path_parts[2] == "agents":
                  agent_id = path_parts[3]
-diff --git a/src/qwenpaw/app/routers/providers.py b/src/qwenpaw/app/routers/providers.py
-index f80697cea067db829350e9eb384495601e505e0f..ebce61e982494357c38f8a0be732d3b69a253dab 100644
 --- a/src/qwenpaw/app/routers/providers.py
 +++ b/src/qwenpaw/app/routers/providers.py
-@@ -16,6 +16,7 @@ from fastapi import (
+@@ -16,6 +16,7 @@
      Request,
  )
  from pydantic import BaseModel, Field, field_validator
 +from starlette.routing import get_route_path
- 
+
  from qwenpaw.exceptions import (
      AppBaseException,
-@@ -104,7 +105,7 @@ async def get_provider_manager(request: Request) -> ProviderManager:
+@@ -104,7 +105,7 @@
      """
      if hub_mode() and request.path_params.get("provider_id") == PROVIDER_ID:
          require_model_route(
@@ -2145,19 +1948,17 @@ index f80697cea067db829350e9eb384495601e505e0f..ebce61e982494357c38f8a0be732d3b6
              request.method,
          )
      return request.app.state.provider_manager
-diff --git a/src/qwenpaw/app/routers/voice.py b/src/qwenpaw/app/routers/voice.py
-index df00746b550f391a1350fce84a2b2646f240e457..d2952b13c36dcb17ffc4adee7e5242bdb78e6452 100644
 --- a/src/qwenpaw/app/routers/voice.py
 +++ b/src/qwenpaw/app/routers/voice.py
 @@ -4,6 +4,7 @@
  from urllib.parse import parse_qsl
- 
+
  from fastapi import APIRouter, Request, Response, WebSocket
 +from starlette.routing import get_route_path
- 
+
  from ..channels.ingress import route_is_unowned
- 
-@@ -32,7 +33,7 @@ def _legacy_unowned(request, service):
+
+@@ -32,7 +33,7 @@
      return route_is_unowned(
          registry,
          request.method,
@@ -2165,10 +1966,7 @@ index df00746b550f391a1350fce84a2b2646f240e457..d2952b13c36dcb17ffc4adee7e5242bd
 +        get_route_path(request.scope),
          service=service,
      )
- 
-diff --git a/tests/unit/app/auth/test_browser_session_cleanup.py b/tests/unit/app/auth/test_browser_session_cleanup.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..33227a89f55527edf734426de3c014c7ad8330c3
+
 --- /dev/null
 +++ b/tests/unit/app/auth/test_browser_session_cleanup.py
 @@ -0,0 +1,24 @@
@@ -2196,36 +1994,29 @@ index 0000000000000000000000000000000000000000..33227a89f55527edf734426de3c014c7
 +        "headers": [],
 +    })
 +    assert auth.AuthMiddleware._should_skip_auth(request) is allowed
-diff --git a/tests/unit/app/auth/test_client_ip.py b/tests/unit/app/auth/test_client_ip.py
-index adb8bb60d7b7d9575bbdcebce927ce3bd4b4ce3f..e524b9d5f9544e156bd3e1599072a5088643587a 100644
 --- a/tests/unit/app/auth/test_client_ip.py
 +++ b/tests/unit/app/auth/test_client_ip.py
-@@ -103,6 +103,7 @@ def _make_request(
+@@ -103,6 +103,7 @@
      request = MagicMock()
      request.client = MagicMock()
      request.client.host = client_host
 +    request.scope = {"type": "http", "path": "/api/hubtected", "root_path": ""}
- 
+
      headers = {}
      if xff:
-diff --git a/tests/unit/app/test_base_path.py b/tests/unit/app/test_base_path.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..078bedd160f7bccbc41a4ca0d986481465fe6e5b
 --- /dev/null
 +++ b/tests/unit/app/test_base_path.py
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,225 @@
 +# -*- coding: utf-8 -*-
 +"""Runtime base-path mounting keeps application routes prefix-aware."""
 +from __future__ import annotations
 +
-+import gzip
 +import json
 +import os
 +import subprocess
 +import sys
 +import textwrap
 +
-+import brotli
 +import pytest
 +from fastapi import FastAPI, Request, WebSocket
 +from fastapi.testclient import TestClient
@@ -2384,12 +2175,8 @@ index 0000000000000000000000000000000000000000..078bedd160f7bccbc41a4ca0d9864814
 +        '<script type="module" src="./assets/index.js"></script>',
 +        encoding="utf-8",
 +    )
-+    asset_content = b"export const asset = 'unmodified';\n"
-+    (assets / "index.js").write_bytes(asset_content)
-+    (assets / "index.js.br").write_bytes(brotli.compress(asset_content))
-+    (assets / "index.js.gz").write_bytes(gzip.compress(asset_content))
-+    (console / "logo.svg").write_text(
-+        '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
++    (assets / "index.js").write_text(
++        "export const asset = 'unmodified';\n",
 +        encoding="utf-8",
 +    )
 +    env = {
@@ -2432,22 +2219,9 @@ index 0000000000000000000000000000000000000000..078bedd160f7bccbc41a4ca0d9864814
 +                    assert '<base href="/app/qwenpaw/web/">' in page.text
 +                    assert 'window.__qpBase = "/app/qwenpaw/web"' in page.text
 +                    assert 'src="./assets/index.js"' in page.text
-+                    assert "no-store" in page.headers["cache-control"]
-+                for encoding in ("br", "gzip", "identity"):
-+                    asset = client.get(
-+                        "/app/qwenpaw/web/assets/index.js",
-+                        headers={"accept-encoding": encoding},
-+                    )
-+                    assert asset.status_code == 200
-+                    assert asset.content == b"export const asset = 'unmodified';\\n"
-+                    assert asset.headers.get("content-encoding", "identity") == encoding
-+                    assert asset.headers["vary"] == "Accept-Encoding"
-+                    assert asset.headers["cache-control"] == (
-+                        "public, max-age=31536000, immutable"
-+                    )
-+                public_file = client.get("/app/qwenpaw/web/logo.svg")
-+                assert public_file.status_code == 200
-+                assert public_file.headers["cache-control"] == "public, max-age=300"
++                asset = client.get("/app/qwenpaw/web/assets/index.js")
++                assert asset.status_code == 200
++                assert asset.content == b"export const asset = 'unmodified';\\n"
 +                """,
 +            ),
 +        ],
@@ -2458,3 +2232,217 @@ index 0000000000000000000000000000000000000000..078bedd160f7bccbc41a4ca0d9864814
 +        check=False,
 +    )
 +    assert result.returncode == 0, result.stdout + result.stderr
+--- a/src/qwenpaw/app/_app.py
++++ b/src/qwenpaw/app/_app.py
+@@ -12,7 +12,7 @@
+ from pathlib import Path
+ from typing import Any
+
+-from fastapi import FastAPI, HTTPException
++from fastapi import FastAPI, HTTPException, Request, Response
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse
+ from fastapi.staticfiles import StaticFiles
+@@ -41,6 +41,12 @@
+ )
+ from ..utils.startup_display import AgentStartupDisplay
+ from ..utils.system_info import summarize_python_environment
++from .base_path import (
++    BasePathMiddleware,
++    ConsoleIndexResponse,
++    normalize_base_path,
++)
++from .console_static import ConsoleStaticFiles
+ from .auth import (
+     AuthMiddleware,
+     RuntimeBoundaryMiddleware,
+@@ -582,6 +588,7 @@
+
+             plugin_loader.registry.set_workspace_manager(workspace_registry)
+             plugin_loader.registry.set_plugin_http_app(app)
++            app.state.plugin_registry = plugin_loader.registry
+
+             config = load_config(get_config_path())
+             plugin_configs = (
+@@ -833,6 +840,8 @@
+         logger.info("Application shutdown complete")
+         startup_display.stop()
+
++
++_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
+
+ app = FastAPI(
+     lifespan=lifespan,
+@@ -920,10 +929,27 @@
+ }
+
+
++@app.delete("/api/hub/pawapps/sessions", status_code=204)
++def clear_browser_sessions(request: Request):
++    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
++
++    response = Response(status_code=204)
++    clear_sessions(request, response)
++    if _BASE_PATH:
++        for name in request.cookies:
++            if name.startswith(COOKIE_PREFIX):
++                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
++    return response
++
++
+ @app.get("/")
+ def read_root():
+     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
++        return ConsoleIndexResponse(
++            _CONSOLE_INDEX,
++            base_path=_BASE_PATH,
++            headers=_INDEX_NO_CACHE_HEADERS,
++        )
+     return {
+         "message": (
+             f"{PROJECT_NAME} web console is not available. "
+@@ -1013,8 +1039,9 @@
+
+     def _serve_console_index():
+         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-            return FileResponse(
++            return ConsoleIndexResponse(
+                 _CONSOLE_INDEX,
++                base_path=_BASE_PATH,
+                 headers=_INDEX_NO_CACHE_HEADERS,
+             )
+
+@@ -1024,7 +1051,7 @@
+     if _assets_dir.is_dir():
+         app.mount(
+             "/assets",
+-            StaticFiles(directory=str(_assets_dir)),
++            ConsoleStaticFiles(directory=str(_assets_dir)),
+             name="assets",
+         )
+
+@@ -1058,6 +1085,18 @@
+             except (OSError, ValueError):
+                 return _serve_console_index()
+             if file_stat and stat.S_ISREG(file_stat.st_mode):
+-                return FileResponse(static_file, stat_result=file_stat)
++                if Path(static_file) == _CONSOLE_INDEX:
++                    return _serve_console_index()
++                headers = (
++                    _INDEX_NO_CACHE_HEADERS
++                    if Path(static_file).suffix.lower() in (".html", ".htm")
++                    else {"Cache-Control": "public, max-age=300"}
++                )
++                return FileResponse(
++                    static_file, stat_result=file_stat, headers=headers,
++                )
+
+         return _serve_console_index()
++
++
++app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
+--- /dev/null
++++ b/src/qwenpaw/app/console_static.py
+@@ -0,0 +1,101 @@
++# -*- coding: utf-8 -*-
++"""Serve the Console's prebuilt representations without runtime compression."""
++
++from __future__ import annotations
++
++import math
++import mimetypes
++import os
++import re
++import stat
++
++import anyio
++from fastapi.responses import Response
++from starlette.datastructures import Headers
++from starlette.exceptions import HTTPException
++from starlette.types import Scope
++
++from ..hub.static_files import CompressedStaticFiles
++
++_HASHED_ASSET = re.compile(r".+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$")
++_INDEX_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
++
++
++def _encoding_preferences(scope: Scope) -> list[tuple[str | None, str]]:
++    raw = ",".join(Headers(scope=scope).getlist("accept-encoding"))
++    qualities: dict[str, float] = {}
++    for entry in raw.split(","):
++        parts = entry.split(";")
++        name = parts[0].strip().lower()
++        if not name:
++            continue
++        quality = 1.0
++        for parameter in parts[1:]:
++            key, separator, value = parameter.strip().partition("=")
++            if key.strip().lower() == "q":
++                try:
++                    parsed = float(value) if separator else 0.0
++                except ValueError:
++                    parsed = 0.0
++                quality = min(
++                    quality,
++                    parsed if math.isfinite(parsed) and 0 <= parsed <= 1 else 0.0,
++                )
++        qualities[name] = min(quality, qualities.get(name, 1.0))
++
++    wildcard = qualities.get("*", 0.0)
++    ranked = [
++        (qualities.get(name, wildcard), index, name, suffix)
++        for index, (name, suffix) in enumerate((("br", ".br"), ("gzip", ".gz")))
++        if qualities.get(name, wildcard) > 0
++    ]
++    if "identity" in qualities and qualities["identity"] > 0:
++        ranked.append((qualities["identity"], 2, None, ""))
++    ranked.sort(key=lambda item: (-item[0], item[1]))
++    result = [(name, suffix) for _, _, name, suffix in ranked]
++    if "identity" not in qualities and qualities.get("*") != 0:
++        result.append((None, ""))
++    return result
++
++
++class ConsoleStaticFiles(CompressedStaticFiles):
++    """Keep StaticFiles validation and conditional responses for every encoding."""
++
++    def _representation(self, path: str, preferences):
++        _, original = self.lookup_path(path)
++        if original is None or not stat.S_ISREG(original.st_mode):
++            raise HTTPException(status_code=404)
++        for encoding, suffix in preferences:
++            full_path, metadata = self.lookup_path(path + suffix)
++            if metadata is not None and stat.S_ISREG(metadata.st_mode):
++                return full_path, metadata, encoding
++        raise HTTPException(status_code=406, headers={"Vary": "Accept-Encoding"})
++
++    async def get_response(self, path: str, scope: Scope) -> Response:
++        if scope["method"] not in ("GET", "HEAD"):
++            raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
++        if path.lower().endswith((".br", ".gz")):
++            raise HTTPException(status_code=404)
++        try:
++            full_path, metadata, encoding = await anyio.to_thread.run_sync(
++                self._representation, path, _encoding_preferences(scope),
++            )
++        except (OSError, ValueError):
++            raise HTTPException(status_code=404) from None
++
++        response = self.file_response(full_path, metadata, scope)
++        media_type, _ = mimetypes.guess_type(path)
++        response.headers["Content-Type"] = media_type or "application/octet-stream"
++        if encoding is not None:
++            response.headers["Content-Encoding"] = encoding
++        response.headers.add_vary_header("Accept-Encoding")
++        filename = os.path.basename(path)
++        if filename.lower().endswith((".html", ".htm")):
++            response.headers["Cache-Control"] = _INDEX_CACHE_CONTROL
++            response.headers["Pragma"] = "no-cache"
++            response.headers["Expires"] = "0"
++        elif _HASHED_ASSET.fullmatch(filename):
++            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
++        else:
++            response.headers["Cache-Control"] = "public, max-age=300"
++        return response

@@ -1,0 +1,50 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { isStatusSnapshot } from "../src/statusStore.ts";
+
+const snapshot = {
+  success: true, installed: true, running: true, pid: "421", startAt: 1794900000,
+  version: "2.3.0", adopted: false, authEnabled: true, authStatus: "protected",
+  port: 18088, cpu: 1.5, memKB: 102400,
+  install: {
+    phase: "installing", fetched: 0, message: "", error: "", seq: 42, instance: "worker-a",
+    running: true, recovery_required: false, recovery_error: "",
+  },
+};
+
+test("complete Rust status snapshots accept running, stopped and uninstalled states", () => {
+  assert.equal(isStatusSnapshot(snapshot), true);
+  assert.equal(isStatusSnapshot({ ...snapshot, pid: 421 }), true);
+  assert.equal(isStatusSnapshot({
+    ...snapshot, installed: false, running: false, pid: "0", startAt: 0, version: "",
+    authEnabled: false, authStatus: "unknown", cpu: 0, memKB: 0,
+    install: { running: false },
+  }), true);
+  assert.deepEqual(snapshot.install, {
+    phase: "installing", fetched: 0, message: "", error: "", seq: 42, instance: "worker-a",
+    running: true, recovery_required: false, recovery_error: "",
+  }, "validation must leave installation task identity untouched");
+});
+
+test("partial, failed, malformed and wrongly typed event data cannot become service state", () => {
+  for (const value of [null, [], "snapshot", {}, { ok: false }, { success: false },
+    { success: true, installed: true, running: false }]) {
+    assert.equal(isStatusSnapshot(value), false, JSON.stringify(value));
+  }
+  for (const field of ["success", "installed", "running", "pid", "startAt", "version", "port", "cpu", "memKB", "authEnabled", "authStatus", "install"]) {
+    const partial = { ...snapshot };
+    delete partial[field];
+    assert.equal(isStatusSnapshot(partial), false, `missing ${field}`);
+  }
+  for (const patch of [
+    { success: false }, { installed: "true" }, { running: "false" },
+    { pid: "<script>" }, { pid: -1 }, { pid: 0.5 }, { pid: null },
+    { startAt: -1 }, { startAt: Infinity }, { startAt: "1794900000" },
+    { cpu: NaN }, { cpu: "1.5" }, { cpu: null }, { memKB: -1 },
+    { version: {} }, { port: "18088" }, { port: 0 }, { port: 65536 },
+    { authEnabled: "false" }, { authStatus: "unexpected" },
+    { install: null }, { install: {} }, { install: { running: "false" } },
+  ]) {
+    assert.equal(isStatusSnapshot({ ...snapshot, ...patch }), false, JSON.stringify(patch));
+  }
+});
