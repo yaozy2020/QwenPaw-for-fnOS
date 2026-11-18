@@ -11,6 +11,7 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 exec python3 - "$FPK" "$ROOT" <<'PY'
+import base64
 import hashlib
 import io
 import json
@@ -288,13 +289,6 @@ def test_static_elf_checks():
     print("audit: static ELF SELF-TEST PASSED (static-pie accepted, interpreter and malformed input rejected)")
 
 
-if fpk_path == "--self-test":
-    test_safe_members_modes()
-    test_desktop_entries()
-    test_static_elf_checks()
-    raise SystemExit(0)
-
-
 def payload(archive, members, name):
     source = archive.extractfile(members[name])
     if source is None:
@@ -388,7 +382,7 @@ def bounded_gzip_decompress(data, label):
     return decoded
 
 
-def brotli_decompress(data):
+def brotli_errors(pairs):
     node = shutil.which("node")
     fallback = "/var/apps/nodejs_v24/target/bin/node"
     if node is None and os.access(fallback, os.X_OK):
@@ -397,19 +391,103 @@ def brotli_decompress(data):
         raise RuntimeError("Brotli verification requires Node.js (node) or the fnOS nodejs_v24 runtime")
     script = (
         'const fs=require("node:fs"),z=require("node:zlib");'
-        'process.stdout.write(z.brotliDecompressSync(fs.readFileSync(0),'
-        '{maxOutputLength:134217729}));'
+        f'const limit={MAX_EXPANDED},errors=[];'
+        'for(const [name,compressed,original] of JSON.parse(fs.readFileSync(0,"utf8"))){'
+        'try{const decoded=z.brotliDecompressSync(Buffer.from(compressed,"base64"),'
+        '{maxOutputLength:limit+1});'
+        'if(decoded.length>limit)throw new Error("expands beyond the size limit");'
+        'if(!decoded.equals(Buffer.from(original,"base64")))'
+        'throw new Error("decompressed bytes differ from original sibling");'
+        '}catch(error){errors.push(name+": "+error.message);}}'
+        'process.stdout.write(JSON.stringify(errors));'
     )
+    encoded_pairs = [
+        [name, base64.b64encode(compressed).decode("ascii"),
+         base64.b64encode(original).decode("ascii")]
+        for name, compressed, original in pairs
+    ]
     result = subprocess.run(
-        [node, "-e", script], input=data, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, timeout=30, check=False,
+        [node, "-e", script], input=json.dumps(encoded_pairs).encode("ascii"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
     )
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise ValueError(f"index.html.br cannot be decoded: {detail}")
-    if len(result.stdout) > MAX_EXPANDED:
-        raise ValueError("index.html.br expands beyond the size limit")
-    return result.stdout
+        raise ValueError(f"Brotli verification failed: {detail}")
+    return json.loads(result.stdout)
+
+
+def patch_console_compression_errors(payloads, manifest_paths):
+    errors = []
+    brotli_pairs = []
+    for relative in manifest_paths:
+        if not relative.startswith("console/") or not relative.endswith((".gz", ".br")):
+            continue
+        name = f"{patch_root}/payload/{relative}"
+        original_name = name.rsplit(".", 1)[0]
+        if original_name not in payloads:
+            errors.append(f"{name}: original sibling is missing")
+            continue
+        if name.endswith(".br"):
+            brotli_pairs.append((name, payloads[name], payloads[original_name]))
+            continue
+        try:
+            if bounded_gzip_decompress(payloads[name], name) != payloads[original_name]:
+                raise ValueError("decompressed bytes differ from original sibling")
+        except (OSError, ValueError, zlib.error) as error:
+            errors.append(f"{name}: {error}")
+    if brotli_pairs:
+        try:
+            errors.extend(brotli_errors(brotli_pairs))
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            errors.append(f"base-path Console Brotli: {error}")
+    return errors
+
+
+def test_patch_console_compression():
+    import gzip
+    from unittest.mock import patch
+
+    relative = "console/assets/app.js"
+    name = f"{patch_root}/payload/{relative}"
+    original = b"console fixture\n\x00\xff"
+    payloads = {
+        name: original,
+        name + ".gz": gzip.compress(original, mtime=0),
+        name + ".br": bytes.fromhex("8b0880636f6e736f6c6520666978747572650a00ff03"),
+    }
+    paths = [relative, relative + ".gz", relative + ".br"]
+    assert not patch_console_compression_errors(payloads, paths), "valid binary sidecars"
+    print("    [ OK ] compression self-test: accepts matching gzip and Brotli binary sidecars")
+    for suffix in (".gz", ".br"):
+        sidecar = name + suffix
+        cases = (
+            ("content mismatch", {**payloads, name: b"different bytes"}),
+            ("corrupt stream", {**payloads, sidecar: b"invalid compression"}),
+            ("truncated stream", {**payloads, sidecar: payloads[sidecar][:-1]}),
+            ("missing original", {sidecar: payloads[sidecar]}),
+        )
+        for label, contents in cases:
+            errors = patch_console_compression_errors(contents, [relative + suffix])
+            assert any(sidecar in error for error in errors), f"{suffix} {label}: {errors}"
+            print(f"    [ OK ] compression self-test: rejects {suffix} {label}")
+    errors = patch_console_compression_errors({**payloads, name: b"different bytes"}, paths)
+    assert len(errors) == 2 and all(
+        any(name + suffix in error for error in errors) for suffix in (".gz", ".br")
+    ), f"gzip and Brotli failures must aggregate: {errors}"
+    print("    [ OK ] compression self-test: aggregates gzip and Brotli failures")
+    with patch.object(shutil, "which", return_value=None), patch.object(os, "access", return_value=False):
+        errors = patch_console_compression_errors(payloads, [relative + ".br"])
+    assert any("requires Node.js" in error for error in errors), "missing Node must fail closed"
+    print("    [ OK ] compression self-test: missing Node fails closed")
+    print("audit: compression SELF-TEST PASSED (binary positive, 8 sidecar negatives, aggregation, missing Node)")
+
+
+if fpk_path == "--self-test":
+    test_safe_members_modes()
+    test_desktop_entries()
+    test_static_elf_checks()
+    test_patch_console_compression()
+    raise SystemExit(0)
 
 
 try:
@@ -580,13 +658,12 @@ else:
 report(gzip_valid, "index.html.gz 解压后与 index.html 字节一致",
        f"index.html.gz 无效: {gzip_detail}")
 try:
-    decoded_brotli = brotli_decompress(app_payloads["www/index.html.br"])
-    brotli_valid = decoded_brotli == html
+    brotli_details = brotli_errors([("index.html.br", app_payloads["www/index.html.br"], html)])
+    brotli_valid = not brotli_details
+    brotli_detail = "; ".join(brotli_details)
 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
     brotli_valid = False
     brotli_detail = str(error)
-else:
-    brotli_detail = "decompressed bytes differ from index.html"
 report(brotli_valid, "index.html.br 解压后与 index.html 字节一致",
        f"index.html.br 无效: {brotli_detail}")
 
@@ -607,9 +684,14 @@ for entry in patch_manifest["files"]:
 report(not any("base-path 补丁哈希不匹配" in failure for failure in failures),
        f"全部 {len(manifest_paths)} 个补丁文件 SHA256 与清单一致",
        "base-path 补丁文件哈希校验失败")
-report(patch_bytes <= 48 * 1024 * 1024,
-       f"补丁载荷不超过 48 MiB（实际 {patch_bytes} 字节）",
-       f"补丁载荷超过 48 MiB: {patch_bytes}")
+report(patch_bytes <= 64 * 1024 * 1024,
+       f"完整补丁载荷不超过 64 MiB（实际 {patch_bytes} 字节）",
+       f"完整补丁载荷超过 64 MiB: {patch_bytes}")
+compression_errors = patch_console_compression_errors(app_payloads, manifest_paths)
+failures.extend(compression_errors)
+report(not compression_errors,
+       "补丁 Console 清单中的 .gz/.br 解压后均与原始兄弟文件字节一致",
+       f"补丁 Console 压缩载荷校验失败: {'; '.join(compression_errors)}")
 
 with open(fpk_path, "rb") as fpk_file:
     fpk_sha256 = hashlib.sha256(fpk_file.read()).hexdigest()

@@ -1,6 +1,6 @@
 import type { ApiClient, StatusResponse } from "./api";
 import { renderStatusCard } from "./components";
-import { formatUptime } from "./statusStore";
+import { formatUptime, isStatusSnapshot } from "./statusStore";
 import type { createVersionPanel } from "./versionPanel";
 
 interface StatusPanelOptions {
@@ -12,6 +12,8 @@ interface StatusPanelOptions {
 
 export function createStatusPanel({ api, versionPanel, errorMessage, updateOverviewInstaller }: StatusPanelOptions) {
   let statusReqSeq = 0;
+  let lastEventRecoveryAt = -Infinity;
+  let eventRecovery: Promise<void> | null = null;
   let supervisorReachable: boolean | null = null;
 
   function setServiceActions(running: boolean, installed: boolean, degraded: boolean): void {
@@ -93,6 +95,11 @@ export function createStatusPanel({ api, versionPanel, errorMessage, updateOverv
 
   async function fetchStatus(snapshot?: StatusResponse): Promise<void> {
     if (document.hidden) return;
+    if (snapshot !== undefined && !isStatusSnapshot(snapshot)) {
+      await recoverInvalidEvent();
+      return;
+    }
+    // 每个有效快照也推进请求序号，淘汰已在途 GET 的成功和失败。
     const mySeq = ++statusReqSeq;
     try {
       let data: StatusResponse;
@@ -101,9 +108,11 @@ export function createStatusPanel({ api, versionPanel, errorMessage, updateOverv
       } else {
         const result = await api.status();
         if (!result.ok) throw new Error("HTTP " + result.status);
+        if (result.data?.success !== true || typeof result.data.installed !== "boolean"
+          || typeof result.data.running !== "boolean") throw new Error("无效的服务状态");
         data = result.data;
       }
-      if (mySeq !== statusReqSeq) return;
+      if (mySeq !== statusReqSeq || document.hidden) return;
       const badge = document.getElementById("statusBadge");
       const valVersion = document.getElementById("valVersion");
       const valAuth = document.getElementById("valAuthStatus");
@@ -236,7 +245,7 @@ export function createStatusPanel({ api, versionPanel, errorMessage, updateOverv
       syncOverviewDetails();
     } catch (error) {
       console.error("fetchStatus err:", error);
-      if (mySeq !== statusReqSeq) return;
+      if (mySeq !== statusReqSeq || document.hidden) return;
       const checkedAt = document.getElementById("statusCheckedAt");
       if (checkedAt) checkedAt.innerText = "同步失败 · 自动重试中";
       const badge = document.getElementById("statusBadge");
@@ -293,12 +302,36 @@ export function createStatusPanel({ api, versionPanel, errorMessage, updateOverv
     }
   }
 
+  // 坏帧/连续断线共用一次有界恢复；失败后仍由 30s 轮询保证进展。
+  function recoverInvalidEvent(): Promise<void> {
+    if (document.hidden) return Promise.resolve();
+    if (eventRecovery) return eventRecovery;
+    const now = Date.now();
+    if (now - lastEventRecoveryAt < 30000) return Promise.resolve();
+    lastEventRecoveryAt = now;
+    eventRecovery = fetchStatus().finally(() => { eventRecovery = null; });
+    return eventRecovery;
+  }
+
+  function consumeSnapshot(raw: unknown): Promise<void> {
+    if (document.hidden) return Promise.resolve();
+    if (typeof raw === "string") {
+      try {
+        const data: unknown = JSON.parse(raw);
+        if (isStatusSnapshot(data)) return fetchStatus(data);
+      } catch {}
+    }
+    return recoverInvalidEvent();
+  }
+
   window.setInterval(() => {
     if (!document.hidden) updateUptime();
   }, 1000);
 
   return {
     refresh: fetchStatus,
+    consumeSnapshot,
+    recoverEvents: recoverInvalidEvent,
     reachable: () => supervisorReachable,
   };
 }

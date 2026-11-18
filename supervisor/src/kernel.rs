@@ -166,6 +166,8 @@ struct State {
     started_wall: Option<SystemTime>,
     cache_pid: i32,
     cache_at: Option<Instant>,
+    cache_cpu: f64,
+    cache_rss_kb: i64,
     version_cache: String,
     version_cache_at: Option<Instant>,
 }
@@ -893,7 +895,15 @@ impl KernelManager {
             st.cache_pid = pid;
             st.cache_at = Some(now);
         } else {
-            pid = st.cache_pid;
+            return KernelStatus {
+                pid: st.cache_pid,
+                running: true,
+                adopted: false,
+                started_at: st.started_wall,
+                cpu_percent: st.cache_cpu,
+                rss_kb: st.cache_rss_kb,
+                port: self.port(),
+            };
         }
         let running = pid > 0 && procfs::process_alive(pid);
         let started_wall = if running { st.started_wall } else { None };
@@ -913,6 +923,12 @@ impl KernelManager {
         } else {
             (0.0, 0)
         };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.cache_pid == pid && state.cache_at == Some(now) {
+            state.cache_cpu = cpu;
+            state.cache_rss_kb = rss;
+        }
+        drop(state);
         KernelStatus {
             pid,
             running,
@@ -928,6 +944,41 @@ impl KernelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_status_cache_reuses_the_cpu_sample_without_another_sleep() {
+        let dir = std::env::temp_dir().join(format!("qwenpaw-status-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kernel = KernelManager::new(
+            KernelConfig {
+                venv_dir: dir.join("venv").to_string_lossy().into_owned(),
+                pid_file: dir.join("kernel.pid").to_string_lossy().into_owned(),
+                log_file: dir.join("kernel.log").to_string_lossy().into_owned(),
+                share_dir: dir.to_string_lossy().into_owned(),
+                etc_dir: dir.to_string_lossy().into_owned(),
+                log_level: "info".into(),
+            },
+            crate::api::test_support::free_port(),
+        );
+        let pid = std::process::id() as i32;
+        {
+            let mut state = kernel.state.lock().unwrap();
+            state.cache_pid = pid;
+            state.cache_at = Some(Instant::now());
+            state.cache_cpu = 42.0;
+            state.cache_rss_kb = 1024;
+        }
+
+        let started = Instant::now();
+        let status = kernel.status_now();
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(status.pid, pid);
+        assert_eq!(status.cpu_percent, 42.0);
+        assert_eq!(status.rss_kb, 1024);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn kernel_version_is_cached_and_explicitly_invalidated() {

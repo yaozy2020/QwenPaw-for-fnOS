@@ -2,7 +2,7 @@
 
 - 状态：按 2026-11-17 当前工作树实现更新；本文描述静态源码契约，不代表本轮执行了构建、测试或真机复测。
 - 范围：fnOS 生命周期薄入口、Rust supervisor/管理核心、Gateway、私有控制 UDS、受管运行时及 Web 客户端。
-- 当前工作树 manifest 为 `1.2.7-7`，并已按官方 JS SDK 要求声明 `micro_app=true`；当前候选及既往授权远端验收记录见交接文档。历史补丁清单同时合并各版本 `sha256` 与 `previous_sha256`，覆盖现场旧 venv；`-7` 已通过远程应用中心安装、内核启动和主 Web 深链验收，仍不写成生产发布。
+- 当前本地 manifest 为 `1.3.0`，进入性能优化治理专项；各阶段完成后推进 `1.3.x`，同阶段修复和测试使用 `-x`。专项实现与证据见 `performance-governance-1.3.md`。manifest 按官方 JS SDK 要求声明 `micro_app=true`；历史 `-7` 候选及验收见交接，现场只读核对为 `1.2.7-10`，均不替代 1.3 当前门禁。
 - 当前管理 Web 架构为 Gateway-only。G4 已实施：生产 CGI 文件、CGI 子命令、前端 action fallback、CGI 专属测试和 CI 门禁均已删除。下文按当前实现描述，不把历史 CGI 路径写作现状。
 
 ## 入口与共享管理核心
@@ -39,7 +39,7 @@
 - 前端使用同源 Gateway REST/API 路径，不再基于页面地址推导 `api.cgi`，也没有 action 协议回退分支。
 - 保持 Preact，不迁移 Vue、不新增第二套框架。`authorizedDirsPanel.ts` 独立管理目录绑定、重新授权、解绑及原生打开；manifest 按官方要求声明 `micro_app=true`，使用 `@trimjs/web-app 0.5.0` 的 `TrimApp.ready()` 与 `openFileManager(path)`，桌面 Penpal 与手机 Flutter 由 SDK 统一适配；失败只追加 getAppMessage 是否为空、字段名和 appApi 等非敏感诊断，独立普通浏览器隐藏入口；面板显示真实返回，异常、false、success/ok=false 或非零 code 明确报错，null/undefined 不伪报已打开；`logPanel.ts` 独立管理单窗口日志合并、竞态、滚动、导出与清空；`settingsPanel.ts` 独立管理服务端口、Web 反代、镜像与认证；`versionPanel.ts` 独立管理版本查询、选择、比较与安装动作状态；`installCoordinator.ts` 负责安装确认和受理；`installProgressPanel.ts` 独占安装窗口、轮询、runId 与任务持久化；`statusPanel.ts` 负责状态竞态、SSE 快照和概览渲染；`installTask.mjs` 的 seq+instance 归属不变；`modal.ts` 和 `apiResult.ts` 共享弹窗与 API 结果类型；`pollingLifecycle.ts` 统一轮询的幂等启动、后台暂停、返回立即刷新与销毁清理；`navigation.ts` 独立管理移动导航、历史和监听器；`main.ts` 只负责页面编排，后续新交互应落在独立面板而非继续扩大主控制器。
 - 手机端以固定底栏切换 `overview`（含版本）、`configuration`、`authorization`、`logs` 四个分区，页面底部预留安全区与导航空间；桌面端隐藏分区导航并展示完整单页。旧 `#version` 深链接映射到概览。“更新内容”入口、弹窗和请求已移除。状态以 SSE 为主、30 秒兜底，运行时长在本地每秒更新且不新增状态请求。日志取消翻页，首次读取 2000 行回看窗口，后续每 15 秒读取最新 100 行并按重叠合并，后台暂停；移动端日志终端填满剩余视口，支持自动滚底、上翻暂停、导出和清空。分区切换不再强制滚动，使用 160ms 淡入并支持减少动态效果。`config/resource` 声明 `trim.file.sharedAccess/userAccess/userAcl/path` 四个授权 scope。授权目录以 QwenPaw `project_dirs` 为登记来源，选择后由上游校验并直接保存，不另设权限门禁；PUT 只提交归一化 path 与非空 label，不得回传 GET 中的 `exists/nested_with/is_workspace` 等只读字段；失败固定显示在目录区域。Rust `POST /authorized-dirs/check` 仅用于重新授权后的独立权限复查。授权监听在导航前注册，启动时读取已落盘结果，回调地址使用同源绝对 URL；页面重建后可恢复 5 分钟内的落盘授权结果，继续 PUT 保存、显示目录并在成功后清除；面板显示授权、读取、保存、完成或错误阶段；回调页检查结果发布 HTTP 响应，失败时显示状态并停止自动关闭。嵌入回调由父页面收到结果后关闭，不刷新顶层控制台；原始 query 与仅含 `result.path` 的结构化结果均可进入绑定，state 校验和路径归一化保持不变；独立弹窗保留返回兜底。解绑不删除目录或文件。
-- 备份入口复用上游 `/app/qwenpaw/web/backups`，不新增第二套备份后端。当前 FPK 以官方 v2.3.0 为基线携带 7 个后端文件及完整预构建 Console，动态预加载并发为 16，清单声明已核验的旧补丁哈希，未知本地修改仍拒绝覆盖。缺失父目录逐级检查并创建，非目录仍拒绝；完整载荷直接复制，不再下载其他版本源码或运行 npm/Vite；组长退出后的进程组清理修复仍保留，身份不符仍拒绝发送信号。
+- 备份入口复用上游 `/app/qwenpaw/web/backups`，不新增第二套备份后端。本地 1.3 工作树以官方 v2.3.0 为基线携带 8 个后端文件及预构建 Console；其中新增 `ConsoleStaticFiles` 覆盖预压缩协商、条件请求、HTML 禁缓存与哈希资源长期缓存。动态预加载并发仍为 16，清单声明已核验的旧补丁哈希，未知本地修改拒绝覆盖。现场 `-10` 的 1683 项已知旧资源清单继承为显式 `delete_files`，仅在安装事务暂存环境内核验原摘要后清理；不对现用 venv 或未知文件做推测删除。完整载荷直接复制，不再下载其他版本源码或运行 npm/Vite；组长退出后的进程组清理修复保留，身份不符拒绝发送信号。
 - 日志后端 `/logs` 与 `/kernel/install-log` 共用 Rust 尾读器：以请求开始取得的文件长度为上界，从末尾按 8 KiB 分块回读，足够所需行数即停止，最多读取 256 KiB；仅为最终返回行执行 UTF-8 安全截断（2000 字节上限，超长附省略号）。窗口首个残行丢弃、CRLF、无末尾换行和非法 UTF-8 替换语义保持不变；读取中新增内容留待下次刷新，文件缩短导致读取失败时仍按原有约定返回空列表。默认/上限仍分别为运行日志 80/2000 行、安装日志 40/500 行，安装任务身份和鉴权规则不变。
 - 合法 `seq + instance` 任务身份存入 `sessionStorage`。页面重建及 `pageshow` 恢复原任务的轮询，不重复 POST 创建任务；存储不可用时安全降级。不得在无法确认任务时猜测成功或重复提交。
 - 语言只在首次初始化时默认中文，不覆盖已有英文。

@@ -42,9 +42,12 @@ Runner 会先用现有 `build.mjs` 在临时目录构建前端，再执行 `carg
 
 ```bash
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium npm run test:e2e:gateway --prefix web
+PLAYWRIGHT_WEBKIT_EXECUTABLE=/path/to/minibrowser-wpe/bin/MiniBrowser npm run test:e2e:gateway:webkit --prefix web
 ```
 
-CI 若需运行对应引擎，应先用该锁定版本安装所需浏览器及 runner 依赖，再执行对应 E2E 命令；缺少浏览器、release 二进制或测试 gateway 就绪必须失败，不得静默跳过。真实端口切换用例只有设置 `QWENPAW_E2E_WEB_PROXY_PORT=0` 才会运行，默认跳过不构成通过。`PLAYWRIGHT_CHROMIUM_EXECUTABLE` 显式设置但不存在时也会直接失败。
+直接指定 WebKit MiniBrowser 时，调用方仍需提供该构建所需的 `WEBKIT_*` 资源路径和运行库搜索路径；本项目不硬编码开发机路径，也不通过 sudo 修改系统依赖。
+
+CI 若需运行对应引擎，应先用该锁定版本安装所需浏览器及 runner 依赖，再执行对应 E2E 命令；缺少浏览器、release 二进制或测试 gateway 就绪必须失败，不得静默跳过。真实端口切换用例只有设置 `QWENPAW_E2E_WEB_PROXY_PORT=0` 才会运行，默认跳过不构成通过。`PLAYWRIGHT_CHROMIUM_EXECUTABLE` 和 `PLAYWRIGHT_WEBKIT_EXECUTABLE` 显式设置但不存在时也会直接失败。
 
 ## 验收边界
 

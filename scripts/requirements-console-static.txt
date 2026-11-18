@@ -1,0 +1,20 @@
+# Python 3.12 only. Test-only exact dependency closure; no QwenPaw install,
+# pytest, FastAPI extras, application server, or Brotli Python decoder needed.
+# Direct dependencies used by the real static modules and ASGI regressions.
+fastapi==0.163.1
+starlette==1.10.0
+httpx==0.28.1
+anyio==4.12.1
+# anyio stays below upstream QwenPaw's <4.13.0 cancellation regression bound.
+# Transitive pins were checked against official PyPI Requires-Dist metadata.
+annotated-doc==0.0.4
+annotated-types==0.7.0
+certifi==2026.10.19
+h11==0.16.0
+httpcore==1.0.9
+idna==3.11
+opentelemetry-api==1.44.0
+pydantic==2.12.5
+pydantic-core==2.41.5
+typing-extensions==4.15.0
+typing-inspection==0.4.2

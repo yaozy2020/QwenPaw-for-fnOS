@@ -562,7 +562,7 @@
 +++ b/console/scripts/startup-monitor-plugin.ts
 @@ -5,7 +5,7 @@
  import type { Plugin } from "vite";
- 
+
  /** Inline a dependency-free monitor before Vite's entry module executes. */
 -export function startupMonitorPlugin(): Plugin {
 +export function startupMonitorPlugin(apiBaseUrl = ""): Plugin {
@@ -586,7 +586,7 @@
  import { dirname, join } from "node:path";
  import { fileURLToPath } from "node:url";
 +import { checkInitialBundle, measureInitialBundle } from "./initial-bundle.mjs";
- 
+
 -const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 -const outputDirectory = join(scriptDirectory, "..", "dist");
 -const indexPath = join(outputDirectory, "index.html");
@@ -764,7 +764,7 @@
 @@ -85,14 +73,6 @@
  import { PressFeedback } from "./components/interaction/PressFeedback";
  import "katex/dist/katex.min.css";
- 
+
 -const antdLocaleMap: Record<string, Locale> = {
 -  zh: zhCN,
 -  en: enUS,
@@ -788,7 +788,7 @@
 -  ru: "ru",
 -  id: "id",
 -};
- 
+
  const GlobalStyle = createGlobalStyle`
  * {
 @@ -408,12 +380,7 @@
@@ -802,7 +802,7 @@
 -    designI18n.updateLocale(antdLocale.locale);
 -  }, [antdLocale]);
 +  const antdLocale = useUiLocale(lang);
- 
+
    useEffect(() => {
      if (!localStorage.getItem("language")) {
 @@ -457,22 +424,6 @@
@@ -825,21 +825,21 @@
 -      i18n.off("languageChanged", handleLanguageChanged);
 -    };
 -  }, [i18n]);
- 
+
    // Disable the default browser context menu in the Tauri desktop build so
    // users cannot open DevTools via right-click. DevTools is still available
 --- a/console/src/api/config.test.ts
 +++ b/console/src/api/config.test.ts
 @@ -16,7 +16,10 @@
  };
- 
+
  describe("getApiUrl", () => {
 -  beforeEach(() => setViteBase(""));
 +  beforeEach(() => {
 +    setViteBase("");
 +    delete window.__qpBase;
 +  });
- 
+
    it("prepends /api prefix when base is empty", () => {
      expect(getApiUrl("/models")).toBe("/api/models");
 @@ -40,6 +43,13 @@
@@ -855,7 +855,7 @@
 +    expect(getApiUrl("/models")).toBe("http://localhost:8088/api/models");
    });
  });
- 
+
 --- a/console/src/api/config.ts
 +++ b/console/src/api/config.ts
 @@ -1,3 +1,5 @@
@@ -863,15 +863,15 @@
 +
  declare const VITE_API_BASE_URL: string;
  declare const TOKEN: string;
- 
+
 @@ -10,7 +12,7 @@
  }
- 
+
  export function getApiBaseUrl(): string {
 -  return runtimeApiBaseUrl ?? VITE_API_BASE_URL ?? "";
 +  return runtimeApiBaseUrl ?? (VITE_API_BASE_URL || getRuntimeBasePath());
  }
- 
+
  let authCleanup: Promise<unknown> = Promise.resolve();
 --- /dev/null
 +++ b/console/src/hooks/useUiLocale.test.tsx
@@ -1161,7 +1161,7 @@
  import type { Section } from "../pageUtils";
 +import { addRouterBasename } from "../../../utils/navigationMode";
  import styles from "./HubShell.module.less";
- 
+
  type Props = {
 @@ -110,7 +111,11 @@
          <button
@@ -1184,7 +1184,7 @@
  import { getPostLoginHref } from "../../utils/navigationMode";
 +import { getConsoleAssetUrl } from "../../utils/runtimeBasePath";
  import styles from "./index.module.less";
- 
+
  export default function LoginPage() {
 @@ -191,9 +192,9 @@
        >
@@ -1342,7 +1342,7 @@
 @@ -43,8 +43,11 @@
      throw new Error(`HTTP ${response.status} for ${entryUrl}`);
    }
- 
+
 +  const source = await response.text();
 +  const { loadHostUiDependencies } = await import("./hostUiDependencies");
 +  await loadHostUiDependencies();
@@ -1374,7 +1374,7 @@
 @@ -68,10 +68,10 @@
    };
  }
- 
+
 -// All page modules, keyed relative to this file (src/utils/).
 +// Route entry points, keyed relative to this file (src/utils/).
  // e.g. "../pages/Settings/Debug/index.tsx"
@@ -1383,7 +1383,7 @@
 +  ["../pages/**/index.{ts,tsx}", "!../pages/**/__tests__/**"],
    { import: "default" },
  );
- 
+
 --- a/console/src/utils/navigationMode.test.ts
 +++ b/console/src/utils/navigationMode.test.ts
 @@ -156,4 +156,21 @@
@@ -1413,13 +1413,13 @@
 @@ -1,4 +1,5 @@
  import { normalizeConsoleBasename } from "./consoleBasename";
 +import { getRuntimeBasePath } from "./runtimeBasePath";
- 
+
  interface LocationLike {
    pathname: string;
 @@ -6,9 +7,9 @@
    hash?: string;
  }
- 
+
 -const CONSOLE_BASENAME = normalizeConsoleBasename(
 -  import.meta.env.VITE_CONSOLE_BASENAME,
 -);
@@ -1427,7 +1427,7 @@
 +  getRuntimeBasePath() ||
 +  normalizeConsoleBasename(import.meta.env.VITE_CONSOLE_BASENAME);
  const OS_PAW_APP_STATE_KEY = "osPawAppId";
- 
+
  function historyStateRecord(state: unknown): Record<string, unknown> {
 --- /dev/null
 +++ b/console/src/utils/runtimeBasePath.test.ts
@@ -1556,7 +1556,7 @@
 +    assetBase?: string;
 +  };
  }
- 
+
  describe("console deployment configuration", () => {
    it.each([undefined, "", " "])(
 -    "keeps assets at the root when the basename is %j",
@@ -1570,12 +1570,12 @@
 +      expect(config.htmlEntry).toEqual({ relative: true });
      },
    );
- 
+
 --- a/console/vite.config.ts
 +++ b/console/vite.config.ts
 @@ -34,19 +34,52 @@
    const consoleBasename = env.VITE_CONSOLE_BASENAME?.trim();
- 
+
    return {
 -    // Preserve root asset URLs for existing root and /console deployments.
 -    base:
@@ -1747,107 +1747,20 @@
              // i18n
              if (
                id.includes("node_modules/i18next/") ||
---- a/src/qwenpaw/app/_app.py
-+++ b/src/qwenpaw/app/_app.py
-@@ -12,7 +12,7 @@
- from pathlib import Path
- from typing import Any
- 
--from fastapi import FastAPI, HTTPException
-+from fastapi import FastAPI, HTTPException, Request, Response
- from fastapi.middleware.cors import CORSMiddleware
- from fastapi.responses import FileResponse
- from fastapi.staticfiles import StaticFiles
-@@ -41,6 +41,11 @@
- )
- from ..utils.startup_display import AgentStartupDisplay
- from ..utils.system_info import summarize_python_environment
-+from .base_path import (
-+    BasePathMiddleware,
-+    ConsoleIndexResponse,
-+    normalize_base_path,
-+)
- from .auth import (
-     AuthMiddleware,
-     RuntimeBoundaryMiddleware,
-@@ -582,6 +587,7 @@
- 
-             plugin_loader.registry.set_workspace_manager(workspace_registry)
-             plugin_loader.registry.set_plugin_http_app(app)
-+            app.state.plugin_registry = plugin_loader.registry
- 
-             config = load_config(get_config_path())
-             plugin_configs = (
-@@ -833,6 +839,8 @@
-         logger.info("Application shutdown complete")
-         startup_display.stop()
- 
-+
-+_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
- 
- app = FastAPI(
-     lifespan=lifespan,
-@@ -920,10 +928,27 @@
- }
- 
- 
-+@app.delete("/api/hub/pawapps/sessions", status_code=204)
-+def clear_browser_sessions(request: Request):
-+    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
-+
-+    response = Response(status_code=204)
-+    clear_sessions(request, response)
-+    if _BASE_PATH:
-+        for name in request.cookies:
-+            if name.startswith(COOKIE_PREFIX):
-+                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
-+    return response
-+
-+
- @app.get("/")
- def read_root():
-     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
--        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
-+        return ConsoleIndexResponse(
-+            _CONSOLE_INDEX,
-+            base_path=_BASE_PATH,
-+            headers=_INDEX_NO_CACHE_HEADERS,
-+        )
-     return {
-         "message": (
-             f"{PROJECT_NAME} web console is not available. "
-@@ -1013,8 +1038,9 @@
- 
-     def _serve_console_index():
-         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
--            return FileResponse(
-+            return ConsoleIndexResponse(
-                 _CONSOLE_INDEX,
-+                base_path=_BASE_PATH,
-                 headers=_INDEX_NO_CACHE_HEADERS,
-             )
- 
-@@ -1061,3 +1087,6 @@
-                 return FileResponse(static_file, stat_result=file_stat)
- 
-         return _serve_console_index()
-+
-+
-+app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
 --- a/src/qwenpaw/app/auth.py
 +++ b/src/qwenpaw/app/auth.py
 @@ -32,6 +32,7 @@
- 
+
  from fastapi import Request, Response
  from starlette.requests import HTTPConnection
 +from starlette.routing import get_route_path
  from starlette.types import ASGIApp, Receive, Scope, Send
  from starlette.middleware.base import BaseHTTPMiddleware
- 
+
 @@ -811,8 +812,10 @@
          if not is_auth_enabled() or not has_registered_users():
              return True
- 
+
 -        path = request.url.path
 +        path = get_route_path(request.scope)
          if path == "/api/config/theme" and request.method == "GET":
@@ -1987,7 +1900,7 @@
 +from starlette.routing import get_route_path
  from starlette.websockets import WebSocketState
  from yarl import URL
- 
+
 @@ -405,7 +406,7 @@
          candidates = [
              binding
@@ -2004,12 +1917,12 @@
  )
  from starlette.responses import Response
 +from starlette.routing import get_route_path
- 
- 
+
+
  class AgentContextMiddleware(BaseHTTPMiddleware):
 @@ -29,7 +30,7 @@
          agent_id = None
- 
+
          # Priority 1: Extract agentId from path: /api/agents/{agentId}/...
 -        path_parts = request.url.path.split("/")
 +        path_parts = get_route_path(request.scope).split("/")
@@ -2023,7 +1936,7 @@
  )
  from pydantic import BaseModel, Field, field_validator
 +from starlette.routing import get_route_path
- 
+
  from qwenpaw.exceptions import (
      AppBaseException,
 @@ -104,7 +105,7 @@
@@ -2039,12 +1952,12 @@
 +++ b/src/qwenpaw/app/routers/voice.py
 @@ -4,6 +4,7 @@
  from urllib.parse import parse_qsl
- 
+
  from fastapi import APIRouter, Request, Response, WebSocket
 +from starlette.routing import get_route_path
- 
+
  from ..channels.ingress import route_is_unowned
- 
+
 @@ -32,7 +33,7 @@
      return route_is_unowned(
          registry,
@@ -2053,7 +1966,7 @@
 +        get_route_path(request.scope),
          service=service,
      )
- 
+
 --- /dev/null
 +++ b/tests/unit/app/auth/test_browser_session_cleanup.py
 @@ -0,0 +1,24 @@
@@ -2088,7 +2001,7 @@
      request.client = MagicMock()
      request.client.host = client_host
 +    request.scope = {"type": "http", "path": "/api/hubtected", "root_path": ""}
- 
+
      headers = {}
      if xff:
 --- /dev/null
@@ -2319,3 +2232,217 @@
 +        check=False,
 +    )
 +    assert result.returncode == 0, result.stdout + result.stderr
+--- a/src/qwenpaw/app/_app.py
++++ b/src/qwenpaw/app/_app.py
+@@ -12,7 +12,7 @@
+ from pathlib import Path
+ from typing import Any
+
+-from fastapi import FastAPI, HTTPException
++from fastapi import FastAPI, HTTPException, Request, Response
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse
+ from fastapi.staticfiles import StaticFiles
+@@ -41,6 +41,12 @@
+ )
+ from ..utils.startup_display import AgentStartupDisplay
+ from ..utils.system_info import summarize_python_environment
++from .base_path import (
++    BasePathMiddleware,
++    ConsoleIndexResponse,
++    normalize_base_path,
++)
++from .console_static import ConsoleStaticFiles
+ from .auth import (
+     AuthMiddleware,
+     RuntimeBoundaryMiddleware,
+@@ -582,6 +588,7 @@
+
+             plugin_loader.registry.set_workspace_manager(workspace_registry)
+             plugin_loader.registry.set_plugin_http_app(app)
++            app.state.plugin_registry = plugin_loader.registry
+
+             config = load_config(get_config_path())
+             plugin_configs = (
+@@ -833,6 +840,8 @@
+         logger.info("Application shutdown complete")
+         startup_display.stop()
+
++
++_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
+
+ app = FastAPI(
+     lifespan=lifespan,
+@@ -920,10 +929,27 @@
+ }
+
+
++@app.delete("/api/hub/pawapps/sessions", status_code=204)
++def clear_browser_sessions(request: Request):
++    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
++
++    response = Response(status_code=204)
++    clear_sessions(request, response)
++    if _BASE_PATH:
++        for name in request.cookies:
++            if name.startswith(COOKIE_PREFIX):
++                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
++    return response
++
++
+ @app.get("/")
+ def read_root():
+     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
++        return ConsoleIndexResponse(
++            _CONSOLE_INDEX,
++            base_path=_BASE_PATH,
++            headers=_INDEX_NO_CACHE_HEADERS,
++        )
+     return {
+         "message": (
+             f"{PROJECT_NAME} web console is not available. "
+@@ -1013,8 +1039,9 @@
+
+     def _serve_console_index():
+         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-            return FileResponse(
++            return ConsoleIndexResponse(
+                 _CONSOLE_INDEX,
++                base_path=_BASE_PATH,
+                 headers=_INDEX_NO_CACHE_HEADERS,
+             )
+
+@@ -1024,7 +1051,7 @@
+     if _assets_dir.is_dir():
+         app.mount(
+             "/assets",
+-            StaticFiles(directory=str(_assets_dir)),
++            ConsoleStaticFiles(directory=str(_assets_dir)),
+             name="assets",
+         )
+
+@@ -1058,6 +1085,18 @@
+             except (OSError, ValueError):
+                 return _serve_console_index()
+             if file_stat and stat.S_ISREG(file_stat.st_mode):
+-                return FileResponse(static_file, stat_result=file_stat)
++                if Path(static_file) == _CONSOLE_INDEX:
++                    return _serve_console_index()
++                headers = (
++                    _INDEX_NO_CACHE_HEADERS
++                    if Path(static_file).suffix.lower() in (".html", ".htm")
++                    else {"Cache-Control": "public, max-age=300"}
++                )
++                return FileResponse(
++                    static_file, stat_result=file_stat, headers=headers,
++                )
+
+         return _serve_console_index()
++
++
++app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
+--- /dev/null
++++ b/src/qwenpaw/app/console_static.py
+@@ -0,0 +1,101 @@
++# -*- coding: utf-8 -*-
++"""Serve the Console's prebuilt representations without runtime compression."""
++
++from __future__ import annotations
++
++import math
++import mimetypes
++import os
++import re
++import stat
++
++import anyio
++from fastapi.responses import Response
++from starlette.datastructures import Headers
++from starlette.exceptions import HTTPException
++from starlette.types import Scope
++
++from ..hub.static_files import CompressedStaticFiles
++
++_HASHED_ASSET = re.compile(r".+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$")
++_INDEX_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
++
++
++def _encoding_preferences(scope: Scope) -> list[tuple[str | None, str]]:
++    raw = ",".join(Headers(scope=scope).getlist("accept-encoding"))
++    qualities: dict[str, float] = {}
++    for entry in raw.split(","):
++        parts = entry.split(";")
++        name = parts[0].strip().lower()
++        if not name:
++            continue
++        quality = 1.0
++        for parameter in parts[1:]:
++            key, separator, value = parameter.strip().partition("=")
++            if key.strip().lower() == "q":
++                try:
++                    parsed = float(value) if separator else 0.0
++                except ValueError:
++                    parsed = 0.0
++                quality = min(
++                    quality,
++                    parsed if math.isfinite(parsed) and 0 <= parsed <= 1 else 0.0,
++                )
++        qualities[name] = min(quality, qualities.get(name, 1.0))
++
++    wildcard = qualities.get("*", 0.0)
++    ranked = [
++        (qualities.get(name, wildcard), index, name, suffix)
++        for index, (name, suffix) in enumerate((("br", ".br"), ("gzip", ".gz")))
++        if qualities.get(name, wildcard) > 0
++    ]
++    if "identity" in qualities and qualities["identity"] > 0:
++        ranked.append((qualities["identity"], 2, None, ""))
++    ranked.sort(key=lambda item: (-item[0], item[1]))
++    result = [(name, suffix) for _, _, name, suffix in ranked]
++    if "identity" not in qualities and qualities.get("*") != 0:
++        result.append((None, ""))
++    return result
++
++
++class ConsoleStaticFiles(CompressedStaticFiles):
++    """Keep StaticFiles validation and conditional responses for every encoding."""
++
++    def _representation(self, path: str, preferences):
++        _, original = self.lookup_path(path)
++        if original is None or not stat.S_ISREG(original.st_mode):
++            raise HTTPException(status_code=404)
++        for encoding, suffix in preferences:
++            full_path, metadata = self.lookup_path(path + suffix)
++            if metadata is not None and stat.S_ISREG(metadata.st_mode):
++                return full_path, metadata, encoding
++        raise HTTPException(status_code=406, headers={"Vary": "Accept-Encoding"})
++
++    async def get_response(self, path: str, scope: Scope) -> Response:
++        if scope["method"] not in ("GET", "HEAD"):
++            raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
++        if path.lower().endswith((".br", ".gz")):
++            raise HTTPException(status_code=404)
++        try:
++            full_path, metadata, encoding = await anyio.to_thread.run_sync(
++                self._representation, path, _encoding_preferences(scope),
++            )
++        except (OSError, ValueError):
++            raise HTTPException(status_code=404) from None
++
++        response = self.file_response(full_path, metadata, scope)
++        media_type, _ = mimetypes.guess_type(path)
++        response.headers["Content-Type"] = media_type or "application/octet-stream"
++        if encoding is not None:
++            response.headers["Content-Encoding"] = encoding
++        response.headers.add_vary_header("Accept-Encoding")
++        filename = os.path.basename(path)
++        if filename.lower().endswith((".html", ".htm")):
++            response.headers["Cache-Control"] = _INDEX_CACHE_CONTROL
++            response.headers["Pragma"] = "no-cache"
++            response.headers["Expires"] = "0"
++        elif _HASHED_ASSET.fullmatch(filename):
++            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
++        else:
++            response.headers["Cache-Control"] = "public, max-age=300"
++        return response

@@ -54,6 +54,17 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Console payload checker regressions
+        run: node --test scripts/check-console-payload.test.mjs
+
+      - name: Console payload integrity (hashes, compression and resource references)
+        run: node scripts/check-console-payload.mjs
+
+      - name: Console static behavior (31 cases, isolated pinned Python dependencies)
+        run: |
+          python3 -B scripts/test-console-static-runner.py
+          python3 scripts/run-console-static-tests.py
+
       - name: Setup web toolchain (npm ci,锁文件一致性)
         # 默认走官方 registry:硬编码国内镜像会让境外 runner 变慢甚至失败,
         # 也会掩盖上游包缺失的真实故障。需要镜像时用仓库变量覆盖即可。

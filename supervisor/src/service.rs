@@ -97,12 +97,15 @@ fn check_identity(pid: i32, starttime: u64, expected_exe: &Path) -> IdentityStat
     let Some(actual_starttime) = parse_starttime(&stat) else {
         return IdentityState::Unverifiable("process stat has no valid starttime".into());
     };
-    if actual_starttime != starttime
-        || !matches!(
-            parse_process_state(&stat),
-            Some('R' | 'S' | 'D' | 'T' | 't')
-        )
-    {
+    if actual_starttime != starttime {
+        return IdentityState::Mismatch;
+    }
+    // A matching starttime plus a zombie state proves the recorded process has
+    // terminated; do not require /proc/exe or attempt to signal the zombie.
+    if matches!(parse_process_state(&stat), Some('Z' | 'X')) {
+        return IdentityState::Gone;
+    }
+    if !matches!(parse_process_state(&stat), Some('R' | 'S' | 'D' | 'T' | 't')) {
         return IdentityState::Mismatch;
     }
     let exe = match fs::read_link(format!("/proc/{pid}/exe")) {
@@ -1085,6 +1088,58 @@ mod tests {
         fields[18] = "987654";
         let stat = format!("42 (qwen ) paw) S {}", fields.join(" "));
         assert_eq!(parse_starttime(&stat), Some(987654));
+    }
+
+    #[test]
+    fn matching_zombie_registration_is_gone_but_reused_pid_is_not() {
+        let pid = std::process::id() as i32;
+        let current_stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let starttime = parse_starttime(&current_stat).unwrap();
+        let name = current_stat
+            .split_once('(')
+            .and_then(|(_, value)| value.split_once(')'))
+            .map(|(name, _)| name)
+            .unwrap();
+        let mut fields: Vec<_> = current_stat.rsplit_once(") ").unwrap().1.split_whitespace().collect();
+        fields[0] = "Z";
+        let zombie_stat = format!("{pid} ({name}) {}", fields.join(" "));
+        let zombie_starttime = parse_starttime(&zombie_stat).unwrap();
+        assert_eq!(zombie_starttime, starttime);
+        assert!(matches!(parse_process_state(&zombie_stat), Some('Z')));
+
+        assert_eq!(
+            check_identity_from_stat(pid, starttime, &zombie_stat, Path::new("/missing")),
+            IdentityState::Gone
+        );
+        let mut reused_stat_fields: Vec<_> = zombie_stat.rsplit_once(") ").unwrap().1.split_whitespace().collect();
+        reused_stat_fields[19] = "1";
+        let reused_stat = format!("{pid} ({name}) {}", reused_stat_fields.join(" "));
+        assert_eq!(
+            check_identity_from_stat(pid, starttime, &reused_stat, Path::new("/missing")),
+            IdentityState::Mismatch
+        );
+    }
+
+    fn check_identity_from_stat(
+        pid: i32,
+        starttime: u64,
+        stat: &str,
+        expected_exe: &Path,
+    ) -> IdentityState {
+        let Some(actual_starttime) = parse_starttime(stat) else {
+            return IdentityState::Unverifiable("process stat has no valid starttime".into());
+        };
+        if actual_starttime != starttime {
+            return IdentityState::Mismatch;
+        }
+        if matches!(parse_process_state(stat), Some('Z' | 'X')) {
+            return IdentityState::Gone;
+        }
+        if !matches!(parse_process_state(stat), Some('R' | 'S' | 'D' | 'T' | 't')) {
+            return IdentityState::Mismatch;
+        }
+        let _ = (pid, expected_exe);
+        IdentityState::Unverifiable("live identity requires /proc executable".into())
     }
 
     #[test]

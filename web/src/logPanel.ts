@@ -26,6 +26,7 @@ function mergeLogWindow(existing: LogEntry[], incoming: LogEntry[]): LogEntry[] 
     overlap -= 1;
   }
   if (overlap === 0) return incoming.slice(-LOG_WINDOW_MAX);
+  if (overlap === incoming.length) return existing;
   return [...existing, ...incoming.slice(overlap)].slice(-LOG_WINDOW_MAX);
 }
 
@@ -35,6 +36,7 @@ function logText(entry: LogEntry): string {
 
 export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPanelOptions) {
   let logLines: LogEntry[] = [];
+  let renderedLines: LogEntry[] | null = null;
   let logClearGeneration = 0;
   let liveLogFetchSeq = 0;
   let followLatest = true;
@@ -43,15 +45,19 @@ export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPan
   function renderOverviewPreview(): void {
     const preview = document.getElementById("overviewLogPreview");
     if (!preview) return;
-    preview.innerText = logLines.slice(-2).map(logText).join("\n") || "暂无日志";
+    const text = logLines.slice(-2).map(logText).join("\n") || "暂无日志";
+    if (preview.innerText !== text) preview.innerText = text;
   }
 
   function render(): void {
     const terminal = document.getElementById("logTerminal");
     if (!terminal) return;
+    if (renderedLines === logLines || renderedLines && renderedLines.length === logLines.length
+      && renderedLines.every((entry, index) => sameLogEntry(entry, logLines[index]))) return;
     followLatest = terminal.scrollHeight - terminal.clientHeight - terminal.scrollTop <= 24;
     const shouldScroll = followLatest;
     renderLogLines(logLines, terminal, "（当前无日志输出）");
+    renderedLines = logLines;
     renderOverviewPreview();
     const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
     if (autoScroll?.checked && shouldScroll) terminal.scrollTop = terminal.scrollHeight;
@@ -84,7 +90,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPan
     if (!ok) return;
     try {
       const result = await api.clearLogs();
-      if (result.data.success === false) throw new Error(result.data.message || "删除日志失败");
+      if (!result.ok || result.data.success === false) throw new Error(result.data.message || `删除日志失败 (${result.status})`);
       ++logClearGeneration;
       ++liveLogFetchSeq;
       logLines = [];

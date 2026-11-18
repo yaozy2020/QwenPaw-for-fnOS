@@ -1,0 +1,2 @@
+# The runner verifies these upstream source bytes against a fixed SHA256.
+hub/static_files.py -text
