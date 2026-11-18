@@ -71,7 +71,7 @@ def locked_versions() -> dict[str, str]:
     return versions
 
 
-def prepare_package(work: Path, hub_source: Path, patch_root: Path) -> Path:
+def prepare_package(work: Path, hub_source: Path, patch_root: Path = PATCH_ROOT) -> Path:
     manifest = json.loads((patch_root / "manifest.json").read_text(encoding="utf-8"))
     upstream_commit = manifest.get("upstream_commit")
     if upstream_commit not in UPSTREAM_COMMITS:
