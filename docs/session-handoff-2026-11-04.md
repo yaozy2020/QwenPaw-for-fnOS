@@ -6,7 +6,7 @@
 ## 当前本地专项
 
 - 当前修复候选为 `1.3.2-1`，已完成 1.3.0 基线、1.3.1 静态与载荷治理、1.3.2 管理页请求治理；同阶段修复和测试使用 `-x`。
-- 专项范围与实际证据见 `performance-governance-1.3.md`。FPK `build/candidates/1.3.2-1-status-cache-20261118/qwenpaw-1.3.2-1-x86.fpk`，SHA256 `a71c0fe1b6381819560506fb251ef16662459e7fe6de50b5445d7e5f20b4ffd3`；严格 lint、平台 48 项和 FPK 审计通过。
+- 专项范围与实际证据见 `performance-governance-1.3.md`。FPK `build/candidates/1.3.2-1-status-cache-20261118/qwenpaw-1.3.2-1-x86.fpk`，SHA256 `40d35232a28de4f26c13567d1b15a42af9e93b640180e43dcffef780d8491389`；严格 lint、平台 48 项和 FPK 审计通过。
 - 状态采样缓存修复后，15 秒运行中基准 22,500 次全部成功，P95 3 ms、P99 4 ms。84 个文本文件统一为 LF；未修改载荷哈希。
 - 远程测试机已从 `1.2.7-10` 升级到 `1.3.2-1`，管理台与聊天页正常，认证 protected、无需恢复；20 个状态请求全部 200。WebKit 9 项通过、1 项按默认配置跳过；真实 iOS 与 24 小时稳定性未覆盖。证据 `build/validation/1.3.2-1-remote-20261118/summary.json`。
 - 本轮不自动 commit、push、发布或部署；只读现场和独立目录、端口、容器的隔离测试不等同于授权替换已安装服务。

@@ -59,7 +59,7 @@
 - Rust/运行时：完整 Rust 测试 404+13 通过，严格 Clippy 和 musl 静态 supervisor 构建通过；新增状态缓存回归先复现 300 ms 失败再通过。release API、配置事务和 7 个 SIGKILL 恢复点通过。
 - 升级兼容：当前用户拥有的隔离副本中完整平台矩阵 48/48 通过，覆盖健康保留、2.2.2.post1/2.3.0 精确重建、旧 marker、预检/引导/安装失败回滚、无效 pin 拒绝、权限与孤儿内核卸载；未操作真实部署。
 - 性能基准：修复前运行中 15 秒仅完成 500/1500 次，P95 309 ms；修复后 22,500 次全部成功，P95 3 ms、P99 4 ms。空壳 100 次通过，P95 56 ms。该结果是隔离 release 服务基准，不是现场 iOS/生产服务 CPU 结论。
-- FPK：`1.3.2-1` 已在隔离副本生成并通过完整内容审计，1153 个补丁文件、320 组压缩还原及执行位均通过。候选 `build/candidates/1.3.2-1-status-cache-20261118/qwenpaw-1.3.2-1-x86.fpk`，33,497,906 字节，SHA256 `a71c0fe1b6381819560506fb251ef16662459e7fe6de50b5445d7e5f20b4ffd3`；包内 musl supervisor SHA256 `0539419e8efd337cb69ea86d6f5d0707fc4708864866a2c88d4942f9a35fca63`。
+- FPK：`1.3.2-1` 已在合并后的主项目重新生成并通过完整内容审计，1153 个补丁文件、320 组压缩还原及执行位均通过。候选 `build/candidates/1.3.2-1-status-cache-20261118/qwenpaw-1.3.2-1-x86.fpk`，33,498,795 字节，SHA256 `40d35232a28de4f26c13567d1b15a42af9e93b640180e43dcffef780d8491389`；包内 musl supervisor SHA256 `0539419e8efd337cb69ea86d6f5d0707fc4708864866a2c88d4942f9a35fca63`。
 - 远程部署：测试机已从 `1.2.7-10` 升级到 `1.3.2-1`。管理台与聊天页正常，认证 protected、recovery_required=false；20 个状态请求全部 200、总耗时 336 ms。页面切换有 17 个资源取消，HTTP 错误和页面异常为 0。证据 `build/validation/1.3.2-1-remote-20261118/summary.json`。
 - WebKit/iOS：通过 Debian 用户态包和 Playwright 自带库补齐运行环境，未使用 sudo 或修改系统包；新增 `PLAYWRIGHT_WEBKIT_EXECUTABLE` 配置后，同一 Gateway WebKit 流程 9 项通过、1 项按默认配置跳过，清理核验通过。真实 iOS 设备帧率、主线程和内存曲线仍未测量；Chromium、WebKit 和隔离 ASGI 结果不得外推。24 小时稳定性未运行。
 
