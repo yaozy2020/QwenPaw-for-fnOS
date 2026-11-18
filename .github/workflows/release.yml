@@ -191,7 +191,7 @@ jobs:
         run: python3 scripts/test-supervisor-api.py
 
       - name: Gateway disconnected mutation recovery
-        run: python3 scripts/test-gateway-uds.py GatewayUDSTests.test_disconnected_configuration_retains_gate_until_rollback
+        run: sudo -E env "PATH=$PATH" python3 scripts/test-gateway-uds.py GatewayUDSTests.test_disconnected_configuration_retains_gate_until_rollback
 
       - name: Install pinned musl build toolchain
         run: |
