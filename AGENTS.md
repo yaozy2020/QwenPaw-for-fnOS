@@ -16,11 +16,11 @@ fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台�
 
 进行后续管理层工作前，先阅读 `docs/session-handoff-2026-11-04.md`、`docs/management-contract-inventory.md` 和 `docs/management-refactor-plan.md`，再核对当前工作树与相关源码。基线包含大量前序未提交实现和文档；必须按当前工作树判断，保留已有改动，不能只依据 HEAD。
 
-**当前性能与重装修复候选（2026-11-17）：**manifest 版本为 `1.2.7-7`；候选 `build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,773,553 字节，SHA256 `5218b74df94c2426ecc7e48f5bd57dff66cb86e5d1917d9af7f5b6eed93bf2e7`，包内 musl supervisor SHA256 `9d9ec7bc00f28b18b258dfc2704df2b84aecd7f974b308b2cf3df3a8e45cfcf6`。
+**当前性能与重装修复候选（2026-11-17）：**manifest 版本为 `1.2.7-10`；候选 `build/candidates/1.2.7-10-console-cleanup-20261117/qwenpaw-1.2.7-10-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,854,964 字节，SHA256 `2034c7034047e420ec0669e0463c4948f71d2fdb44e68766330538c7782bc373`，包内 musl supervisor SHA256 `b7229a4c2159627dfc2f74022ef133b0b8452b1987e9a3586e677eeee2dae722`。
 
-Console 以官方 v2.3.0 `0a21644e90d8ba37e20035b3bfb63880872cc2a2` 为基线，源码补丁 SHA256 `b0ba1b6e48df72f6c3f7188dbee23a33ce282ef605f2f46401c64356f92d8c2f`，动态预加载并发限制为 16，保留运行时 base-path 和浏览器 Cookie 清理。安装仅接受完整预构建载荷，不再回退下载其他版本源码。历史哈希与 `/proc/exe` 权限回退保持；已登记且与当前目标一致的 supervisor 直接复用，路径变化才停止旧实例；无登记时仅在存在历史安装证据且目标可执行文件一致时接管唯一 orphan，健康内核不因重装被停止，多实例或身份不明仍失败关闭。
+Console 以官方 v2.3.0 `0a21644e90d8ba37e20035b3bfb63880872cc2a2` 为基线，源码补丁 SHA256 `aa2528c63af7078fe4d4d30e37e3eb1d4ae854f99344a9f59e470d0223766441`，动态预加载并发限制为 16，保留运行时 base-path 和浏览器 Cookie 清理。`/assets` 使用内核既有 `CompressedStaticFiles` 提供 Brotli/gzip 与一年 immutable 缓存，公共静态文件缓存 300 秒，HTML 保持 no-store。补丁清单另列 1,683 个新 Console 不再使用的官方文件（原始 35,112,988 字节）；仅核验官方 SHA256 且父目录均为实际目录后删除，变化、越界或符号链接失败关闭。生成器必须接收含 `.vite/manifest.json` 的完整 dist，并验证清单引用全部存在，禁止把差异载荷目录当作完整 Console 输入。安装仅接受完整预构建载荷，不再回退下载其他版本源码。历史哈希与 `/proc/exe` 权限回退保持；已登记且与当前目标一致的 supervisor 直接复用，路径变化才停止旧实例；无登记时仅在存在历史安装证据且目标可执行文件一致时接管唯一 orphan，健康内核不因重装被停止，多实例或身份不明仍失败关闭。
 
-当前验证：Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项、Rust 388+13 项及严格 Clippy 通过；前端 128 项与类型检查通过，Gateway E2E 9 通过、1 跳过；平台回调全量通过。preflight、build/FPK audit 通过，915 个补丁文件哈希一致。首屏 2.921 MiB raw、0.792 MiB Brotli。无旧 PID 登记的隔离重装 8.9 秒完成。远程应用中心已安装 `-7 running`，内核 2.3.0 正常运行且 recovery_required=false；主 Web 聊天输入与设置深链刷新通过，资源/API/页面错误均为 0，资源峰值 18（不写成严格 16）。这是测试候选，不是生产发布。
+当前验证：Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项通过，覆盖 Brotli、gzip、identity、强缓存、公共文件短缓存和深链 HTML no-store。Rust 390+13 项及严格 Clippy、严格 lint 通过；前端 128 项与类型检查通过，Gateway E2E 9 通过、1 跳过；平台回调全量通过。preflight、build/FPK audit 通过，915 个补丁文件哈希一致。远程 `-7 → -8` 的同组 80 个资源直连由 4,539,601 降至 1,197,132 字节，单次 CPU 未下降。中间 `-9` 因差异目录输入误删必要资源，已拒绝；`-9 → -10` 升级后聊天页资源/API/页面错误均为 0，认证 protected，recovery_required=false。资源文件由 2,809 降至 1,126，du 242→111 MB，表观 85→52 MB；整个 Console 1,145 个文件。证据 `build/validation/1.2.7-10/summary.json`。这是测试候选，不是生产发布。
 
 历史平台证据保留在 `docs/platform-validation-2026-11-03.md` 和 `docs/unified-gateway-migration-plan.md`。历史文档中的旧 FPK 路径和摘要只用于审计，不表示对应本地产物仍然保留或可在当前源码上复现。
 

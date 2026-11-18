@@ -3,9 +3,9 @@
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
 > 数据源：manifest / cmd / wizard / app / supervisor Gateway testdata / .github / git tags。
 
-## 当前版本：v1.2.7-7
+## 当前版本：v1.2.7-10
 
-- **生成时间**：2026-11-17 10:46:07 +0800
+- **生成时间**：2026-11-17 15:05:58 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -48,8 +48,8 @@
 ## QwenPaw 2.3.0 base-path 与预构建 Console 补丁载荷
 
 - 上游 PR：`#8719`（临时下游兼容，不表示上游已合并）
-- 后端及预构建 Console 差异文件：915 个，原始数据 35,239,765 字节
-- manifest SHA256：`b953393bccab8d3e265f9f7ee3018cfde039908fefa4a611fd99f3e08d4d67ec`
+- 后端及预构建 Console 差异文件：915 个，原始数据 35,239,957 字节
+- manifest SHA256：`8efa1d034bb667c680f3b7e8fed555b7f1c3989a04665fe6eae71764d2ec3dea`
 - FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite
 
 ## Gateway 源码回归夹具

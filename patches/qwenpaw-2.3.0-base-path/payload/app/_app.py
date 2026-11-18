@@ -31,6 +31,7 @@ from ..constant import (
     WORKING_DIR,
 )
 from ..envs import load_envs_into_environ
+from ..hub.static_files import CompressedStaticFiles
 from ..local_models.manager import LocalModelManager
 from ..providers.provider_manager import ProviderManager
 from ..utils.daily_telemetry import start_daily_telemetry
@@ -1050,7 +1051,7 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
     if _assets_dir.is_dir():
         app.mount(
             "/assets",
-            StaticFiles(directory=str(_assets_dir)),
+            CompressedStaticFiles(directory=str(_assets_dir)),
             name="assets",
         )
 
@@ -1084,7 +1085,11 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
             except (OSError, ValueError):
                 return _serve_console_index()
             if file_stat and stat.S_ISREG(file_stat.st_mode):
-                return FileResponse(static_file, stat_result=file_stat)
+                return FileResponse(
+                    static_file,
+                    stat_result=file_stat,
+                    headers={"Cache-Control": "public, max-age=300"},
+                )
 
         return _serve_console_index()
 

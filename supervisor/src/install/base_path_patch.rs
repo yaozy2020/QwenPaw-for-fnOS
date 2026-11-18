@@ -17,6 +17,8 @@ struct Manifest {
     schema_version: u32,
     base_version: String,
     files: Vec<ManifestFile>,
+    #[serde(default)]
+    delete_files: Vec<ManifestDeleteFile>,
 }
 
 #[derive(Deserialize)]
@@ -28,10 +30,17 @@ struct ManifestFile {
     previous_sha256: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct ManifestDeleteFile {
+    path: String,
+    original_sha256: String,
+}
+
 pub(crate) struct BasePathPatch {
     root: PathBuf,
     fingerprint: String,
     files: Vec<ManifestFile>,
+    delete_files: Vec<ManifestDeleteFile>,
 }
 
 pub(crate) fn for_channel(channel: &InstallChannel) -> Result<Option<BasePathPatch>, String> {
@@ -67,7 +76,7 @@ impl BasePathPatch {
         if manifest.schema_version != 1 || manifest.base_version != "2.3.0" {
             return Err("base-path 补丁清单版本不兼容".into());
         }
-        if manifest.files.is_empty() || manifest.files.len() > 4096 {
+        if manifest.files.is_empty() || manifest.files.len() + manifest.delete_files.len() > 4096 {
             return Err("base-path 补丁清单文件数量无效".into());
         }
         for file in &manifest.files {
@@ -84,10 +93,18 @@ impl BasePathPatch {
                 MAX_PAYLOAD_FILE_BYTES,
             )?;
         }
+        for file in &manifest.delete_files {
+            relative_payload_path(&file.path)?;
+            if !file.path.starts_with("console/") {
+                return Err("base-path 删除范围仅限 Console".into());
+            }
+            validate_digest(&file.original_sha256)?;
+        }
         Ok(Some(Self {
             root: root.to_path_buf(),
             fingerprint,
             files: manifest.files,
+            delete_files: manifest.delete_files,
         }))
     }
 
@@ -141,6 +158,22 @@ impl BasePathPatch {
                 Err(error) => return Err(format!("检查内核补丁目标失败: {error}")),
             }
         }
+        for file in &self.delete_files {
+            let relative = relative_payload_path(&file.path)?;
+            ensure_parent_directories(&package, relative)?;
+            let target = package.join(relative);
+            match fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    let current = read_regular(&target, MAX_PAYLOAD_FILE_BYTES)?;
+                    if sha256(&current) != file.original_sha256 {
+                        return Err(format!("旧 Console 文件哈希已变化，拒绝删除: {}", file.path));
+                    }
+                }
+                Ok(_) => return Err(format!("旧 Console 删除目标不是普通文件: {}", file.path)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("检查旧 Console 文件失败: {error}")),
+            }
+        }
         for file in &self.files {
             let relative = relative_payload_path(&file.path)?;
             let target = package.join(relative);
@@ -148,6 +181,16 @@ impl BasePathPatch {
                 .map_err(|error| format!("写入内核补丁 {} 失败: {error}", file.path))?;
             fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
                 .map_err(|error| format!("设置内核补丁权限 {} 失败: {error}", file.path))?;
+        }
+        for file in &self.delete_files {
+            let target = package.join(relative_payload_path(&file.path)?);
+            match fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("删除旧 Console 文件 {} 失败: {error}", file.path));
+                }
+            }
         }
         let marker = venv.join(MARKER_FILE);
         super::atomic_write_0600(
@@ -345,6 +388,100 @@ mod tests {
         assert_eq!(
             std::fs::read(package.join("console/.vite/manifest.json")).unwrap(),
             b"{}"
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn deletes_only_listed_console_files_with_the_official_hash() {
+        let (root, venv, package) = fixture("delete-obsolete-console");
+        std::fs::write(package.join("app/_app.py"), b"official").unwrap();
+        write_manifest(&root, b"official", b"patched");
+        let old = package.join("console/assets/old.js");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"official old asset").unwrap();
+        let path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["delete_files"] = serde_json::json!([{
+            "path": "console/assets/old.js",
+            "original_sha256": sha256(b"official old asset"),
+        }]);
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        let patch = BasePathPatch::from_root(&root, &InstallChannel::Exact("2.3.0".into()))
+            .unwrap()
+            .unwrap();
+
+        patch.apply(&venv).unwrap();
+
+        assert!(!old.exists());
+        assert_eq!(
+            std::fs::read(package.join("app/_app.py")).unwrap(),
+            b"patched"
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn rejects_a_changed_obsolete_file_before_writing_the_patch() {
+        let (root, venv, package) = fixture("delete-changed-console");
+        std::fs::write(package.join("app/_app.py"), b"official").unwrap();
+        write_manifest(&root, b"official", b"patched");
+        let old = package.join("console/assets/old.js");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"locally modified").unwrap();
+        let path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["delete_files"] = serde_json::json!([{
+            "path": "console/assets/old.js",
+            "original_sha256": sha256(b"official old asset"),
+        }]);
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        let patch = BasePathPatch::from_root(&root, &InstallChannel::Exact("2.3.0".into()))
+            .unwrap()
+            .unwrap();
+
+        let result = patch.apply(&venv);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(old).unwrap(), b"locally modified");
+        assert_eq!(
+            std::fs::read(package.join("app/_app.py")).unwrap(),
+            b"official"
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn rejects_a_symlinked_console_parent_before_deletion() {
+        let (root, venv, package) = fixture("delete-symlinked-console");
+        std::fs::write(package.join("app/_app.py"), b"official").unwrap();
+        write_manifest(&root, b"official", b"patched");
+        let external = root.parent().unwrap().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let old = external.join("old.js");
+        std::fs::write(&old, b"official old asset").unwrap();
+        std::os::unix::fs::symlink(&external, package.join("console")).unwrap();
+        let path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["delete_files"] = serde_json::json!([{
+            "path": "console/old.js",
+            "original_sha256": sha256(b"official old asset"),
+        }]);
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        let patch = BasePathPatch::from_root(&root, &InstallChannel::Exact("2.3.0".into()))
+            .unwrap()
+            .unwrap();
+
+        let result = patch.apply(&venv);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(old).unwrap(), b"official old asset");
+        assert_eq!(
+            std::fs::read(package.join("app/_app.py")).unwrap(),
+            b"official"
         );
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }

@@ -86,6 +86,19 @@ for entry in patch_manifest["files"]:
     while parent != patch_root:
         app_dirs.add(parent)
         parent = os.path.dirname(parent)
+delete_files = patch_manifest.get("delete_files", [])
+if not isinstance(delete_files, list) or len(patch_manifest["files"]) + len(delete_files) > 4096:
+    raise ValueError("base-path patch delete list is invalid")
+manifest_paths = {entry["path"] for entry in patch_manifest["files"]}
+for entry in delete_files:
+    relative = entry["path"]
+    parts = relative.split("/")
+    if (parts[0] != "console" or len(parts) < 2
+            or any(part in {"", ".", ".."} for part in parts) or "\\" in relative):
+        raise ValueError(f"base-path delete path is invalid: {relative!r}")
+    if relative in manifest_paths or not re.fullmatch(
+            r"[0-9a-f]{64}", entry["original_sha256"]):
+        raise ValueError(f"invalid base-path delete entry: {relative!r}")
 app_dirs.update({patch_root, os.path.dirname(patch_root)})
 
 

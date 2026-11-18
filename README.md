@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.2.7-7-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.2.7-10-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
@@ -49,10 +49,10 @@
 
 ## 当前版本候选与兼容边界
 
-- 当前 manifest 版本为 `1.2.7-7`。候选产物：`build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,773,553 字节，SHA256 `5218b74df94c2426ecc7e48f5bd57dff66cb86e5d1917d9af7f5b6eed93bf2e7`；包内 musl supervisor SHA256 `9d9ec7bc00f28b18b258dfc2704df2b84aecd7f974b308b2cf3df3a8e45cfcf6`。这是测试候选，不是生产发布。
-- Console 以官方 v2.3.0 为基线，限制动态资源预加载并发为 16，保留 base-path 与浏览器 Cookie 清理；不再回退下载其他版本源码。历史补丁哈希与 `/proc/exe` 权限回退保持；一致的 supervisor 直接复用，路径变化才停止，orphan 仅接管当前目标且需历史安装证据，健康内核不因重装被停止，多实例或身份不明仍失败关闭。
-- Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项、Rust 388+13 项及严格 Clippy、preflight、build/FPK audit 通过。前端 128 项与类型检查通过，Gateway E2E 9 通过、1 跳过；平台回调全量通过。首屏 2.921 MiB raw、0.792 MiB Brotli；无旧 PID 登记的隔离重装 8.9 秒完成。
-- 远程应用中心已安装 `1.2.7-7 running`，内核 `2.3.0` 正常运行且 `recovery_required=false`。主 Web 聊天输入与设置深链刷新通过，资源/API/页面错误均为 0；实测资源峰值 18，不宣称严格限制为 16。CLI `read_last_api()`、第三方频道回调和旧版 Starlette 不属于本候选的完整兼容承诺。
+- 当前 manifest 版本为 `1.2.7-10`。候选产物：`build/candidates/1.2.7-10-console-cleanup-20261117/qwenpaw-1.2.7-10-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,854,964 字节，SHA256 `2034c7034047e420ec0669e0463c4948f71d2fdb44e68766330538c7782bc373`；包内 musl supervisor SHA256 `b7229a4c2159627dfc2f74022ef133b0b8452b1987e9a3586e677eeee2dae722`。这是测试候选，不是生产发布。
+- Console 以官方 v2.3.0 为基线，限制动态资源预加载并发为 16，保留 base-path 与浏览器 Cookie 清理；不再回退下载其他版本源码。哈希资源使用预压缩 Brotli/gzip 和一年 immutable 缓存，公共静态文件缓存 300 秒，HTML 保持 no-store。另按完整生产构建生成的清单清理 1,683 个新版不再使用的官方 Console 文件；只有官方 SHA256 匹配且父目录不是符号链接时才删除，变化或越界会失败关闭。生成器会拒绝缺文件的差异目录输入。历史补丁哈希与 `/proc/exe` 权限回退保持；一致的 supervisor 直接复用，路径变化才停止，orphan 仅接管当前目标且需历史安装证据，健康内核不因重装被停止，多实例或身份不明仍失败关闭。
+- Console 683 个测试文件、8744 项通过（2 项预期失败）；后端相关 52 项、Rust 390+13 项及严格 Clippy、严格 lint、preflight、build/FPK audit 通过。前端 128 项与类型检查通过，Gateway E2E 9 通过、1 跳过；平台回调全量通过。真实入口资源的 Brotli/gzip/identity 响应内容一致，缓存头与深链 no-store 回归通过。
+- 远程 `1.2.7-9 → 1.2.7-10` 升级成功，内核 `2.3.0` 正常运行、认证 protected 且 `recovery_required=false`，聊天页资源/API/页面错误均为 0。资源文件由 2,809 降至 1,126，磁盘占用 242→111 MB，表观占用 85→52 MB。中间 `-9` 的差异目录输入缺陷已拒绝，不属于可用候选。CLI `read_last_api()`、第三方频道回调和旧版 Starlette 不属于本候选的完整兼容承诺。
 
 上游 WebSocket 目前不由此外壳代理，相关请求返回 501；主 Console 的 HTTP、鉴权和 SSE 流程走 Gateway 或独立反代。独立反代默认仅监听回环地址；开启外部访问时，受保护 API 仍需有效的 QwenPaw 登录会话。首次进入上游鉴权页默认使用中文，已有浏览器语言选择不会被覆盖。
 

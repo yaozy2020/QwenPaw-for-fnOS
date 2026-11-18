@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.2.7-7
+version                    = 1.2.7-10
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS 是第三方打包的部署外壳，与 QwenPaw 上游团队无隶属关系。</p><p>提供内核安装、版本选择、运行状态、日志、端口、授权目录与下载源管理。内核仍从所选 PyPI 镜像安装；FPK 携带后端兼容补丁与预构建 Console，安装无需源码构建。</p>`
 platform                   = x86
@@ -15,4 +15,4 @@ micro_app                  = true
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "v1.2.7-7: 修复无 PID 登记旧实例导致的安装端口冲突，保留 2.3.0 Console 性能优化"
+changelog                  = "v1.2.7-10: 使用完整 Console 构建清理旧资源并校验载荷完整性，降低安装占用"

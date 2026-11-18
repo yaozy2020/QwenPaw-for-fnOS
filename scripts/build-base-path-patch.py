@@ -18,7 +18,7 @@ BACKEND_FILES = (
     "app/routers/voice.py",
 )
 SOURCE_COMMIT = "0a21644e90d8ba37e20035b3bfb63880872cc2a2"
-SOURCE_PATCH_SHA256 = "b0ba1b6e48df72f6c3f7188dbee23a33ce282ef605f2f46401c64356f92d8c2f"
+SOURCE_PATCH_SHA256 = "aa2528c63af7078fe4d4d30e37e3eb1d4ae854f99344a9f59e470d0223766441"
 PREVIOUS_SHA256 = {
     "app/_app.py": ["38541ce134eb38f7ec64a82125365400cc2f3ca69ea5aef86b6f1ba42500877c"],
     "app/base_path.py": ["d4a4091d8a9832b6cb09ab3985c69b0927c5817570dbf31ba79638e7513687f1"],
@@ -27,6 +27,21 @@ PREVIOUS_SHA256 = {
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def require_complete_console(console):
+    manifest_path = console / ".vite/manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit("console input must be a complete build with .vite/manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for entry in manifest.values():
+        paths = [entry.get("file"), *entry.get("css", []), *entry.get("assets", [])]
+        for relative in paths:
+            if not isinstance(relative, str):
+                continue
+            path = Path(relative)
+            if path.is_absolute() or ".." in path.parts or not (console / path).is_file():
+                raise SystemExit(f"console input is incomplete: missing {relative}")
 
 
 def previous_patch_hashes(fpks):
@@ -73,6 +88,7 @@ def main():
         raise SystemExit("output directory must be named qwenpaw-2.3.0-base-path")
 
     files = []
+    delete_files = []
     payload = {}
     with zipfile.ZipFile(wheel) as archive:
         official = {
@@ -100,6 +116,7 @@ def main():
             console = args.console.resolve()
             if not (console / "index.html").is_file():
                 raise SystemExit("console payload is missing index.html")
+            require_complete_console(console)
             for patched_path in sorted(console.rglob("*")):
                 if not patched_path.is_file():
                     continue
@@ -116,6 +133,24 @@ def main():
                 }
                 add_previous_hashes(entry, relative, previous)
                 files.append(entry)
+
+    if args.console:
+        console_files = {
+            f"console/{path.relative_to(console).as_posix()}"
+            for path in console.rglob("*")
+            if path.is_file()
+        }
+        for official_name, original in official.items():
+            prefix = "qwenpaw/console/"
+            if not official_name.startswith(prefix):
+                continue
+            relative = f"console/{official_name[len(prefix):]}"
+            if relative not in console_files:
+                delete_files.append({
+                    "path": relative,
+                    "original_sha256": sha256(original),
+                })
+        delete_files.sort(key=lambda entry: entry["path"])
 
     if not files:
         raise SystemExit("no patch differences found")
@@ -134,6 +169,7 @@ def main():
         "source_patch_sha256": SOURCE_PATCH_SHA256,
         "official_wheel_sha256": sha256(wheel.read_bytes()),
         "files": files,
+        "delete_files": delete_files,
     }
     (output / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -141,6 +177,7 @@ def main():
     )
     print(f"payload={output}")
     print(f"files={len(files)}")
+    print(f"delete_files={len(delete_files)}")
     print(f"bytes={sum(len(data) for data in payload.values())}")
 
 
