@@ -6,18 +6,23 @@ from pathlib import Path
 import subprocess
 import tarfile
 
-SOURCE_COMMIT = "0a21644e90d8ba37e20035b3bfb63880872cc2a2"
-SOURCE_PATCH = Path(__file__).resolve().parents[1] / "patches/qwenpaw-2.3.0-base-path-source.patch"
+SOURCES = {
+    "2.3.0": "0a21644e90d8ba37e20035b3bfb63880872cc2a2",
+    "2.3.0.post1": "ee58cb1a64f2b21e825c525f73dc44bc7941edea",
+}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare the version-matched QwenPaw 2.3.0 base-path source.")
+    parser = argparse.ArgumentParser(description="Prepare version-matched QwenPaw base-path source.")
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--version", choices=SOURCES, default="2.3.0")
     args = parser.parse_args()
     output = args.output.resolve()
-    patch = SOURCE_PATCH.read_bytes()
-    archive = subprocess.check_output(["git", "archive", SOURCE_COMMIT], cwd=args.repository)
+    source_commit = SOURCES[args.version]
+    source_patch = Path(__file__).resolve().parents[1] / f"patches/qwenpaw-{args.version}-base-path-source.patch"
+    patch = source_patch.read_bytes()
+    archive = subprocess.check_output(["git", "archive", source_commit], cwd=args.repository)
     output.mkdir(parents=True, exist_ok=False)
     with tarfile.open(fileobj=io.BytesIO(archive)) as source:
         for member in source.getmembers():
@@ -27,7 +32,7 @@ def main():
                 raise ValueError("source archive contains a non-regular member")
         source.extractall(output)
     subprocess.run(["patch", "--batch", "--forward", "--fuzz=0", "-p1"], input=patch, cwd=output, check=True)
-    print(f"source_commit={SOURCE_COMMIT}")
+    print(f"source_commit={source_commit}")
     print(f"source_patch_sha256={hashlib.sha256(patch).hexdigest()}")
     print(f"source={output}")
 

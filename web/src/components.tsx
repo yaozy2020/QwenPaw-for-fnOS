@@ -45,13 +45,18 @@ export function LogLines({ lines, empty, success = false }: { lines: (string | {
   if (!items.length) return <span class="log-empty">{empty}</span>;
   return (
     <>
-      {items.map((msg, i) => {
-        let cls = "log-info";
-        if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("failed") || msg.includes("失败")) cls = "log-error";
-        else if (msg.includes("WARN") || msg.includes("Warning")) cls = "log-warn";
-        else if (success && (msg.includes("成功") || msg.includes("Successfully"))) cls = "log-success";
-        return <div class={cls} key={i}>{msg}</div>;
-      })}
+      {Array.from({ length: Math.ceil(items.length / 50) }, (_, chunkIndex) => (
+        <div class="log-chunk" key={chunkIndex}>
+          {items.slice(chunkIndex * 50, (chunkIndex + 1) * 50).map((msg, offset) => {
+            const index = chunkIndex * 50 + offset;
+            let cls = "log-info";
+            if (msg.includes("ERROR") || msg.includes("Error") || msg.includes("failed") || msg.includes("失败")) cls = "log-error";
+            else if (msg.includes("WARN") || msg.includes("Warning")) cls = "log-warn";
+            else if (success && (msg.includes("成功") || msg.includes("Successfully"))) cls = "log-success";
+            return <div class={cls} key={index}>{msg}</div>;
+          })}
+        </div>
+      ))}
     </>
   );
 }

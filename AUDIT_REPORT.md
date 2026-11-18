@@ -3,9 +3,9 @@
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
 > 数据源：manifest / cmd / wizard / app / supervisor Gateway testdata / .github / git tags。
 
-## 当前版本：v1.3.2-1
+## 当前版本：v1.3.3-2
 
-- **生成时间**：2026-11-18 15:27:37 +0800
+- **生成时间**：2026-11-18 23:09:11 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -45,11 +45,14 @@
 | `wizard/uninstall` | uninstall |
 | `wizard/upgrade` | upgrade |
 
-## QwenPaw 2.3.0 base-path 与预构建 Console 补丁载荷
+## QwenPaw base-path 与预构建 Console 补丁载荷
+
+### QwenPaw 2.3.0.post1
 
 - 上游 PR：`#8719`（临时下游兼容，不表示上游已合并）
-- 后端及预构建 Console 差异文件：1153 个，原始数据 54,281,611 字节
-- manifest SHA256：`86ce73e28e09f4bf0256a6781c912b18889244160273f681232da7f635e53f62`
+- 后端及预构建 Console 差异文件：1135 个，原始数据 54,297,348 字节
+- manifest SHA256：`cde9b88a6aa95090eff16ce33808dad4270c414c32447b85ac7fdd77310c920e`
+
 - FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite
 
 ## Gateway 源码回归夹具
@@ -74,7 +77,13 @@
 
 ## 最近发布记录
 
-（无 git tag）
+| 版本 | 发布日期 |
+|:-----|:----:|
+| `v2.1.0-rc.3` | 2026-11-03 |
+| `v2.1.0-rc.2` | 2026-11-03 |
+| `v2.1.0-rc.1` | 2026-11-02 |
+| `v2.0.1` | 2026-11-02 |
+| `v2.0.0-rc.1` | 2026-11-02 |
 
 ---
 

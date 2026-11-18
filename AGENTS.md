@@ -10,13 +10,13 @@ QwenPaw for fnOS 是将 QwenPaw 部署到飞牛 NAS 的轻量外壳包，不是 
 
 fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台与 QwenPaw 主 Web 入口均经 Gateway。生产 CGI 已退役。
 
-外壳与内核版本双轨：外壳升级不得隐式升级、降级或重装内核。内核版本由版本钉记录，运行环境重建时按版本钉恢复。
+外壳与内核版本双轨：除用户已明确批准的 `1.3.3-1` 健康 2.3.0 → 2.3.0.post1 事务迁移外，外壳升级不得隐式升级、降级或重装内核。内核版本由版本钉记录，运行环境重建时按版本钉恢复。
 
 ## 当前状态与执行顺序
 
 进行后续管理层工作前，先阅读 `docs/session-handoff-2026-11-04.md`、`docs/management-contract-inventory.md` 和 `docs/management-refactor-plan.md`，再核对当前工作树与相关源码。基线包含大量前序未提交实现和文档；必须按当前工作树判断，保留已有改动，不能只依据 HEAD。
 
-**当前本地专项（2026-11-18）：**当前修复候选为 `1.3.2-1`，完成 1.3.0 基线、1.3.1 静态与载荷治理、1.3.2 管理页请求治理；同阶段修复与测试使用 `-x`。范围与实际证据见 `docs/performance-governance-1.3.md`。84 个文本文件已统一 LF，状态 CPU/RSS 采样使用 2 秒缓存，平台 48 项、严格 lint 与 FPK 审计通过。候选 `build/candidates/1.3.2-1-status-cache-20261118/qwenpaw-1.3.2-1-x86.fpk`，SHA256 `40d35232a28de4f26c13567d1b15a42af9e93b640180e43dcffef780d8491389`。远程测试机已从 `1.2.7-10` 升级到 `1.3.2-1`：管理台与聊天页正常，认证 protected，recovery_required=false，20 个状态请求全部 200、总耗时 336 ms；证据 `build/validation/1.3.2-1-remote-20261118/summary.json`。WebKit 9 项通过、1 项按默认配置跳过；真实 iOS 与 24 小时稳定性仍未完成。
+**当前本地专项（2026-11-18）：**当前修复候选为 `1.3.3-2`，以官方 `2.3.0.post1`（`ee58cb1a64f2b21e825c525f73dc44bc7941edea`）为内核适配基线，只携带 post1 完整 Console 载荷；健康 2.3.0 在外壳升级时经同一 venv 事务迁移到 post1，失败回滚并保留用户数据。镜像明确缺少 post1 时，仅本次迁移改用官方 PyPI，原镜像设置不变。登录页不再初始化聊天插件，管理日志按 50 行分组跳过屏外绘制。候选 `build/candidates/1.3.3-2-mirror-fallback-20261118/qwenpaw-1.3.3-2-x86.fpk`，33,512,246 字节，SHA256 `a72ab37a62f23a0440ecefa78371d48696d73f212c20437c594cb6ca2446e575`。post1 Console 693 个测试文件、8926 项通过（2 项预期失败），Rust 406+13、静态路由 31、平台 51 项及 FPK 审计通过；真实反代与 WebKit 隔离测量通过。本机已安装 `1.3.3-1` 并迁移到 post1，`1.3.3-2` 尚未部署；真实 iOS 与 24 小时稳定性仍未完成。
 
 **历史性能与重装修复候选（2026-11-17）：**当时 manifest 版本为 `1.2.7-7`；候选 `build/candidates/1.2.7-7-orphan-reinstall-20261117/qwenpaw-1.2.7-7-x86.fpk`，稳定路径 `build/candidates/latest/qwenpaw-latest-x86.fpk`，23,773,553 字节，SHA256 `5218b74df94c2426ecc7e48f5bd57dff66cb86e5d1917d9af7f5b6eed93bf2e7`，包内 musl supervisor SHA256 `9d9ec7bc00f28b18b258dfc2704df2b84aecd7f974b308b2cf3df3a8e45cfcf6`。
 

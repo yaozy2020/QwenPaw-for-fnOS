@@ -11,6 +11,7 @@ use std::{
 
 const MARKER_FILE: &str = ".qwenpaw-base-path-patch";
 const PATCH_DIRECTORY: &str = "www/patches/qwenpaw-2.3.0-base-path";
+const PATCH_DIRECTORY_POST1: &str = "www/patches/qwenpaw-2.3.0.post1-base-path";
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_FILES: usize = 4096;
 const MAX_PAYLOAD_FILE_BYTES: usize = 16 * 1024 * 1024;
@@ -47,17 +48,34 @@ struct ManifestDelete {
 pub(crate) struct BasePathPatch {
     root: PathBuf,
     fingerprint: String,
+    base_version: String,
     files: Vec<ManifestFile>,
     delete_files: Vec<ManifestDelete>,
 }
 
+fn channel_base_version(channel: &InstallChannel) -> Option<&str> {
+    match channel {
+        InstallChannel::Exact(version) if version == "2.3.0" => Some("2.3.0"),
+        InstallChannel::Exact(version) if version == "2.3.0.post1" => Some("2.3.0.post1"),
+        _ => None,
+    }
+}
+
 pub(crate) fn for_channel(channel: &InstallChannel) -> Result<Option<BasePathPatch>, String> {
+    let Some(base_version) = channel_base_version(channel) else {
+        return Ok(None);
+    };
     let explicit = std::env::var_os("QWENPAW_BASE_PATH_PATCH").map(PathBuf::from);
     let root = explicit.clone().unwrap_or_else(|| {
         let appdest = std::env::var_os("TRIM_APPDEST")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/var/apps/qwenpaw/target"));
-        appdest.join(PATCH_DIRECTORY)
+        let directory = if base_version == "2.3.0.post1" {
+            PATCH_DIRECTORY_POST1
+        } else {
+            PATCH_DIRECTORY
+        };
+        appdest.join(directory)
     });
     if explicit.is_none() && !root.exists() {
         return Ok(None);
@@ -73,15 +91,15 @@ pub(crate) fn active(venv: &Path) -> bool {
 
 impl BasePathPatch {
     pub(crate) fn from_root(root: &Path, channel: &InstallChannel) -> Result<Option<Self>, String> {
-        if channel != &InstallChannel::Exact("2.3.0".into()) {
+        let Some(base_version) = channel_base_version(channel) else {
             return Ok(None);
-        }
+        };
         require_directory(root)?;
         let raw = read_regular(&root.join("manifest.json"), MAX_MANIFEST_BYTES)?;
         let fingerprint = sha256(&raw);
         let mut manifest: Manifest = serde_json::from_slice(&raw)
             .map_err(|error| format!("base-path 补丁清单不是有效 JSON: {error}"))?;
-        if manifest.schema_version != 1 || manifest.base_version != "2.3.0" {
+        if manifest.schema_version != 1 || manifest.base_version != base_version {
             return Err("base-path 补丁清单版本不兼容".into());
         }
         if manifest.files.is_empty()
@@ -131,6 +149,7 @@ impl BasePathPatch {
         let patch = Self {
             root: root.to_path_buf(),
             fingerprint,
+            base_version: base_version.into(),
             files: manifest.files,
             delete_files: manifest.delete_files,
         };
@@ -220,7 +239,7 @@ impl BasePathPatch {
 
     pub(crate) fn apply(&self, venv: &Path) -> Result<(), String> {
         if !self.delete_files.is_empty() {
-            require_prepared_staging(venv)?;
+            require_prepared_staging(venv, &self.base_version)?;
         }
         let package = python_package(venv)?;
         // Keep the verified bytes; do not copy a source that could change after preflight.
@@ -387,7 +406,7 @@ fn check_delete_target(package: &Path, file: &ManifestDelete) -> Result<Option<P
     Ok(Some(target))
 }
 
-fn require_prepared_staging(venv: &Path) -> Result<(), String> {
+fn require_prepared_staging(venv: &Path, base_version: &str) -> Result<(), String> {
     require_directory(venv)?;
     let tx_id = venv
         .file_name()
@@ -411,14 +430,16 @@ fn require_prepared_staging(venv: &Path) -> Result<(), String> {
     if record.schema_version != 1
         || record.tx_id != tx_id
         || record.phase != TxPhase::Prepared
-        || record.target_version != "2.3.0"
+        || record.target_version != base_version
         || record.staged != venv
         || record.active.parent() != Some(parent)
         || record.active == record.staged
         || record.active == record.backup
         || record.backup != parent.join(format!(".venv.rollback.{tx_id}"))
     {
-        return Err("Console 清理目标不属于已准备的 2.3.0 venv 事务".into());
+        return Err(format!(
+            "Console 清理目标不属于已准备的 {base_version} venv 事务"
+        ));
     }
     Ok(())
 }
@@ -1131,6 +1152,33 @@ mod tests {
             .unwrap();
 
         assert!(patch.includes_console());
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn post1_uses_its_own_manifest_and_prepared_transaction() {
+        let (root, staged, package) = staging_fixture("post1");
+        write_console_manifest(&root);
+        write_official_console(&package);
+        edit_manifest(&root, |manifest| {
+            manifest["base_version"] = serde_json::json!("2.3.0.post1");
+        });
+        let journal = staged.parent().unwrap().join(".venv.transaction.123.1.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+        record["target_version"] = serde_json::json!("2.3.0.post1");
+        fs::write(journal, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        assert!(BasePathPatch::from_root(&root, &InstallChannel::Exact("2.3.0".into())).is_err());
+        let patch = BasePathPatch::from_root(
+            &root,
+            &InstallChannel::Exact("2.3.0.post1".into()),
+        )
+        .unwrap()
+        .unwrap();
+        patch.apply(&staged).unwrap();
+
+        assert_eq!(fs::read(package.join("console/index.html")).unwrap(), b"new-index");
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 }

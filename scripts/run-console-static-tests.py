@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PATCH_ROOT = ROOT / "patches" / "qwenpaw-2.3.0-base-path"
 REQUIREMENTS = ROOT / "scripts" / "requirements-console-static.txt"
 UPSTREAM_COMMIT = "0a21644e90d8ba37e20035b3bfb63880872cc2a2"
+UPSTREAM_COMMITS = {UPSTREAM_COMMIT, "ee58cb1a64f2b21e825c525f73dc44bc7941edea"}
 HUB_SHA256 = "5ab63571200b202323b8164a473ce87fe3f4cca11edc8c4e6193f1a99df10d3c"
 HUB_FIXTURE = ROOT / "scripts" / "testdata" / "console-static" / "hub" / "static_files.py"
 HUB_SOURCE_URL = (
@@ -70,17 +71,18 @@ def locked_versions() -> dict[str, str]:
     return versions
 
 
-def prepare_package(work: Path, hub_source: Path) -> Path:
-    manifest = json.loads((PATCH_ROOT / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("upstream_commit") != UPSTREAM_COMMIT:
-        raise ValueError("payload upstream_commit differs from the pinned hub source")
+def prepare_package(work: Path, hub_source: Path, patch_root: Path) -> Path:
+    manifest = json.loads((patch_root / "manifest.json").read_text(encoding="utf-8"))
+    upstream_commit = manifest.get("upstream_commit")
+    if upstream_commit not in UPSTREAM_COMMITS:
+        raise ValueError("payload upstream_commit is not a supported Console source")
     files = manifest["files"]
     app_sources = {}
     for relative in APP_MODULES:
         entries = [entry for entry in files if entry.get("path") == relative]
         if len(entries) != 1 or not re.fullmatch(r"[0-9a-f]{64}", entries[0].get("sha256", "")):
             raise ValueError(f"missing, duplicate or invalid payload manifest entry: {relative}")
-        app_sources[relative] = checked_bytes(PATCH_ROOT / "payload" / relative, entries[0]["sha256"])
+        app_sources[relative] = checked_bytes(patch_root / "payload" / relative, entries[0]["sha256"])
     hub = checked_bytes(hub_source, HUB_SHA256)
     package = work / "src" / "qwenpaw"
     for directory in (package, package / "app", package / "hub"):
@@ -89,7 +91,7 @@ def prepare_package(work: Path, hub_source: Path) -> Path:
     for relative, data in app_sources.items():
         (package / relative).write_bytes(data)
     (package / "hub" / "static_files.py").write_bytes(hub)
-    print(f"UPSTREAM_COMMIT={UPSTREAM_COMMIT}", flush=True)
+    print(f"UPSTREAM_COMMIT={upstream_commit}", flush=True)
     print(f"HUB_SOURCE={hub_source}", flush=True)
     print(f"HUB_SOURCE_URL={HUB_SOURCE_URL}", flush=True)
     print(f"HUB_SHA256={HUB_SHA256}", flush=True)
@@ -156,6 +158,8 @@ def main(argv=None) -> int:
     parser.add_argument("--work-dir", type=Path, help="new external directory to retain after testing")
     parser.add_argument("--hub-source", type=Path, default=HUB_FIXTURE,
                         help="unmodified hub/static_files.py from the pinned upstream source checkout")
+    parser.add_argument("--patch-root", type=Path, default=PATCH_ROOT,
+                        help="version-matched payload to test")
     parser.add_argument("--prepare-only", action="store_true", help="assemble source only; requires --work-dir")
     parser.add_argument("--wheelhouse", type=Path, help="install only from this prepopulated wheel directory")
     parser.add_argument("--_run-suite", type=Path, help=argparse.SUPPRESS)
@@ -168,7 +172,7 @@ def main(argv=None) -> int:
         parser.error("use Python 3.12 to match the locked test environment")
     locked_versions()
     with external_work_directory(args.work_dir) as work:
-        package = prepare_package(work, args.hub_source.resolve())
+        package = prepare_package(work, args.hub_source.resolve(), args.patch_root.resolve())
         if args.prepare_only:
             return 0
         if importlib.util.find_spec("venv") is None or importlib.util.find_spec("ensurepip") is None:

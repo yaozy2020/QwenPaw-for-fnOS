@@ -74,14 +74,17 @@ def list_workflows() -> list[str]:
     return sorted(p.name for p in d.glob("*.yml"))
 
 
-def base_path_patch_summary() -> tuple[str, int, int, int]:
-    root = ROOT / "patches/qwenpaw-2.3.0-base-path"
-    raw = (root / "manifest.json").read_bytes()
-    manifest = json.loads(raw)
-    size = sum((root / "payload" / entry["path"]).stat().st_size
-               for entry in manifest["files"])
-    return (hashlib.sha256(raw).hexdigest(), len(manifest["files"]), size,
-            manifest["upstream_pr"])
+def base_path_patch_summaries() -> list[tuple[str, str, int, int, int]]:
+    result = []
+    for version in ("2.3.0.post1",):
+        root = ROOT / f"patches/qwenpaw-{version}-base-path"
+        raw = (root / "manifest.json").read_bytes()
+        manifest = json.loads(raw)
+        size = sum((root / "payload" / entry["path"]).stat().st_size
+                   for entry in manifest["files"])
+        result.append((version, hashlib.sha256(raw).hexdigest(), len(manifest["files"]),
+                       size, manifest["upstream_pr"]))
+    return result
 
 
 def list_gateway_fixtures() -> list[tuple[str, str, str]]:
@@ -152,7 +155,7 @@ def render() -> str:
     py_files, py_lines = count_upstream_python()
     plugin_files = count_plugins()
     workflows = list_workflows()
-    patch_digest, patch_files, patch_bytes, upstream_pr = base_path_patch_summary()
+    patch_summaries = base_path_patch_summaries()
     gateway_fixtures = list_gateway_fixtures()
     tags = recent_tags()
     now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %z")
@@ -214,11 +217,15 @@ def render() -> str:
     else:
         a("（无）")
     a("")
-    a("## QwenPaw 2.3.0 base-path 与预构建 Console 补丁载荷")
+    a("## QwenPaw base-path 与预构建 Console 补丁载荷")
     a("")
-    a(f"- 上游 PR：`#{upstream_pr}`（临时下游兼容，不表示上游已合并）")
-    a(f"- 后端及预构建 Console 差异文件：{patch_files} 个，原始数据 {patch_bytes:,} 字节")
-    a(f"- manifest SHA256：`{patch_digest}`")
+    for base_version, patch_digest, patch_files, patch_bytes, upstream_pr in patch_summaries:
+        a(f"### QwenPaw {base_version}")
+        a("")
+        a(f"- 上游 PR：`#{upstream_pr}`（临时下游兼容，不表示上游已合并）")
+        a(f"- 后端及预构建 Console 差异文件：{patch_files} 个，原始数据 {patch_bytes:,} 字节")
+        a(f"- manifest SHA256：`{patch_digest}`")
+        a("")
     a("- FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite")
     a("")
     a("## Gateway 源码回归夹具")

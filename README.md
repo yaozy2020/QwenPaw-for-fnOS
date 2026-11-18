@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.3.2-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.3.3-2-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
@@ -49,10 +49,10 @@
 
 ## 当前版本候选与兼容边界
 
-- 当前修复候选为 `1.3.2-1`。FPK：`build/candidates/1.3.2-1-status-cache-20261118/qwenpaw-1.3.2-1-x86.fpk`，33,498,795 字节，SHA256 `40d35232a28de4f26c13567d1b15a42af9e93b640180e43dcffef780d8491389`。远程测试机已部署该版本。
-- 本轮统一 84 个文本文件为 LF，并为运行中状态的 CPU/RSS 采样增加 2 秒缓存。15 秒基准由 500/1500 次未达到目标恢复为 22,500 次全部成功，P95 3 ms、P99 4 ms；严格 lint、Rust 404+13、平台 48 项及 FPK 审计通过。详见[性能优化治理专项](docs/performance-governance-1.3.md)。
-- Console 保持官方 v2.3.0 源码基线、base-path 与浏览器会话清理。精确版本补丁遵守载荷与历史哈希校验；未验证的新内核版本不自动承诺兼容。WebSocket 仍返回 501。
-- WebKit 使用用户态运行库后 9 项通过、1 项按默认配置跳过；真实 iOS 与 24 小时稳定性仍未验证，不以桌面浏览器或隔离基准替代这些结论。
+- 当前修复候选为 `1.3.3-2`，发布标签为 `v1.3.3-rc.1`，以官方 `2.3.0.post1` 为适配基线。FPK：`build/candidates/1.3.3-2-mirror-fallback-20261118/qwenpaw-1.3.3-2-x86.fpk`，33,512,246 字节，SHA256 `a72ab37a62f23a0440ecefa78371d48696d73f212c20437c594cb6ca2446e575`；只携带一套完整 post1 Console 载荷。
+- 登录页延迟初始化聊天插件，管理日志按 50 行分组跳过屏外绘制。post1 登录页实测 24 个资源请求，浏览器长任务最长约 63–71 ms；真实 Rust 反代与 WebKit 隔离测量通过。该结果不替代真实手机 App 验收。
+- 镜像明确缺少 post1 时，仅本次迁移改用官方 PyPI，原镜像设置不变。post1 Console 693 个测试文件、8926 项通过（2 项预期失败），Rust 406+13、静态路由 31、平台 51 项及 FPK 审计通过。详见[性能优化治理专项](docs/performance-governance-1.3.md)。
+- base-path、浏览器会话清理及精确版本哈希门禁保留；未验证的新内核版本不自动承诺兼容。WebSocket 仍返回 501。本机已安装 `1.3.3-1` 并迁移到 post1，`1.3.3-2` 尚未部署；真实 iOS 与 24 小时稳定性仍未验证。
 
 上游 WebSocket 目前不由此外壳代理，相关请求返回 501；主 Console 的 HTTP、鉴权和 SSE 流程走 Gateway 或独立反代。独立反代默认仅监听回环地址；开启外部访问时，受保护 API 仍需有效的 QwenPaw 登录会话。首次进入上游鉴权页默认使用中文，已有浏览器语言选择不会被覆盖。
 
@@ -64,7 +64,7 @@
 
 ## 升级与回退
 
-外壳升级不改变用户主动选择的内核版本。可用环境通常保留；环境缺损，或精确 `2.3.0` 的受控兼容补丁清单发生变化时，按版本钉通过同一暂存、健康检查与回滚事务修复。补丁升级可能需要重新取得相同版本依赖，不能宣称始终只复制静态文件。
+外壳升级通常保留用户主动选择的内核版本；`1.3.3` 系列会将健康的 `2.3.0` 迁移到 `2.3.0.post1`，使用同一暂存、健康检查与回滚事务。其他环境缺损按精确版本钉恢复。镜像明确缺少 post1 时，仅本次迁移改用官方 PyPI，原镜像设置不变。迁移需要联网取得目标版本依赖，用户配置、记忆与认证不重建。
 
 fnOS 不允许直接原位安装低版本 FPK。需要回到旧外壳时，先确认没有未决事务及数据格式不兼容，再通过官方「保留数据卸载 → 安装旧包 → 验证」流程操作。不要直接覆盖安装低版本。
 

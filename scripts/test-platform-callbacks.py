@@ -12,6 +12,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -1332,6 +1333,7 @@ LEGACY_UPGRADE_SAMPLES = (
     ("1.1", "2.2.2.post1", b"Version: 2.2.2.post1\r\n", "config", None),
     ("1.2", "2.3.0", b"2.3.0\n", "workspaces", None),
     ("1.2-marker", "2.3.0", b"version: 2.3.0\n", "config", b"1" * 64 + b"\n"),
+    ("post1", "2.3.0.post1", b"2.3.0.post1\n", "workspaces", None),
 )
 BASE_PATH_MARKER = ".qwenpaw-base-path-patch"
 NATIVE_RUNTIME_RECORDS = frozenset({".qwenpaw-test-runtime.pid", ".qwenpaw-test-runtime-health"})
@@ -1452,13 +1454,13 @@ def seed_legacy_runtime(fixture, sample, *, bad_import=False):
     fixture.stage_installed_helper()
 
 
-def stage_upgrade_patch(fixture, *, corrupt=False):
-    root = fixture.app / "www/patches/qwenpaw-2.3.0-base-path"
+def stage_upgrade_patch(fixture, *, corrupt=False, version="2.3.0"):
+    root = fixture.app / f"www/patches/qwenpaw-{version}-base-path"
     payload = root / "payload/console/index.html"
     payload.parent.mkdir(parents=True, exist_ok=True)
     contents = b"<!doctype html><title>isolated 1.3 payload</title>\n"
     payload.write_bytes(contents + (b"corrupted" if corrupt else b""))
-    manifest = {"schema_version": 1, "base_version": "2.3.0", "console_complete": True,
+    manifest = {"schema_version": 1, "base_version": version, "console_complete": True,
                 "files": [{"path": "console/index.html", "original_sha256": None,
                            "sha256": hashlib.sha256(contents).hexdigest()}]}
     raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
@@ -1571,12 +1573,13 @@ def case_legacy_upgrade_keep(parent, hashes, sample):
 
 def case_legacy_upgrade_exact(parent, hashes, sample):
     with legacy_upgrade_fixture(parent, "legacy-upgrade-exact-" + sample[0], hashes) as fixture:
-        seed_legacy_runtime(fixture, sample, bad_import=sample[1] != "2.3.0")
+        patched = sample[1] in {"2.3.0", "2.3.0.post1"}
+        seed_legacy_runtime(fixture, sample, bad_import=not patched)
         seed_legacy_user_data(fixture, sample[3])
         before = upgrade_data_snapshot(fixture)
         expected_patch = None
-        if sample[1] == "2.3.0":
-            expected_patch = stage_upgrade_patch(fixture)
+        if patched:
+            expected_patch = stage_upgrade_patch(fixture, version=sample[1])
             stage_upgrade_python(fixture)
         old_inode = (fixture.venv / "bin/python3").stat().st_ino
         code, output = fixture.callback("upgrade")
@@ -1608,8 +1611,63 @@ def case_legacy_upgrade_exact(parent, hashes, sample):
         require_upgrade_data_preserved(fixture, before)
 
 
+def case_post1_transition(parent, hashes):
+    sample = next(sample for sample in LEGACY_UPGRADE_SAMPLES if sample[0] == "1.2")
+    with legacy_upgrade_fixture(parent, "post1-transition", hashes) as fixture:
+        seed_legacy_runtime(fixture, sample)
+        seed_legacy_user_data(fixture, sample[3])
+        fingerprint, contents = stage_upgrade_patch(fixture, version="2.3.0.post1")
+        stage_upgrade_python(fixture)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(5)
+        mirror = f"http://127.0.0.1:{listener.getsockname()[1]}/simple"
+        (fixture.var / "pip-mirror").write_text(mirror + "\n")
+        before = upgrade_data_snapshot(fixture)
+
+        def serve_missing_post1():
+            try:
+                client, _ = listener.accept()
+                with client:
+                    client.recv(4096)
+                    body = b'<a href="qwenpaw-2.3.0.tar.gz">2.3.0</a>'
+                    client.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                                   + b"\r\nConnection: close\r\n\r\n" + body)
+            except OSError:
+                pass
+
+        thread = threading.Thread(target=serve_missing_post1, daemon=True)
+        thread.start()
+        try:
+            code, output = fixture.callback("upgrade")
+        finally:
+            listener.close()
+        require("本次迁移改用官方 PyPI" in output,
+                f"post1 transition did not report the official mirror fallback: {output[-1600:]}")
+        require(code == 0, f"post1 transition failed: {output[-1600:]}")
+        fixture.manager_identity()
+        task = fixture.wait_task()
+        require(task["seq"] == 1 and task["phase"] == "done" and not task["recovery_required"],
+                f"post1 transition did not commit cleanly: {task}")
+        require((fixture.venv / "installed").read_text().strip() == "2.3.0.post1",
+                "post1 transition kept the old runtime")
+        require(fixture.pin.read_text() == "2.3.0.post1\n", "post1 transition changed the wrong pin")
+        require((fixture.venv / BASE_PATH_MARKER).read_text() == fingerprint + "\n",
+                "post1 transition did not commit the payload fingerprint")
+        require((fixture.venv / "lib/python3.12/site-packages/qwenpaw/console/index.html").read_bytes()
+                == contents, "post1 transition did not activate the new Console")
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{fixture.service_port}/app/qwenpaw/web/api/version", timeout=2) as response:
+            require(json.loads(response.read())["version"] == "2.3.0.post1",
+                    "post1 transition health version mismatch")
+        fixture.wait_kernel()
+        require_upgrade_data_preserved(fixture, before)
+        fixture.stop_manager()
+
+
 def case_legacy_upgrade_failure(parent, hashes, failure):
-    sample = LEGACY_UPGRADE_SAMPLES[-1]
+    sample = next(sample for sample in LEGACY_UPGRADE_SAMPLES if sample[0] == "1.2-marker")
     with legacy_upgrade_fixture(parent, "legacy-upgrade-failure-" + failure, hashes) as fixture:
         seed_legacy_runtime(fixture, sample)
         seed_legacy_user_data(fixture, sample[3])
@@ -1621,7 +1679,7 @@ def case_legacy_upgrade_failure(parent, hashes, failure):
         old_runtime = file_set_snapshot(fixture.venv, NATIVE_RUNTIME_RECORDS)
         old_pin = file_set_snapshot(fixture.pin)
         code, output = fixture.callback("upgrade")
-        require(code != 0, f"injected {failure} failure was reported successful")
+        require(code != 0, f"injected {failure} failure was reported successful: {output[-1600:]}")
         fixture.manager_identity()
         if failure == "preflight":
             require("哈希不匹配" in output, f"payload preflight failure was not reached: {output[-1600:]}")
@@ -1703,6 +1761,8 @@ def main():
                      lambda sample=sample: case_legacy_upgrade_keep(parent, hashes, sample), failures)
             run_case(f"legacy-upgrade {sample[0]} exact {sample[1]} rebuild preserves all user data and modes",
                      lambda sample=sample: case_legacy_upgrade_exact(parent, hashes, sample), failures)
+        run_case("healthy 2.3.0 transitions to post1 without losing user data",
+                 lambda: case_post1_transition(parent, hashes), failures)
         for failure in ("preflight", "bootstrap", "network"):
             run_case(f"legacy-upgrade {failure} failure rolls back runtime with zero data loss",
                      lambda failure=failure: case_legacy_upgrade_failure(parent, hashes, failure), failures)

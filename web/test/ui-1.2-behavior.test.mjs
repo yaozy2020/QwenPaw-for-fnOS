@@ -397,10 +397,11 @@ browserTest("unchanged log windows preserve DOM nodes, selection and manual scro
   await expect(terminal).toContainText("日志 160");
   await terminal.evaluate(element => {
     element.scrollTop = 0;
-    window.originalLogNode = element.firstChild;
+    const firstLine = element.querySelector(".log-chunk > div");
+    window.originalLogNode = firstLine;
     const selection = window.getSelection();
     const range = document.createRange();
-    range.selectNodeContents(element.firstChild);
+    range.selectNodeContents(firstLine);
     selection.removeAllRanges();
     selection.addRange(range);
     window.logMutations = [];
@@ -411,7 +412,7 @@ browserTest("unchanged log windows preserve DOM nodes, selection and manual scro
   state.logs = structuredClone(logs.slice(-100));
   await page.evaluate(async () => { for (let index = 0; index < 3; index++) await window.fetchLogs(); });
   const unchanged = await terminal.evaluate(element => ({
-    sameNode: element.firstChild === window.originalLogNode,
+    sameNode: element.querySelector(".log-chunk > div") === window.originalLogNode,
     selection: window.getSelection().toString(), top: element.scrollTop,
     mutations: window.logMutations,
   }));
@@ -437,16 +438,32 @@ browserTest("log windows remain bounded and rotation replaces unrelated history"
   const { page, state } = await fixture(t, { viewport: desktop, logs });
   await page.goto(origin + prefix);
   const terminal = page.locator("#logTerminal");
-  await expect(terminal.locator("div")).toHaveCount(2000);
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
   state.logs = [...logs.slice(-99), "行 2001"];
   await page.evaluate(() => window.fetchLogs());
-  await expect(terminal.locator("div")).toHaveCount(2000);
-  await expect(terminal.locator("div").first()).toHaveText("行 2");
-  await expect(terminal.locator("div").last()).toHaveText("行 2001");
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
+  await expect(terminal.locator(".log-chunk > div").first()).toHaveText("行 2");
+  await expect(terminal.locator(".log-chunk > div").last()).toHaveText("行 2001");
   state.logs = ["轮转后的日志"];
   await page.evaluate(() => window.fetchLogs());
-  await expect(terminal.locator("div")).toHaveCount(1);
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(1);
   await expect(terminal).toHaveText("轮转后的日志");
+});
+
+browserTest("offscreen log chunks skip rendering work without discarding history", async t => {
+  const logs = Array.from({ length: 2000 }, (_, index) => `行 ${index + 1}`);
+  const { page } = await fixture(t, { viewport: desktop, logs });
+  await page.goto(origin + prefix);
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal.locator(".log-chunk")).toHaveCount(40);
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
+  await expect(terminal.locator(".log-chunk > div").last()).toHaveText("行 2000");
+  const rendering = await terminal.locator(".log-chunk").first().evaluate(element => {
+    const style = getComputedStyle(element);
+    return { contentVisibility: style.contentVisibility, intrinsicSize: style.containIntrinsicSize };
+  });
+  assert.equal(rendering.contentVisibility, "auto");
+  assert.match(rendering.intrinsicSize, /auto/);
 });
 
 browserTest("log clear discards held pre-clear responses, preserves failed clears and fetches a fresh window", async t => {

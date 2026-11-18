@@ -1,0 +1,1102 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=redefined-outer-name,unused-argument
+import asyncio
+import inspect
+import mimetypes
+import os
+import stat
+import sys
+import threading
+import time
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from ..__version__ import __version__
+from ..backup import BackupManager
+from ..backup._utils.safe_swap import cleanup_startup_restore_artifacts
+from ..cli.windows_shutdown import install_shutdown_handlers
+from ..config import load_config  # pylint: disable=no-name-in-module
+from ..config.utils import get_config_path, read_last_api
+from ..constant import (
+    CORS_ORIGINS,
+    DOCS_ENABLED,
+    LOG_LEVEL_ENV,
+    PROJECT_NAME,
+    WORKING_DIR,
+)
+from ..envs import load_envs_into_environ
+from ..local_models.manager import LocalModelManager
+from ..providers.provider_manager import ProviderManager
+from ..utils.daily_telemetry import start_daily_telemetry
+from ..utils.logging import (
+    LOG_FILE_PATH,
+    add_project_file_handler,
+    setup_logger,
+)
+from ..utils.startup_display import AgentStartupDisplay
+from ..utils.system_info import summarize_python_environment
+from .base_path import (
+    BasePathMiddleware,
+    ConsoleIndexResponse,
+    normalize_base_path,
+)
+from .console_static import ConsoleStaticFiles
+from .auth import (
+    AuthMiddleware,
+    RuntimeBoundaryMiddleware,
+    TrustedProxySchemeMiddleware,
+    auto_register_from_env,
+    check_proxy_config_sanity,
+)
+from .exception_handlers import register_exception_handlers
+from .response_compression import ResponseCompressionMiddleware
+from .migration import (
+    ensure_default_agent_exists,
+    ensure_qa_agent_exists,
+    migrate_legacy_skills_to_skill_pool,
+    migrate_legacy_workspace_to_default_agent,
+)
+from .routers.runtime import router as runtime_router
+from .routers import create_agent_scoped_router
+from .routers import router as api_router
+from .routers.advisor_mode import router as advisor_mode_router
+from .routers.agent_scoped import AgentContextMiddleware
+from .routers.approval import router as approval_router
+from .routers.coding_mode import router as coding_mode_router
+from .routers.healthz import router as healthz_router
+from .routers.loops import router as loops_router
+from .routers.tool_calls import router as tool_calls_router
+from .routers.voice import voice_router
+
+# Apply log level on load so reload child process gets same level as CLI.
+logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
+_WORKSPACE_SHUTDOWN_DEADLINE_SECONDS = 12.0
+
+# Uvicorn imports this module inside the serving process. Under ``--reload``
+# that is a spawned child, distinct from the CLI/reloader process, so it must
+# expose its own PID-scoped graceful-shutdown event.
+install_shutdown_handlers()
+
+# Ensure static assets are served with browser-compatible MIME types across
+# platforms (notably Windows may miss .js/.mjs mappings).
+mimetypes.init()
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
+mimetypes.add_type("image/svg+xml", ".svg")
+
+# Load persisted env vars into os.environ at module import time
+# so they are available before the lifespan starts.
+load_envs_into_environ()
+
+
+async def _shutdown_plugins(app: FastAPI) -> None:
+    """Tear down plugin runtime resources before other services stop."""
+    plugin_loader = getattr(app.state, "plugin_loader", None)
+    if plugin_loader is not None:
+        logger.info("Executing plugin shutdown (mode=shutdown)...")
+        from ..plugins.lifecycle import UnloadMode
+
+        reports = await plugin_loader.lifecycle.unload_all(UnloadMode.SHUTDOWN)
+        failed = [
+            report.plugin_id for report in reports if not report.quiescent
+        ]
+        if failed:
+            raise RuntimeError(
+                "Plugin shutdown incomplete: " + ", ".join(failed),
+            )
+        return
+    plugin_registry = getattr(app.state, "plugin_registry", None)
+    if plugin_registry is None:
+        return
+    logger.info("Executing plugin shutdown hooks...")
+    for hook in plugin_registry.get_shutdown_hooks():
+        try:
+            logger.info(
+                f"Executing shutdown hook '{hook.hook_name}' "
+                f"from plugin '{hook.plugin_id}' (priority"
+                f"={hook.priority})",
+            )
+            result = hook.callback()
+            if inspect.iscoroutine(result) or inspect.isawaitable(result):
+                await result
+            logger.info(
+                f"✓ Completed shutdown hook '{hook.hook_name}' "
+                f"from plugin '{hook.plugin_id}'",
+            )
+        except Exception as exc:
+            logger.error(
+                f"✗ Failed to execute shutdown hook "
+                f"'{hook.hook_name}' "
+                f"from plugin '{hook.plugin_id}': {exc}",
+                exc_info=True,
+            )
+
+
+async def _browser_idle_watchdog(kernel: Any, interval: float) -> None:
+    """Periodically reclaim idle browser workers for this app process."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await kernel.discard_idle_workers()
+            await kernel.sweep_idle_sessions()
+            await kernel.sweep_wire_spill()
+        # intentional boundary: watchdog failures must not kill the app.
+        except Exception:
+            logger.warning("Browser idle watchdog failed", exc_info=True)
+
+
+def _start_browser_runtime(app: FastAPI, kernel: Any, interval: float) -> None:
+    """Attach browser worker housekeeping to this app's lifespan."""
+    app.state.browser_kernel = kernel
+    app.state.browser_watchdog = asyncio.create_task(
+        _browser_idle_watchdog(kernel, interval),
+    )
+
+
+async def _stop_workspaces_after_dependents(
+    app: FastAPI,
+    import_jobs: Any,
+    *,
+    deadline_sec: float = _WORKSPACE_SHUTDOWN_DEADLINE_SECONDS,
+) -> None:
+    """Stop workspace dependents, hard-exiting if they cannot quiesce."""
+    completed = threading.Event()
+
+    def enforce_deadline() -> None:
+        if not completed.wait(deadline_sec):
+            # Teardown cannot safely continue while a worker still uses its
+            # workspace. Exit the whole process even for direct SIGTERM or
+            # Ctrl+C, which have no external CLI force-kill watchdog.
+            os._exit(1)  # pylint: disable=protected-access
+
+    threading.Thread(target=enforce_deadline, daemon=True).start()
+    try:
+        await _stop_workspaces_after_dependents_impl(app, import_jobs)
+    finally:
+        completed.set()
+
+
+async def _stop_workspaces_after_dependents_impl(
+    app: FastAPI,
+    import_jobs: Any,
+) -> None:
+    """Quiesce management, imports and hooks before destroying workspaces."""
+    failures = []
+    for name in (
+        "channel_ingress",
+        "channel_qrcode_sessions",
+        "channel_management",
+    ):
+        service = getattr(app.state, name, None)
+        if service is not None:
+            try:
+                await service.aclose()
+            except (Exception, asyncio.CancelledError) as exc:
+                failures.append(exc)
+    if failures:
+        for error in failures:
+            if not isinstance(error, asyncio.CancelledError):
+                raise error
+        raise failures[0]
+    imports_quiesced = await import_jobs.shutdown()
+    while not imports_quiesced:
+        # A bounded cancellation attempt is not proof that a worker has
+        # released its workspace. The process watchdog is the cutoff.
+        imports_quiesced = await import_jobs.drain()
+
+    await _shutdown_plugins(app)
+
+    # Hooks may access live workspaces. Stop them before unrelated cleanup
+    # delays the memory drain, but only after their dependents have finished.
+    multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
+    if multi_agent_mgr is not None:
+        logger.info("Stopping MultiAgentManager...")
+        try:
+            await multi_agent_mgr.stop_all()
+        except Exception as exc:
+            logger.error("Error stopping MultiAgentManager: %s", exc)
+
+
+async def _stop_browser_runtime(app: FastAPI) -> None:
+    """Cancel browser housekeeping and reclaim all browser workers."""
+    browser_watchdog = getattr(app.state, "browser_watchdog", None)
+    if browser_watchdog is not None:
+        browser_watchdog.cancel()
+        with suppress(asyncio.CancelledError):
+            await browser_watchdog
+    browser_kernel = getattr(app.state, "browser_kernel", None)
+    if browser_kernel is not None:
+        try:
+            await browser_kernel.discard_all_workers()
+        except Exception:
+            logger.error("Error shutting down browser workers", exc_info=True)
+    from ..browser.runtime.managed_playwright import (
+        stop_managed_chromium_download,
+    )
+
+    await stop_managed_chromium_download()
+
+
+@asynccontextmanager
+async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
+    app: FastAPI,
+):
+    startup_start_time = time.time()
+    add_project_file_handler(LOG_FILE_PATH)
+
+    # ================================================================
+    # Fast synchronous setup (target < 100ms)
+    # Everything here must be lightweight so the server starts quickly.
+    # ================================================================
+
+    try:
+        cleanup_startup_restore_artifacts()
+    except Exception as exc:
+        message = (
+            "QwenPaw startup failed because restore artifact cleanup did not "
+            "complete. Another restore or cleanup may still be running, or "
+            "a previous restore may need recovery before startup can safely "
+            "read restored files."
+        )
+        logger.error(message, exc_info=True)
+        raise RuntimeError(f"{message} Original error: {exc}") from exc
+
+    auto_register_from_env()
+    check_proxy_config_sanity()
+
+    try:
+        from ..utils.telemetry import (
+            collect_and_upload_telemetry,
+            has_telemetry_been_collected,
+            is_telemetry_opted_out,
+        )
+
+        if not is_telemetry_opted_out(
+            WORKING_DIR,
+        ) and not has_telemetry_been_collected(WORKING_DIR):
+            collect_and_upload_telemetry(WORKING_DIR)
+    except Exception:
+        logger.debug(
+            "Telemetry collection skipped due to error",
+            exc_info=True,
+        )
+
+    logger.debug("Checking for legacy config migration...")
+    migrate_legacy_workspace_to_default_agent()
+    ensure_default_agent_exists()
+    migrate_legacy_skills_to_skill_pool()
+    ensure_qa_agent_exists()
+
+    from ..config.utils import get_agent_dirs
+    from ..portability.transaction_journal import recover_import_transactions
+
+    try:
+        recovered_transactions = await recover_import_transactions(
+            get_agent_dirs(),
+        )
+    except Exception:
+        logger.exception(
+            "PawPort transaction recovery failed; continuing startup",
+        )
+        recovered_transactions = []
+    if recovered_transactions:
+        logger.warning(
+            "Recovered %d interrupted PawPort import transaction(s)",
+            len(recovered_transactions),
+        )
+
+    # Provider initialization scans and may migrate persisted configuration.
+    provider_manager = await asyncio.to_thread(ProviderManager.get_instance)
+    local_model_manager = await asyncio.to_thread(
+        LocalModelManager.get_instance,
+    )
+
+    # --- AppServiceManager + WorkspaceRegistry ---
+    app_services = None
+    workspace_registry = None
+    try:
+        from .app_services import AppServiceManager
+        from .workspace_registry import WorkspaceRegistry
+
+        app_services = AppServiceManager()
+        await app_services.start()
+        app.state.app_services = app_services
+
+        workspace_registry = WorkspaceRegistry(
+            app_services=app_services,
+        )
+        app.state.workspace_registry = workspace_registry
+        logger.debug("Runtime infrastructure initialized")
+
+        # --- @api_action auto-registration ---
+        _api_action_command_specs: list[Any] = []
+        try:
+            from ..api_action import ManagerRegistry
+            from ._api_action_routes import (
+                collect_slash_specs_from_api_actions,
+                register_http_routes,
+            )
+            from .crons.manager import CronManager
+
+            manager_registry = ManagerRegistry()
+
+            def _get_default_cron_mgr(app_inst: Any) -> Any:
+                mam = getattr(app_inst.state, "multi_agent_manager", None)
+                if mam is None:
+                    return None
+                # pylint: disable-next=protected-access
+                ws = mam._workspaces.get("default")
+                return getattr(ws, "cron_manager", None) if ws else None
+
+            manager_registry.register(CronManager, _get_default_cron_mgr)
+            app.state.manager_registry = manager_registry
+
+            n_routes = register_http_routes(app, manager_registry)
+            logger.debug("Auto-registered %d HTTP routes", n_routes)
+
+            _api_action_command_specs.extend(
+                collect_slash_specs_from_api_actions(manager_registry),
+            )
+            logger.debug(
+                "Collected %d slash specs from @api_action",
+                len(_api_action_command_specs),
+            )
+        except Exception:
+            logger.debug(
+                "@api_action auto-registration skipped",
+                exc_info=True,
+            )
+
+        # --- HITL slash commands ---
+        try:
+            from .app_services._builtin_tool_commands import (
+                build_tool_command_specs,
+            )
+
+            _api_action_command_specs.extend(
+                build_tool_command_specs(app_services.tool_coordinator),
+            )
+            logger.debug("HITL tool commands registered")
+        except Exception:
+            logger.debug(
+                "HITL tool command registration skipped",
+                exc_info=True,
+            )
+
+        # --- Use shared bootstrap factory ---
+        from .workspace.bootstrap_factory import WorkspaceBootstrapFactory
+
+        factory_kwargs = WorkspaceBootstrapFactory.build_bootstrap_kwargs(
+            app_services,
+            extra_command_specs=(
+                _api_action_command_specs
+                if _api_action_command_specs
+                else None
+            ),
+        )
+        # Merge factory output into workspace_registry._bootstrap_kwargs
+        for key, value in factory_kwargs.items():
+            # pylint: disable-next=protected-access
+            workspace_registry._bootstrap_kwargs[key] = value
+
+        # Warm descriptor-driven caches off the event loop so the first
+        # /tools or agent-config path does not pay full import cost inline.
+        def _warm_descriptor_caches() -> None:
+            from ..config.config import _default_builtin_tools
+            from ..governance.policy import get_default_user_rules
+            from ..governance.tool_registry import DEFAULT_REGISTRY
+
+            DEFAULT_REGISTRY.get_all_tool_names()
+            _default_builtin_tools()
+            get_default_user_rules()
+
+        try:
+            await asyncio.to_thread(_warm_descriptor_caches)
+        except Exception:
+            logger.debug(
+                "Descriptor cache warm-up skipped",
+                exc_info=True,
+            )
+
+    except Exception:
+        logger.debug(
+            "Runtime infrastructure init skipped",
+            exc_info=True,
+        )
+
+    backup_manager = BackupManager()
+
+    # Start token usage manager background tasks
+    logger.debug("Starting TokenUsageManager background tasks...")
+    from ..token_usage import get_token_usage_manager
+
+    token_usage_manager = get_token_usage_manager()
+    token_usage_manager.start(flush_interval=10)
+
+    # Expose to endpoints (must be set before first request arrives).
+    # WorkspaceRegistry IS-A MultiAgentManager — backward compat for
+    # routers / agent_context that read app.state.multi_agent_manager.
+    app.state.multi_agent_manager = workspace_registry
+    app.state.provider_manager = provider_manager
+    app.state.local_model_manager = local_model_manager
+    app.state.backup_manager = backup_manager
+    app.state.plugin_loader = None
+    app.state.plugin_registry = None
+    app.state.channel_management = None
+    app.state.channel_qrcode_sessions = None
+
+    async def _get_agent_by_id(agent_id: str = None):
+        """Get agent instance by ID, or active agent if not specified."""
+        if agent_id is None:
+            config = load_config(get_config_path())
+            agent_id = config.agents.active_agent or "default"
+        return await workspace_registry.get_agent(agent_id)
+
+    app.state.get_agent_by_id = _get_agent_by_id
+
+    app.state.startup_ready = asyncio.Event()
+    app.state.market_ready = asyncio.Event()
+    app.state.market_startup_failed = False
+    app.state.startup_time = startup_start_time
+    from ..browser.execution.kernel import get_default_kernel_manager
+
+    browser_config = load_config(get_config_path()).browser
+    _start_browser_runtime(
+        app,
+        get_default_kernel_manager(),
+        max(0.1, browser_config.idle_ttl_seconds),
+    )
+    try:
+        from ..browser.control_link.chrome.ws_handler import prime_bridge_token
+
+        prime_bridge_token()
+    except Exception:
+        logger.warning("Bridge token priming failed", exc_info=True)
+
+    # Resolving the process timezone can run subprocess probes (POSIX
+    # `timedatectl`), so warm the cache off the event loop here rather than
+    # letting the first chat-history request pay for it. Best-effort: the
+    # cache is populated lazily anyway.
+    try:
+        from .chats.utils import _process_local_tz
+
+        await asyncio.to_thread(_process_local_tz)
+    except Exception:
+        logger.debug("Timezone prewarm skipped", exc_info=True)
+
+    fast_elapsed = time.time() - startup_start_time
+    logger.info(
+        f"Server ready in {fast_elapsed:.3f}s (agents loading in background)",
+    )
+
+    # ================================================================
+    # Background heavy initialization
+    # Agents, plugins, and services start in a background task so the
+    # server can begin accepting HTTP requests immediately.
+    # First API requests that need an agent will await its readiness
+    # via MultiAgentManager.get_agent() lazy-loading / event wait.
+    # ================================================================
+
+    startup_display = AgentStartupDisplay(read_last_api()).start()
+
+    async def _background_startup():  # pylint: disable=too-many-statements
+        try:
+            # ---- Plugin System (phase 1: startup-critical plugins) ----
+            # Channels, memory backends and Hubs register before readiness.
+            logger.debug("Initializing plugin system...")
+
+            from ..config.utils import get_plugins_dir
+            from ..plugins.loader import PluginLoader
+            from ..plugins.runtime import RuntimeHelpers
+
+            # PawApps install into the plugins dir alongside other plugins
+            # and load through the same pipeline as 'app'-type plugins
+            # (plugin.json carrying meta.pawapp); surfaced only in the App
+            # Center, hidden from the sidebar.
+            from ..market.builtin import seed_builtin_hub_plugins
+
+            try:
+                await asyncio.to_thread(
+                    seed_builtin_hub_plugins,
+                    get_plugins_dir(),
+                )
+            except (OSError, ValueError, TimeoutError):
+                logger.exception("Could not initialize default Hub plugins")
+
+            plugin_dirs = [get_plugins_dir()]
+
+            from ..plugins.official_channels import (
+                provision_bundled_channels,
+                resolve_default_channel_runtime,
+            )
+
+            try:
+                channel_runtime = await asyncio.to_thread(
+                    resolve_default_channel_runtime,
+                )
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                logger.exception("Official channel runtime unavailable")
+                channel_runtime = None
+            plugin_loader = await PluginLoader.create(
+                plugin_dirs,
+                channel_runtime=channel_runtime,
+            )
+            from ..cli.app_cmd import _dependency_restart
+
+            if _dependency_restart is not None:
+                import signal
+
+                plugin_loader.dependency_upgrade_restart = _dependency_restart
+                plugin_loader.dependency_upgrade_shutdown = (
+                    lambda: signal.raise_signal(signal.SIGINT)
+                )
+            from .channels.management import ChannelManagementService
+            from .channels.qrcode_sessions import ChannelQRCodeSessions
+
+            app.state.plugin_loader = plugin_loader
+            app.state.plugin_registry = plugin_loader.registry
+            from .channels.ingress import ChannelIngressService
+            from .server_context import server_port
+            from .auth import is_trusted_proxy
+
+            app.state.channel_ingress = ChannelIngressService(
+                plugin_loader.registry,
+                host_port=server_port(app),
+                trusted_proxy=is_trusted_proxy,
+            )
+            plugin_loader.registry.channel_ingress_service = (
+                app.state.channel_ingress
+            )
+            app.state.channel_management = ChannelManagementService(
+                plugin_loader,
+            )
+            app.state.channel_qrcode_sessions = ChannelQRCodeSessions(
+                plugin_loader,
+                app.state.channel_management,
+            )
+            workspace_registry.channel_qrcode_sessions = (
+                app.state.channel_qrcode_sessions
+            )
+
+            plugin_loader.registry.set_workspace_manager(workspace_registry)
+            plugin_loader.registry.set_plugin_http_app(app)
+            app.state.plugin_registry = plugin_loader.registry
+
+            config = load_config(get_config_path())
+            plugin_configs = (
+                config.plugins if hasattr(config, "plugins") else {}
+            )
+            logger.debug(
+                f"Loading plugins with {len(plugin_configs)} config(s)",
+            )
+
+            # Phase 1: register only; projection waits for activate_all
+            await plugin_loader.load_all_plugins(
+                configs=plugin_configs,
+                types=["channel", "memory", "hub"],
+                activate=False,
+            )
+            try:
+                seed_errors = await provision_bundled_channels(plugin_loader)
+                for plugin_id, reason in seed_errors.items():
+                    logger.warning(
+                        "Official channel %s needs repair: %s",
+                        plugin_id,
+                        reason,
+                    )
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                logger.exception("Official channel migration pending")
+            logger.debug("Phase 1: channel, memory and Hub plugins loaded")
+            app.state.market_ready.set()
+
+            def _mark_core_agents_ready(_results: dict[str, bool]) -> None:
+                """Publish readiness after the core agent phase."""
+                core_elapsed = time.time() - startup_start_time
+                logger.info(f"Core agents ready in {core_elapsed:.3f}s")
+                startup_display.mark_core_ready(core_elapsed)
+                app.state.startup_ready.set()
+
+            startup_results = (
+                await workspace_registry.start_all_configured_agents(
+                    on_core_ready=_mark_core_agents_ready,
+                    startup_display=startup_display,
+                )
+            )
+            if startup_results.get("default") is False:
+                startup_display.mark_failed(
+                    "Default agent failed to start",
+                )
+            elif app.state.startup_ready.is_set():
+                startup_display.mark_finalizing()
+
+            provider_manager.start_local_model_resume(local_model_manager)
+            startup_provider_ids = provider_manager.startup_sync_provider_ids()
+            asyncio.create_task(
+                provider_manager.sync_startup_provider_models(
+                    startup_provider_ids,
+                ),
+                name="qwenpaw-provider-model-sync",
+            )
+            asyncio.create_task(
+                provider_manager.sync_remote_catalogs(),
+                name="qwenpaw-provider-catalog-sync",
+            )
+
+            # Phase 2: load remaining plugins (channel plugins already
+            # loaded — load_plugin skips them automatically)
+            loaded_plugins = await plugin_loader.load_all_plugins(
+                configs=plugin_configs,
+                activate=False,
+            )
+            logger.debug(f"Loaded {len(loaded_plugins)} plugin(s)")
+
+            runtime_helpers = RuntimeHelpers(
+                provider_manager=provider_manager,
+            )
+            plugin_loader.registry.set_runtime_helpers(runtime_helpers)
+            plugin_loader.registry.set_workspace_manager(
+                workspace_registry,
+            )
+
+            app.state.plugin_loader = plugin_loader
+            app.state.plugin_registry = plugin_loader.registry
+
+            logger.debug("Activating loaded plugins...")
+            await plugin_loader.activate_all_loaded()
+
+            # ---- Approval Service ----
+            try:
+                default_agent = await workspace_registry.get_agent(
+                    "default",
+                )
+                if default_agent.channel_manager:
+                    from .approvals import get_approval_service
+
+                    get_approval_service().set_channel_manager(
+                        default_agent.channel_manager,
+                    )
+            except Exception as e:
+                logger.warning(f"Approval service setup skipped: {e}")
+
+            # ---- Skill Pool builtin update + workspace auto-sync ----
+            try:
+                from ..agents.skill_system import run_pool_automation_pipeline
+                from .routers.skills import post_pool_automation_inbox
+
+                result = await asyncio.to_thread(
+                    run_pool_automation_pipeline,
+                )
+                await post_pool_automation_inbox(result)
+            except Exception:
+                logger.warning(
+                    "Skill Pool automation skipped on startup",
+                    exc_info=True,
+                )
+
+            # ---- Orphan skill staging dirs ----
+            # Best-effort housekeeping: a leaked stage dir is harmless, so
+            # cleanup must never gate startup on temp-dir I/O.
+            try:
+                from ..agents.skill_system import (
+                    cleanup_orphan_skill_stages,
+                )
+
+                removed = await asyncio.to_thread(
+                    cleanup_orphan_skill_stages,
+                )
+                if removed:
+                    logger.info(
+                        "Removed %d orphan skill staging dir(s)",
+                        removed,
+                    )
+            except Exception:
+                logger.warning(
+                    "Orphan skill staging cleanup skipped",
+                    exc_info=True,
+                )
+
+            startup_elapsed = time.time() - startup_start_time
+            logger.info(
+                "Background startup completed in "
+                f"{startup_elapsed:.3f} seconds",
+            )
+            if app.state.startup_ready.is_set():
+                startup_display.complete(startup_elapsed)
+
+        except Exception:
+            logger.error(
+                "Background startup encountered an error",
+                exc_info=True,
+            )
+        finally:
+            if not app.state.market_ready.is_set():
+                app.state.market_startup_failed = True
+                app.state.market_ready.set()
+
+    from .community_connection import CommunityConnectionService
+
+    community_service = CommunityConnectionService()
+    app.state.community_connection_service = community_service
+    community_task = asyncio.create_task(community_service.poll_loop())
+    _bg_task = asyncio.create_task(_background_startup())
+    daily_telemetry = start_daily_telemetry()
+
+    try:
+        yield
+    finally:
+        await daily_telemetry.close()
+        community_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await community_task
+        await community_service.close()
+
+        # Cancel background startup if still in progress
+        if not _bg_task.done():
+            _bg_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await _bg_task
+
+        # Import jobs can write workspaces and install plugins. Stop them
+        # before closing the services they depend on.
+        from .routers.portability_imports import PORTABILITY_IMPORT_JOBS
+
+        await _stop_workspaces_after_dependents(app, PORTABILITY_IMPORT_JOBS)
+
+        logger.info("Stopping BackupManager...")
+        await backup_manager.shutdown()
+
+        await _stop_browser_runtime(app)
+        from ..agents.tools import shutdown_browser_runtime
+
+        await shutdown_browser_runtime()
+
+        local_model_mgr = getattr(app.state, "local_model_manager", None)
+        if local_model_mgr is not None:
+            logger.info("Stopping local model server...")
+            try:
+                await local_model_mgr.shutdown_server()
+            except Exception as exc:
+                logger.error(
+                    "Error shutting down local model server gracefully: %s",
+                    exc,
+                )
+                with suppress(OSError, RuntimeError, ValueError):
+                    local_model_mgr.shutdown_server_sync()
+
+        # Stop AppServiceManager (ToolCoordinator shutdown, etc.)
+        _app_svc = getattr(app.state, "app_services", None)
+        if _app_svc is not None:
+            try:
+                await _app_svc.stop()
+            except Exception as e:
+                logger.error(f"Error stopping AppServiceManager: {e}")
+
+        # These three cleanup tasks are independent; run in parallel.
+        from ..agents.skill_system.hub import aclose_hub_client
+
+        async def _stop_token_usage():
+            logger.info("Stopping TokenUsageManager...")
+            try:
+                await token_usage_manager.stop()
+            except Exception as e:
+                logger.error(
+                    f"Error stopping TokenUsageManager: {e}",
+                )
+
+        async def _close_hub():
+            try:
+                await aclose_hub_client()
+            except Exception as e:
+                logger.error(
+                    f"Error closing skills hub HTTP client: {e}",
+                )
+
+        await asyncio.gather(
+            _stop_token_usage(),
+            _close_hub(),
+        )
+
+        # Destroy Windows sandbox artifacts (user accounts, profiles, ACLs,
+        # firewall rules). Runs in a thread because it invokes subprocess
+        # calls (takeown, icacls, net user, powershell) that may block.
+        if sys.platform == "win32":
+            try:
+                from ..sandbox import shutdown_all_sandboxes
+
+                logger.info("Cleaning up Windows sandbox artifacts...")
+                await asyncio.to_thread(shutdown_all_sandboxes)
+                logger.info("Windows sandbox cleanup complete.")
+            except Exception as e:
+                logger.error(f"Error during sandbox cleanup: {e}")
+
+        logger.info("Application shutdown complete")
+        startup_display.stop()
+
+
+_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
+
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url="/docs" if DOCS_ENABLED else None,
+    redoc_url="/redoc" if DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if DOCS_ENABLED else None,
+)
+register_exception_handlers(app)
+
+# Compress large JSON responses such as skill and workspace listings.
+app.add_middleware(ResponseCompressionMiddleware, minimum_size=1000)
+
+# Add agent context middleware for agent-scoped routes
+app.add_middleware(AgentContextMiddleware)
+
+app.add_middleware(AuthMiddleware)
+app.add_middleware(TrustedProxySchemeMiddleware)
+app.add_middleware(RuntimeBoundaryMiddleware)
+
+# Apply CORS middleware if CORS_ORIGINS is set
+if CORS_ORIGINS:
+    origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
+    )
+
+
+_CONSOLE_STATIC_ENV = "QWENPAW_CONSOLE_STATIC_DIR"
+
+
+def _resolve_console_static_dir() -> str:
+    from ..constant import EnvVarLoader
+
+    static_dir = EnvVarLoader.get_str(_CONSOLE_STATIC_ENV)
+    if static_dir:
+        return static_dir
+    # Shipped dist lives in the package as static data
+    pkg_dir = Path(__file__).resolve().parent.parent
+    candidate = pkg_dir / "console"
+    if candidate.is_dir() and (candidate / "index.html").exists():
+        return str(candidate)
+
+    # Fallback to repo data
+    repo_dir = pkg_dir.parent.parent
+    candidate = repo_dir / "console" / "dist"
+    if candidate.is_dir() and (candidate / "index.html").exists():
+        return str(candidate)
+
+    # Fallback to cwd data
+    cwd = Path(os.getcwd())
+    for subdir in ("console/dist", "console_dist"):
+        candidate = cwd / subdir
+        if candidate.is_dir() and (candidate / "index.html").exists():
+            return str(candidate)
+
+    fallback = cwd / "console" / "dist"
+    logger.warning(
+        f"Console static directory not found. Falling back to '{fallback}'.",
+    )
+    return str(fallback)
+
+
+_CONSOLE_STATIC_DIR = _resolve_console_static_dir()
+_CONSOLE_INDEX = (
+    Path(_CONSOLE_STATIC_DIR) / "index.html" if _CONSOLE_STATIC_DIR else None
+)
+logger.info(f"STATIC_DIR: {_CONSOLE_STATIC_DIR}")
+
+# The SPA entry (index.html) must never be cached: it references content-hashed
+# JS/CSS bundles, so a stale cached index.html would keep pointing the WebView
+# at old asset hashes after a rebuild (see desktop dev cache issue). The hashed
+# assets under /assets remain safely cacheable because their name changes with
+# their content.
+_INDEX_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    # Pragma/Expires cover legacy proxies and older WebView caches that do not
+    # honor Cache-Control on their own.
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+@app.delete("/api/hub/pawapps/sessions", status_code=204)
+def clear_browser_sessions(request: Request):
+    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
+
+    response = Response(status_code=204)
+    clear_sessions(request, response)
+    if _BASE_PATH:
+        for name in request.cookies:
+            if name.startswith(COOKIE_PREFIX):
+                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
+    return response
+
+
+@app.get("/")
+def read_root():
+    if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+        return ConsoleIndexResponse(
+            _CONSOLE_INDEX,
+            base_path=_BASE_PATH,
+            headers=_INDEX_NO_CACHE_HEADERS,
+        )
+    return {
+        "message": (
+            f"{PROJECT_NAME} web console is not available. "
+            "If you installed the project from source code, please run "
+            "`npm ci && npm run build` in the `console/` "
+            f"directory, and restart {PROJECT_NAME} to enable the "
+            "web console."
+        ),
+    }
+
+
+@app.get("/api/version")
+def get_version():
+    """Return the current application version (public-safe payload)."""
+    return {
+        "version": __version__,
+    }
+
+
+@app.get("/api/doctor/runtime")
+def get_doctor_runtime():
+    """Return server runtime diagnostics for authenticated troubleshooting."""
+    return {
+        "python_executable": sys.executable,
+        "python_environment": summarize_python_environment(),
+    }
+
+
+app.include_router(runtime_router)
+
+
+app.include_router(api_router, prefix="/api")
+
+# These registrations require the fully constructed application instance.
+# pylint: disable-next=wrong-import-position,wrong-import-order
+from qwenpaw.browser.control_link import (  # noqa: E402
+    register_builtin_control_links,
+)
+
+# pylint: disable-next=wrong-import-position,wrong-import-order
+from qwenpaw.browser.control_link.chrome.ws_handler import (  # noqa: E402
+    ws_router as browser_chrome_ws_router,
+)
+
+# pylint: disable-next=wrong-import-position,wrong-import-order
+from qwenpaw.browser.control_link.chrome.observe import (  # noqa: E402
+    status_router as browser_chrome_status_router,
+)
+
+app.include_router(browser_chrome_ws_router, prefix="/api")
+app.include_router(browser_chrome_status_router, prefix="/api")
+register_builtin_control_links()
+
+app.include_router(healthz_router, prefix="/api")
+
+app.include_router(tool_calls_router, prefix="/api")
+
+# Approval router: /api/approval/approve, /api/approval/deny, etc.
+app.include_router(approval_router, prefix="/api")
+
+# Coding Mode router: /api/coding-mode
+app.include_router(coding_mode_router, prefix="/api")
+
+# Advisor Mode router: /api/advisor-mode
+app.include_router(advisor_mode_router, prefix="/api")
+
+# Loops router: /api/loops
+app.include_router(loops_router, prefix="/api")
+
+# Agent-scoped router: /api/agents/{agentId}/chats, etc.
+agent_scoped_router = create_agent_scoped_router()
+app.include_router(agent_scoped_router, prefix="/api")
+
+# Voice channel: Twilio-facing endpoints at root level (not under /api/).
+# POST /voice/incoming, WS /voice/ws, POST /voice/status-callback
+app.include_router(voice_router, tags=["voice"])
+
+
+# Console static files and SPA fallback
+# Register these AFTER API routes to ensure proper routing priority
+if os.path.isdir(_CONSOLE_STATIC_DIR):
+    _console_path = Path(_CONSOLE_STATIC_DIR)
+    _console_static = StaticFiles(
+        directory=str(_console_path),
+        check_dir=False,
+    )
+
+    def _serve_console_index():
+        if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+            return ConsoleIndexResponse(
+                _CONSOLE_INDEX,
+                base_path=_BASE_PATH,
+                headers=_INDEX_NO_CACHE_HEADERS,
+            )
+
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    _assets_dir = _console_path / "assets"
+    if _assets_dir.is_dir():
+        app.mount(
+            "/assets",
+            ConsoleStaticFiles(directory=str(_assets_dir)),
+            name="assets",
+        )
+
+    @app.get("/console")
+    @app.get("/console/")
+    @app.get("/console/{full_path:path}")
+    def _console_spa_alias(full_path: str = ""):
+        _ = full_path
+        return _serve_console_index()
+
+    # SPA fallback: catch-all route for frontend routing
+    # Must be registered AFTER all API routes to avoid conflicts
+    @app.get(
+        "/{full_path:path}",
+        name="qwenpaw_console_spa_catchall",
+    )
+    def _console_spa(full_path: str):
+        # Prevent catching common system/special paths
+        if full_path in ("docs", "redoc", "openapi.json"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        # Skip API routes (should already be matched due to registration order)
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # Serve static files from the console build directory (e.g. logo SVGs,
+        # favicons, images placed in public/).  Only serve regular files whose
+        # path does not escape the console directory.
+        if full_path and ".." not in full_path:
+            try:
+                static_file, file_stat = _console_static.lookup_path(full_path)
+            except (OSError, ValueError):
+                return _serve_console_index()
+            if file_stat and stat.S_ISREG(file_stat.st_mode):
+                if Path(static_file) == _CONSOLE_INDEX:
+                    return _serve_console_index()
+                headers = (
+                    _INDEX_NO_CACHE_HEADERS
+                    if Path(static_file).suffix.lower() in (".html", ".htm")
+                    else {"Cache-Control": "public, max-age=300"}
+                )
+                return FileResponse(
+                    static_file, stat_result=file_stat, headers=headers,
+                )
+
+        return _serve_console_index()
+
+
+app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)

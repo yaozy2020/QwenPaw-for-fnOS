@@ -878,6 +878,10 @@ input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
   word-break: normal;
   overflow-wrap: anywhere;
 }
+.terminal-body > .log-chunk {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80em;
+}
 .terminal-body::-webkit-scrollbar { width: 6px; height: 6px; }
 .terminal-body::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);

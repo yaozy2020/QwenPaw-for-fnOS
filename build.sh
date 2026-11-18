@@ -183,13 +183,14 @@ elif command -v gzip >/dev/null 2>&1; then
 fi
 
 # 携带后端兼容补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite。
-PATCH_STAGE="$STAGE/app/www/patches/qwenpaw-2.3.0-base-path"
-if [ ! -f "$PROJ_DIR/patches/qwenpaw-2.3.0-base-path/manifest.json" ]; then
-  echo -e "${RED}ERROR: base-path 后端补丁清单缺失${NC}"
+PATCH_NAME="qwenpaw-2.3.0.post1-base-path"
+if [ ! -f "$PROJ_DIR/patches/$PATCH_NAME/manifest.json" ]; then
+  echo -e "${RED}ERROR: base-path 后端补丁清单缺失: $PATCH_NAME${NC}"
   exit 1
 fi
+PATCH_STAGE="$STAGE/app/www/patches/$PATCH_NAME"
 mkdir -p "$STAGE/app/www/patches"
-cp -R "$PROJ_DIR/patches/qwenpaw-2.3.0-base-path" "$PATCH_STAGE"
+cp -R "$PROJ_DIR/patches/$PATCH_NAME" "$PATCH_STAGE"
 find "$PATCH_STAGE" -type f -exec chmod 0644 {} +
 
 # 统一所有目录为 0755 (P1-3 权限归一化)

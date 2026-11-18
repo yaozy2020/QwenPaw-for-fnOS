@@ -1,0 +1,1639 @@
+diff --git a/console/index.html b/console/index.html
+index 50ff10a..2d93924 100755
+--- a/console/index.html
++++ b/console/index.html
+@@ -1,8 +1,13 @@
+ <!doctype html>
+ <html lang="en">
+   <head>
++    <base href="/" />
++    <script>
++      window.__qpBase = "";
++      window.__qpBaseUrl = window.__qpBase + "/";
++    </script>
+     <meta charset="UTF-8" />
+-    <link rel="icon" type="image/svg+xml" href="/online.svg" />
++    <link rel="icon" type="image/svg+xml" href="online.svg" />
+     <meta
+       name="viewport"
+       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+@@ -148,11 +153,11 @@
+     <div id="root">
+       <div class="qwenpaw-boot" role="status" aria-live="polite">
+         <div class="qwenpaw-boot__content">
+-          <img class="qwenpaw-boot__logo" src="/qwenpaw.png" alt="QwenPaw" />
++          <img class="qwenpaw-boot__logo" src="qwenpaw.png" alt="QwenPaw" />
+           <span class="qwenpaw-boot__label">Loading Console</span>
+         </div>
+       </div>
+     </div>
+-    <script type="module" src="/src/main.tsx"></script>
++    <script type="module" src="./src/main.tsx"></script>
+   </body>
+ </html>
+diff --git a/console/scripts/bounded-preload.test.ts b/console/scripts/bounded-preload.test.ts
+new file mode 100755
+index 0000000..e48125f
+--- /dev/null
++++ b/console/scripts/bounded-preload.test.ts
+@@ -0,0 +1,71 @@
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++beforeEach(() => {
++  document.head.innerHTML = "";
++  vi.resetModules();
++  vi.spyOn(DOMTokenList.prototype, "supports").mockReturnValue(true);
++});
++
++describe("bounded Console preloading", () => {
++  it("bounds simultaneous loads across imports, deduplicates dependencies and waits before importing", async () => {
++    const { __vitePreload, PRELOAD_CONCURRENCY } = await import(
++      "./bounded-preload"
++    );
++    const factory = vi.fn(async () => "loaded");
++    const dependencies = Array.from(
++      { length: 40 },
++      (_, i) => `/assets/${i}.js`,
++    );
++    const first = __vitePreload(factory, dependencies, location.href);
++    const second = __vitePreload(factory, dependencies, location.href);
++    expect(document.querySelectorAll("link")).toHaveLength(PRELOAD_CONCURRENCY);
++    expect(factory).not.toHaveBeenCalled();
++    let completed = 0;
++    const seen = new Set<Element>();
++    while (completed < dependencies.length) {
++      for (const link of document.querySelectorAll("link")) {
++        if (seen.has(link)) continue;
++        seen.add(link);
++        link.dispatchEvent(new Event("load"));
++        completed += 1;
++      }
++      await new Promise((resolve) => setTimeout(resolve, 0));
++      expect(
++        document.querySelectorAll("link").length - completed,
++      ).toBeLessThanOrEqual(PRELOAD_CONCURRENCY);
++    }
++    await expect(first).resolves.toBe("loaded");
++    await expect(second).resolves.toBe("loaded");
++    expect(document.querySelectorAll("link")).toHaveLength(40);
++    expect(factory).toHaveBeenCalledTimes(2);
++  });
++
++  it("preserves prefix resolution, stylesheets and CSP nonces", async () => {
++    document.head.innerHTML =
++      '<meta property="csp-nonce" nonce="example-nonce">';
++    const { __vitePreload } = await import("./bounded-preload");
++    const result = __vitePreload(
++      async () => 7,
++      ["./style.css"],
++      "https://example.org/app/qwenpaw/web/main.js",
++    );
++    const link = document.querySelector("link")!;
++    expect(link.href).toBe("https://example.org/app/qwenpaw/web/style.css");
++    expect(link.rel).toBe("stylesheet");
++    expect(link.nonce).toBe("example-nonce");
++    link.dispatchEvent(new Event("load"));
++    await expect(result).resolves.toBe(7);
++  });
++
++  it("does not run the importer after a failed preload and reports Vite's recovery event", async () => {
++    const { __vitePreload } = await import("./bounded-preload");
++    const listener = vi.fn();
++    window.addEventListener("vite:preloadError", listener, { once: true });
++    const factory = vi.fn();
++    const result = __vitePreload(factory, ["/assets/broken.js"], location.href);
++    document.querySelector("link")!.dispatchEvent(new Event("error"));
++    await expect(result).rejects.toMatchObject({ name: "ChunkLoadError" });
++    expect(listener).toHaveBeenCalledOnce();
++    expect(factory).not.toHaveBeenCalled();
++  });
++});
+diff --git a/console/scripts/bounded-preload.ts b/console/scripts/bounded-preload.ts
+new file mode 100755
+index 0000000..a9aca34
+--- /dev/null
++++ b/console/scripts/bounded-preload.ts
+@@ -0,0 +1,71 @@
++export const PRELOAD_CONCURRENCY = 16;
++const pending = new Map<string, Promise<void>>();
++const waiting: (() => void)[] = [];
++let active = 0;
++
++function pump(): void {
++  while (active < PRELOAD_CONCURRENCY && waiting.length) {
++    active += 1;
++    waiting.shift()!();
++  }
++}
++
++function preload(dependency: string, importerUrl: string): Promise<void> {
++  const href = new URL(dependency, importerUrl).href;
++  const existing = pending.get(href);
++  if (existing) return existing;
++  const css = new URL(href).pathname.endsWith(".css");
++  if (
++    !css &&
++    !document.createElement("link").relList.supports("modulepreload")
++  ) {
++    return Promise.resolve();
++  }
++  const result = new Promise<void>((resolve, reject) => {
++    waiting.push(() => {
++      const link = document.createElement("link");
++      const finish = (error?: Error) => {
++        active -= 1;
++        link.onload = link.onerror = null;
++        if (error) reject(error);
++        else resolve();
++        pump();
++      };
++      link.rel = css ? "stylesheet" : "modulepreload";
++      link.crossOrigin = "";
++      link.href = href;
++      const nonce = document.querySelector<HTMLMetaElement>(
++        'meta[property="csp-nonce"]',
++      )?.nonce;
++      if (nonce) link.nonce = nonce;
++      link.onload = () => finish();
++      link.onerror = () => {
++        const error = new Error(`Unable to preload ${href}`);
++        error.name = "ChunkLoadError";
++        finish(error);
++      };
++      document.head.appendChild(link);
++    });
++    pump();
++  });
++  pending.set(href, result);
++  return result;
++}
++
++export async function __vitePreload<T>(
++  importer: () => Promise<T>,
++  dependencies: string[] = [],
++  importerUrl = document.baseURI,
++): Promise<T | undefined> {
++  try {
++    await Promise.all(
++      dependencies.map((dependency) => preload(dependency, importerUrl)),
++    );
++    return await importer();
++  } catch (error) {
++    const event = new Event("vite:preloadError", { cancelable: true });
++    Object.assign(event, { payload: error });
++    window.dispatchEvent(event);
++    if (!event.defaultPrevented) throw error;
++  }
++}
+diff --git a/console/scripts/startup-monitor-plugin.test.ts b/console/scripts/startup-monitor-plugin.test.ts
+new file mode 100755
+index 0000000..58670ec
+--- /dev/null
++++ b/console/scripts/startup-monitor-plugin.test.ts
+@@ -0,0 +1,106 @@
++import { execFile } from "node:child_process";
++import { promisify } from "node:util";
++import { runInNewContext } from "node:vm";
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++const runNode = promisify(execFile);
++const buildMonitor = `
++  import { loadConfigFromFile } from "vite";
++  const loaded = await loadConfigFromFile(
++    { command: "build", mode: "production" }, "vite.config.ts",
++  );
++  const plugin = loaded.config.plugins.find(p => p.name === "console-startup-monitor");
++  const tags = await plugin.transformIndexHtml.handler("", { filename: "index.html", path: "/" });
++  process.stdout.write(tags[0].children);
++`;
++
++const originalUrl = location.href;
++let entry: HTMLScriptElement;
++
++afterEach(async () => {
++  document.body.innerHTML = '<div id="root">Mounted</div>';
++  await Promise.resolve();
++  entry?.remove();
++  document.body.innerHTML = "";
++  sessionStorage.clear();
++  delete window.__qpBase;
++  vi.useRealTimers();
++  history.replaceState(null, "", originalUrl);
++});
++
++describe("standalone startup monitor bundle", () => {
++  it.each([
++    ["", "", "/api/version"],
++    ["/app/qwenpaw/web", "", "/app/qwenpaw/web/api/version"],
++    ["/app/qwenpaw/web", "/backend", "/backend/api/version"],
++  ])(
++    "checks readiness with runtime %s and API base %s",
++    async (base, apiBase, versionPath) => {
++      const { stdout: monitor } = await runNode(
++        process.execPath,
++        ["--input-type=module", "-e", buildMonitor],
++        {
++          cwd: process.cwd(),
++          env: { ...process.env, VITE_API_BASE_URL: apiBase },
++        },
++      );
++      vi.useFakeTimers();
++      history.replaceState(null, "", `${base}/chat`);
++      window.__qpBase = base;
++      document.body.innerHTML =
++        '<div id="root"><div class="qwenpaw-boot"><div class="qwenpaw-boot__content">Loading</div></div></div>';
++      entry = document.createElement("script");
++      entry.type = "module";
++      entry.src = `${location.origin}${base}/assets/old-entry.js`;
++      document.head.append(entry);
++      sessionStorage.setItem(
++        "qwenpaw:chunk-reload-build",
++        JSON.stringify({ build: entry.src, attempts: 2 }),
++      );
++      const fetch = vi.fn(async (input: string) => {
++        const path = new URL(input).pathname;
++        if (path === versionPath) return Response.json({ version: "2.2.2" });
++        if (path === `${base}/chat`)
++          return new Response(
++            `<base href="${base}/"><script type="module" src="./assets/new-entry.js"></script>`,
++            { headers: { "content-type": "text/html" } },
++          );
++        if (path === `${base}/assets/new-entry.js`)
++          return new Response("export default 42;", {
++            headers: { "content-type": "text/javascript" },
++          });
++        return new Response(null, { status: 404 });
++      });
++      runInNewContext(monitor, {
++        window,
++        document,
++        navigator,
++        localStorage,
++        MutationObserver,
++        HTMLScriptElement,
++        HTMLLinkElement,
++        ErrorEvent,
++        URL,
++        DOMParser,
++        AbortController,
++        DOMException,
++        performance,
++        Date,
++        setTimeout,
++        clearTimeout,
++        fetch,
++      });
++      entry.dispatchEvent(new Event("error"));
++      await vi.advanceTimersByTimeAsync(2000);
++      expect(fetch.mock.calls.map(([url]) => new URL(url).pathname)).toContain(
++        versionPath,
++      );
++      expect(
++        JSON.parse(sessionStorage.getItem("qwenpaw:chunk-diagnostic")!),
++      ).toMatchObject({
++        serverReadiness: { outcome: "ready", attempts: 3 },
++        automaticReload: { reason: "limit-reached" },
++      });
++    },
++  );
++});
+diff --git a/console/scripts/startup-monitor-plugin.ts b/console/scripts/startup-monitor-plugin.ts
+index feaba27..731606a 100755
+--- a/console/scripts/startup-monitor-plugin.ts
++++ b/console/scripts/startup-monitor-plugin.ts
+@@ -5,7 +5,7 @@ import { build } from "esbuild";
+ import type { Plugin } from "vite";
+ 
+ /** Inline a dependency-free monitor before Vite's entry module executes. */
+-export function startupMonitorPlugin(): Plugin {
++export function startupMonitorPlugin(apiBaseUrl = ""): Plugin {
+   return {
+     name: "console-startup-monitor",
+     transformIndexHtml: {
+@@ -62,6 +62,9 @@ export function startupMonitorPlugin(): Plugin {
+             sourcefile: "console-startup-monitor.ts",
+             loader: "ts",
+           },
++          define: {
++            VITE_API_BASE_URL: JSON.stringify(apiBaseUrl),
++          },
+           bundle: true,
+           write: false,
+           format: "iife",
+diff --git a/console/src/App.tsx b/console/src/App.tsx
+index 43597cd..1808710 100755
+--- a/console/src/App.tsx
++++ b/console/src/App.tsx
+@@ -455,7 +455,9 @@ function AppInner({
+     >
+       <RuntimeAvailabilityGuard enabled={hubMode}>
+         <ChunkRecoverySuspense fallback={null}>
+-          <DesktopOSPage />
++          <PluginProvider>
++            <DesktopOSPage />
++          </PluginProvider>
+         </ChunkRecoverySuspense>
+       </RuntimeAvailabilityGuard>
+     </AuthGuard>
+@@ -495,7 +497,9 @@ function AppInner({
+               authStatus={backendInfo.authStatus}
+             >
+               <RuntimeAvailabilityGuard enabled={hubMode}>
+-                <MainLayout hubMode={hubMode} />
++                <PluginProvider>
++                  <MainLayout hubMode={hubMode} />
++                </PluginProvider>
+               </RuntimeAvailabilityGuard>
+             </AuthGuard>
+           }
+@@ -592,11 +596,7 @@ function App({
+       />
+     );
+   }
+-  return (
+-    <PluginProvider>
+-      <AppInner backendInfo={backendInfo} loadingFallback={loadingFallback} />
+-    </PluginProvider>
+-  );
++  return <AppInner backendInfo={backendInfo} loadingFallback={loadingFallback} />;
+ }
+ 
+ export default App;
+diff --git a/console/src/api/config.test.ts b/console/src/api/config.test.ts
+index cc0eaca..3387082 100755
+--- a/console/src/api/config.test.ts
++++ b/console/src/api/config.test.ts
+@@ -16,7 +16,10 @@ const setToken = (v: string) => {
+ };
+ 
+ describe("getApiUrl", () => {
+-  beforeEach(() => setViteBase(""));
++  beforeEach(() => {
++    setViteBase("");
++    delete window.__qpBase;
++  });
+ 
+   it("prepends /api prefix when base is empty", () => {
+     expect(getApiUrl("/models")).toBe("/api/models");
+@@ -41,6 +44,13 @@ describe("getApiUrl", () => {
+       "/api/models/openai/config",
+     );
+   });
++
++  it("uses the server-injected prefix for same-origin API requests", () => {
++    window.__qpBase = "/app/qwenpaw/web";
++    expect(getApiUrl("/models")).toBe("/app/qwenpaw/web/api/models");
++    setViteBase("http://localhost:8088");
++    expect(getApiUrl("/models")).toBe("http://localhost:8088/api/models");
++  });
+ });
+ 
+ describe("getApiToken", () => {
+diff --git a/console/src/api/config.ts b/console/src/api/config.ts
+index e2f4b63..d52aa53 100755
+--- a/console/src/api/config.ts
++++ b/console/src/api/config.ts
+@@ -1,3 +1,5 @@
++import { getRuntimeBasePath } from "../utils/runtimeBasePath";
++
+ declare const VITE_API_BASE_URL: string;
+ declare const TOKEN: string;
+ 
+@@ -10,7 +12,7 @@ export function setRuntimeApiBaseUrl(url: string): void {
+ }
+ 
+ export function getApiBaseUrl(): string {
+-  return runtimeApiBaseUrl ?? VITE_API_BASE_URL ?? "";
++  return runtimeApiBaseUrl ?? (VITE_API_BASE_URL || getRuntimeBasePath());
+ }
+ 
+ let authCleanup: Promise<unknown> = Promise.resolve();
+diff --git a/console/src/layouts/AppBrand.tsx b/console/src/layouts/AppBrand.tsx
+index c1bf0ed..6249d28 100755
+--- a/console/src/layouts/AppBrand.tsx
++++ b/console/src/layouts/AppBrand.tsx
+@@ -23,6 +23,7 @@ import { useTheme } from "../contexts/ThemeContext";
+ import { Slot } from "../plugins/registry/Slot";
+ import { isDesktopApp } from "../tauri/backendRuntime";
+ import { openExternalLink } from "../utils/openExternalLink";
++import { getConsoleAssetUrl } from "../utils/runtimeBasePath";
+ import {
+   compareVersions,
+   getReleaseNotesUrl,
+@@ -296,9 +297,9 @@ export default function AppBrand({
+         <span className={styles.appBrandLogo} onClick={handleLogoClick}>
+           <Slot name="header.logo" kind="replace">
+             <img
+-              src={`${import.meta.env.BASE_URL}${
+-                isDark ? "logo-dark.svg" : "logo-light.svg"
+-              }`}
++              src={getConsoleAssetUrl(
++                isDark ? "logo-dark.svg" : "logo-light.svg",
++              )}
+               alt="QwenPaw"
+               className={styles.logoImg}
+             />
+diff --git a/console/src/pages/Hub/components/HubShell.test.tsx b/console/src/pages/Hub/components/HubShell.test.tsx
+new file mode 100755
+index 0000000..0c76b98
+--- /dev/null
++++ b/console/src/pages/Hub/components/HubShell.test.tsx
+@@ -0,0 +1,49 @@
++import { fireEvent, render, screen } from "@testing-library/react";
++import { Grid } from "antd";
++import { afterAll, expect, it, vi } from "vitest";
++import HubShell from "./HubShell";
++
++vi.hoisted(() => {
++  window.__qpBase = "/app/qwenpaw/web";
++});
++vi.mock("react-i18next", () => ({
++  useTranslation: () => ({ t: (key: string) => key }),
++}));
++vi.mock("../../../components/LanguageSwitcher", () => ({
++  default: () => null,
++}));
++const originalLocation = Object.getOwnPropertyDescriptor(window, "location")!;
++afterAll(() => {
++  Object.defineProperty(window, "location", originalLocation);
++  delete window.__qpBase;
++  vi.restoreAllMocks();
++});
++
++it("returns from Hub to the runtime-mounted console root", () => {
++  vi.spyOn(Grid, "useBreakpoint").mockReturnValue({ md: true });
++  const assign = vi.fn();
++  Object.defineProperty(window, "location", {
++    configurable: true,
++    value: { pathname: "/app/qwenpaw/web/hub", assign },
++  });
++  render(
++    <HubShell
++      navigation={[]}
++      section="overview"
++      onNavigate={vi.fn()}
++      healthy
++      isDark={false}
++      onToggleTheme={vi.fn()}
++      onLogout={vi.fn()}
++      onRefresh={vi.fn()}
++      refreshing={false}
++      loading={false}
++    >
++      Overview
++    </HubShell>,
++  );
++  fireEvent.click(
++    screen.getByRole("button", { name: "hub.actions.backToQwenPaw" }),
++  );
++  expect(assign).toHaveBeenCalledWith("/app/qwenpaw/web/");
++});
+diff --git a/console/src/pages/Hub/components/HubShell.tsx b/console/src/pages/Hub/components/HubShell.tsx
+index f9a3172..5874a33 100755
+--- a/console/src/pages/Hub/components/HubShell.tsx
++++ b/console/src/pages/Hub/components/HubShell.tsx
+@@ -15,6 +15,7 @@ import {
+ } from "lucide-react";
+ import LanguageSwitcher from "../../../components/LanguageSwitcher";
+ import type { Section } from "../pageUtils";
++import { addRouterBasename } from "../../../utils/navigationMode";
+ import styles from "./HubShell.module.less";
+ 
+ type Props = {
+@@ -110,7 +111,11 @@ export default function HubShell(props: Props) {
+         <button
+           className={styles.back}
+           type="button"
+-          onClick={() => window.location.assign("/")}
++          onClick={() =>
++            window.location.assign(
++              addRouterBasename(window.location.pathname, "/"),
++            )
++          }
+         >
+           <House size={17} />
+           {t("hub.actions.backToQwenPaw")}
+diff --git a/console/src/pages/Login/index.tsx b/console/src/pages/Login/index.tsx
+index 92d44a9..f36ced8 100755
+--- a/console/src/pages/Login/index.tsx
++++ b/console/src/pages/Login/index.tsx
+@@ -15,6 +15,7 @@ import { authApi } from "../../api/modules/auth";
+ import { setAuthToken } from "../../api/config";
+ import { useTheme } from "../../contexts/ThemeContext";
+ import { getPostLoginHref } from "../../utils/navigationMode";
++import { getConsoleAssetUrl } from "../../utils/runtimeBasePath";
+ import styles from "./index.module.less";
+ 
+ export default function LoginPage() {
+@@ -191,9 +192,9 @@ export default function LoginPage() {
+       >
+         <div style={{ textAlign: "center", marginBottom: 32 }}>
+           <img
+-            src={`${import.meta.env.BASE_URL}${
+-              isDark ? "logo-dark.svg" : "logo-light.svg"
+-            }`}
++            src={getConsoleAssetUrl(
++              isDark ? "logo-dark.svg" : "logo-light.svg",
++            )}
+             alt="QwenPaw"
+             style={{ height: 48, marginBottom: 12 }}
+           />
+diff --git a/console/src/utils/chunkServerReadiness.ts b/console/src/utils/chunkServerReadiness.ts
+index 2456e00..dbf01d3 100755
+--- a/console/src/utils/chunkServerReadiness.ts
++++ b/console/src/utils/chunkServerReadiness.ts
+@@ -1,3 +1,5 @@
++import { getApiUrl } from "../api/config";
++
+ const REQUEST_TIMEOUT_MS = 2500;
+ const READINESS_TIMEOUT_MS = 30_000;
+ const PROBE_INTERVAL_MS = 1000;
+@@ -136,7 +138,7 @@ export async function waitForChunkServerReady(
+       report.attempts += 1;
+       try {
+         const version = await readResponse(
+-          new URL("/api/version", page),
++          new URL(getApiUrl("/version"), page),
+           controller.signal,
+           report,
+         );
+diff --git a/console/src/utils/lazyWithRetry.ts b/console/src/utils/lazyWithRetry.ts
+index 06f0ab6..5b77974 100755
+--- a/console/src/utils/lazyWithRetry.ts
++++ b/console/src/utils/lazyWithRetry.ts
+@@ -68,10 +68,10 @@ function recoverableLazy(
+   };
+ }
+ 
+-// All page modules, keyed relative to this file (src/utils/).
++// Route entry points, keyed relative to this file (src/utils/).
+ // e.g. "../pages/Settings/Debug/index.tsx"
+ const PAGE_MODULES = import.meta.glob<ComponentType<unknown>>(
+-  ["../pages/**/*.{ts,tsx}", "!../pages/**/*.test.{ts,tsx}"],
++  ["../pages/**/index.{ts,tsx}", "!../pages/**/__tests__/**"],
+   { import: "default" },
+ );
+ 
+diff --git a/console/src/utils/navigationMode.test.ts b/console/src/utils/navigationMode.test.ts
+index ef8d9bb..1a7cb9c 100755
+--- a/console/src/utils/navigationMode.test.ts
++++ b/console/src/utils/navigationMode.test.ts
+@@ -156,4 +156,21 @@ describe("configured console basename", () => {
+     );
+     expect(navigation.getOsRootHref("/login")).toBe("/os");
+   });
++
++  it("prefers the server-injected runtime base path", async () => {
++    window.__qpBase = "/app/qwenpaw/web";
++    const navigation = await loadNavigation(undefined);
++    const location = {
++      pathname: "/app/qwenpaw/web/chat",
++      search: "?draft=one",
++    };
++    expect(navigation.getRouterBasename(location.pathname)).toBe(
++      "/app/qwenpaw/web",
++    );
++    expect(navigation.stripRouterBasename(location.pathname)).toBe("/chat");
++    expect(navigation.getLoginHref(location)).toBe(
++      "/app/qwenpaw/web/login?redirect=%2Fchat%3Fdraft%3Done",
++    );
++    delete window.__qpBase;
++  });
+ });
+diff --git a/console/src/utils/navigationMode.ts b/console/src/utils/navigationMode.ts
+index 133a129..a671106 100755
+--- a/console/src/utils/navigationMode.ts
++++ b/console/src/utils/navigationMode.ts
+@@ -1,4 +1,5 @@
+ import { normalizeConsoleBasename } from "./consoleBasename";
++import { getRuntimeBasePath } from "./runtimeBasePath";
+ 
+ interface LocationLike {
+   pathname: string;
+@@ -6,9 +7,9 @@ interface LocationLike {
+   hash?: string;
+ }
+ 
+-const CONSOLE_BASENAME = normalizeConsoleBasename(
+-  import.meta.env.VITE_CONSOLE_BASENAME,
+-);
++const CONSOLE_BASENAME =
++  getRuntimeBasePath() ||
++  normalizeConsoleBasename(import.meta.env.VITE_CONSOLE_BASENAME);
+ const OS_PAW_APP_STATE_KEY = "osPawAppId";
+ 
+ function historyStateRecord(state: unknown): Record<string, unknown> {
+diff --git a/console/src/utils/runtimeBasePath.test.ts b/console/src/utils/runtimeBasePath.test.ts
+new file mode 100755
+index 0000000..19b6521
+--- /dev/null
++++ b/console/src/utils/runtimeBasePath.test.ts
+@@ -0,0 +1,53 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { getConsoleAssetUrl, getRuntimeBasePath } from "./runtimeBasePath";
++
++describe("runtime base path", () => {
++  afterEach(() => {
++    delete window.__qpBase;
++    vi.unstubAllEnvs();
++  });
++
++  it("defaults to the existing root deployment", () => {
++    expect(getRuntimeBasePath()).toBe("");
++    expect(getConsoleAssetUrl("logo-light.svg")).toBe("/logo-light.svg");
++  });
++
++  it("keeps root asset URLs absolute with a relative Vite build base", () => {
++    vi.stubEnv("BASE_URL", "./");
++    expect(getConsoleAssetUrl("logo-light.svg")).toBe("/logo-light.svg");
++  });
++
++  it("uses the server-injected prefix for public assets", () => {
++    window.__qpBase = "/app/qwenpaw/web";
++    expect(getRuntimeBasePath()).toBe("/app/qwenpaw/web");
++    expect(getConsoleAssetUrl("logo-light.svg")).toBe(
++      "/app/qwenpaw/web/logo-light.svg",
++    );
++  });
++
++  it.each(["/app/%71wenpaw/web", "/app/qwenpaw%20web", "/app/%2571wenpaw/web"])(
++    "rejects percent-encoded configuration %s",
++    (value) => {
++      window.__qpBase = value;
++      expect(getRuntimeBasePath()).toBe("");
++    },
++  );
++
++  it("preserves decoded Unicode prefixes", () => {
++    window.__qpBase = "/app/中文/";
++    expect(getRuntimeBasePath()).toBe("/app/中文");
++  });
++
++  it("normalizes a trailing slash and rejects malformed injected values", () => {
++    window.__qpBase = "/app/qwenpaw/web/";
++    expect(getRuntimeBasePath()).toBe("/app/qwenpaw/web");
++    window.__qpBase = "https://attacker.example/";
++    expect(getRuntimeBasePath()).toBe("");
++    window.__qpBase = "/app/../admin";
++    expect(getRuntimeBasePath()).toBe("");
++    window.__qpBase = "//attacker.example";
++    expect(getRuntimeBasePath()).toBe("");
++    window.__qpBase = "/app/%2e%2e/admin";
++    expect(getRuntimeBasePath()).toBe("");
++  });
++});
+diff --git a/console/src/utils/runtimeBasePath.ts b/console/src/utils/runtimeBasePath.ts
+new file mode 100755
+index 0000000..5fcab1f
+--- /dev/null
++++ b/console/src/utils/runtimeBasePath.ts
+@@ -0,0 +1,39 @@
++declare global {
++  interface Window {
++    __qpBase?: string;
++  }
++}
++
++export function getRuntimeBasePath(): string {
++  if (typeof window === "undefined") return "";
++  const value = window.__qpBase?.trim() || "";
++  if (!value || value === "/") return "";
++  if (!value.startsWith("/") || /[%?#\\]/.test(value)) return "";
++  const path = value.replace(/\/+$/, "");
++  try {
++    const invalid = path
++      .split("/")
++      .slice(1)
++      .some((segment) => {
++        const decoded = decodeURIComponent(segment);
++        return (
++          !segment ||
++          decoded === "." ||
++          decoded === ".." ||
++          decoded.includes("/") ||
++          decoded.includes("\\")
++        );
++      });
++    return invalid ? "" : path;
++  } catch {
++    return "";
++  }
++}
++
++export function getConsoleAssetUrl(filename: string): string {
++  const name = filename.replace(/^\/+/, "");
++  const runtimeBasePath = getRuntimeBasePath();
++  if (runtimeBasePath) return `${runtimeBasePath}/${name}`;
++  const buildBase = import.meta.env.BASE_URL;
++  return `${buildBase === "./" ? "/" : buildBase}${name}`;
++}
+diff --git a/console/vite.config.test.ts b/console/vite.config.test.ts
+index e7630b5..6291aaa 100755
+--- a/console/vite.config.test.ts
++++ b/console/vite.config.test.ts
+@@ -20,9 +20,13 @@ function loadDeploymentConfig(basename: string | undefined) {
+        const { config } = await loadConfigFromFile({
+          command: "build", mode: "production",
+        });
++       const renderBuiltUrl = config.experimental?.renderBuiltUrl;
+        process.stdout.write(JSON.stringify({
+          base: config.base ?? "/",
+          apiBase: config.define.VITE_API_BASE_URL,
++         assetBase: config.define["import.meta.env.BASE_URL"],
++         jsAsset: renderBuiltUrl?.("logo-light.svg", { hostType: "js" }),
++         htmlEntry: renderBuiltUrl?.("assets/index.js", { hostType: "html" }),
+        }));`,
+     ],
+     {
+@@ -30,15 +34,24 @@ function loadDeploymentConfig(basename: string | undefined) {
+       encoding: "utf8",
+     },
+   );
+-  return JSON.parse(output) as { base: string; apiBase: string };
++  return JSON.parse(output) as {
++    base: string;
++    apiBase: string;
++    jsAsset?: { runtime: string };
++    htmlEntry?: { relative: boolean };
++    assetBase?: string;
++  };
+ }
+ 
+ describe("console deployment configuration", () => {
+   it.each([undefined, "", " "])(
+-    "keeps assets at the root when the basename is %j",
++    "uses relative entry assets when the basename is %j",
+     (basename) => {
+       const config = loadDeploymentConfig(basename);
+-      expect(config.base).toBe("/");
++      expect(config.base).toBe("./");
++      expect(config.jsAsset?.runtime).toContain("__qpBase");
++      expect(config.assetBase).toContain("__qpBase");
++      expect(config.htmlEntry).toEqual({ relative: true });
+     },
+   );
+ 
+diff --git a/console/vite.config.ts b/console/vite.config.ts
+index db9a3db..df90cb4 100755
+--- a/console/vite.config.ts
++++ b/console/vite.config.ts
+@@ -34,19 +34,52 @@ export default defineConfig(({ command, mode }) => {
+   const consoleBasename = env.VITE_CONSOLE_BASENAME?.trim();
+ 
+   return {
+-    // Preserve root asset URLs for existing root and /console deployments.
+-    base:
+-      !desktop && consoleBasename
+-        ? `${normalizeConsoleBasename(consoleBasename)}/`
+-        : "/",
++    // The server-injected document base resolves these relative entry assets.
++    base: desktop
++      ? "/"
++      : consoleBasename
++      ? `${normalizeConsoleBasename(consoleBasename)}/`
++      : "./",
++    experimental:
++      !desktop && !consoleBasename
++        ? {
++            renderBuiltUrl(filename, { hostType }) {
++              if (hostType === "js") {
++                return {
++                  runtime: `__qpBase + ${JSON.stringify(`/${filename}`)}`,
++                };
++              }
++              return { relative: true };
++            },
++          }
++        : undefined,
+     define: {
++      "import.meta.env.BASE_URL": desktop
++        ? JSON.stringify("/")
++        : consoleBasename
++        ? JSON.stringify(`${normalizeConsoleBasename(consoleBasename)}/`)
++        : "window.__qpBaseUrl",
+       VITE_API_BASE_URL: JSON.stringify(desktop ? "" : apiBaseUrl),
+       TOKEN: JSON.stringify(env.TOKEN || ""),
+       MOBILE: false,
+     },
+     plugins: [
+       react(),
+-      startupMonitorPlugin(),
++      startupMonitorPlugin(desktop ? "" : apiBaseUrl),
++      ...(!desktop
++        ? [
++            {
++              name: "bounded-console-preload",
++              enforce: "pre",
++              apply: "build",
++              resolveId(id) {
++                if (id === "\u0000vite/preload-helper.js") {
++                  return path.resolve(__dirname, "scripts/bounded-preload.ts");
++                }
++              },
++            } satisfies Plugin,
++          ]
++        : []),
+       ...(desktop
+         ? [
+             {
+diff --git a/src/qwenpaw/app/auth.py b/src/qwenpaw/app/auth.py
+index 8968605..b2294d9 100755
+--- a/src/qwenpaw/app/auth.py
++++ b/src/qwenpaw/app/auth.py
+@@ -32,6 +32,7 @@ from urllib.parse import unquote
+ 
+ from fastapi import Request, Response
+ from starlette.requests import HTTPConnection
++from starlette.routing import get_route_path
+ from starlette.types import ASGIApp, Receive, Scope, Send
+ from starlette.middleware.base import BaseHTTPMiddleware
+ 
+@@ -811,9 +812,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
+         if not is_auth_enabled() or not has_registered_users():
+             return True
+ 
+-        path = request.url.path
++        path = get_route_path(request.scope)
+         if path == "/api/config/theme" and request.method == "GET":
+             return True
++        if path == "/api/hub/pawapps/sessions" and request.method == "DELETE":
++            return True
+         if (
+             request.method == "OPTIONS"
+             or path in _PUBLIC_PATHS
+diff --git a/src/qwenpaw/app/base_path.py b/src/qwenpaw/app/base_path.py
+new file mode 100755
+index 0000000..7b1231d
+--- /dev/null
++++ b/src/qwenpaw/app/base_path.py
+@@ -0,0 +1,119 @@
++# -*- coding: utf-8 -*-
++"""Mount the HTTP application and its prebuilt console below one URL prefix."""
++from __future__ import annotations
++
++import asyncio
++import json
++from html import escape
++from pathlib import Path
++from urllib.parse import unquote
++
++from fastapi import Response
++from fastapi.responses import FileResponse, RedirectResponse
++from starlette.types import ASGIApp, Receive, Scope, Send
++
++_BASE_HREF_TOKEN = b'<base href="/" />'
++_BASE_PATH_JSON_TOKEN = b'window.__qpBase = "";'
++
++
++def normalize_base_path(value: str | None) -> str:
++    """Return a canonical absolute path prefix, or an empty root prefix."""
++    path = (value or "").strip()
++    if not path or path == "/":
++        return ""
++    if not path.startswith("/"):
++        raise ValueError("QWENPAW_BASE_PATH must start with '/'")
++    if any(char in path for char in ("?", "#", "\\")):
++        raise ValueError(
++            "QWENPAW_BASE_PATH must be a URL path without query or fragment",
++        )
++    if "%" in path:
++        raise ValueError(
++            "QWENPAW_BASE_PATH must use decoded path segments, not percent encoding",
++        )
++    path = path.rstrip("/")
++    segments = [unquote(segment) for segment in path.split("/")[1:]]
++    if any(
++        segment in ("", ".", "..") or "/" in segment or "\\" in segment
++        for segment in segments
++    ):
++        raise ValueError("QWENPAW_BASE_PATH contains an invalid path segment")
++    return path
++
++
++class BasePathMiddleware:
++    """Accept one configured prefix and expose unprefixed routes to FastAPI."""
++
++    def __init__(self, app: ASGIApp, base_path: str | None = None) -> None:
++        self.app = app
++        self.base_path = normalize_base_path(base_path)
++
++    async def __call__(
++        self,
++        scope: Scope,
++        receive: Receive,
++        send: Send,
++    ) -> None:
++        if not self.base_path or scope["type"] not in ("http", "websocket"):
++            await self.app(scope, receive, send)
++            return
++
++        path = scope.get("path", "")
++        if path == self.base_path and scope["type"] == "http":
++            query = scope.get("query_string", b"").decode("latin-1")
++            suffix = f"?{query}" if query else ""
++            response = RedirectResponse(f"{self.base_path}/{suffix}")
++            await response(scope, receive, send)
++            return
++        if path != self.base_path and not path.startswith(
++            f"{self.base_path}/",
++        ):
++            response = Response(status_code=404)
++            await response(scope, receive, send)
++            return
++
++        child_scope = dict(scope)
++        child_scope["root_path"] = (
++            scope.get("root_path", "").rstrip("/") + self.base_path
++        )
++        await self.app(child_scope, receive, send)
++
++
++class ConsoleIndexResponse(FileResponse):
++    """Serve the small HTML entry with its two explicit deployment tokens set."""
++
++    def __init__(
++        self,
++        path: str | Path,
++        *,
++        base_path: str | None = None,
++        **kwargs,
++    ):
++        self.base_path = normalize_base_path(base_path)
++        super().__init__(path, media_type="text/html", **kwargs)
++
++    async def __call__(
++        self,
++        scope: Scope,
++        receive: Receive,
++        send: Send,
++    ) -> None:
++        content = await asyncio.to_thread(Path(self.path).read_bytes)
++        base_href = f'<base href="{escape(self.base_path, quote=True)}/">'
++        content = content.replace(_BASE_HREF_TOKEN, base_href.encode("utf-8"))
++        base_path_json = (
++            json.dumps(self.base_path)
++            .replace("&", "\\u0026")
++            .replace("<", "\\u003c")
++            .replace(">", "\\u003e")
++            .replace("\u2028", "\\u2028")
++            .replace("\u2029", "\\u2029")
++        )
++        runtime_config = f"window.__qpBase = {base_path_json};"
++        content = content.replace(
++            _BASE_PATH_JSON_TOKEN,
++            runtime_config.encode("utf-8"),
++        )
++        self.body = content
++        self.headers["content-length"] = str(len(content))
++        await Response.__call__(self, scope, receive, send)
+diff --git a/src/qwenpaw/app/channels/ingress.py b/src/qwenpaw/app/channels/ingress.py
+index b0c718c..9d3c660 100755
+--- a/src/qwenpaw/app/channels/ingress.py
++++ b/src/qwenpaw/app/channels/ingress.py
+@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlsplit
+ import aiohttp
+ from multidict import CIMultiDict
+ from starlette.responses import Response
++from starlette.routing import get_route_path
+ from starlette.websockets import WebSocketState
+ from yarl import URL
+ 
+@@ -405,7 +406,7 @@ class ChannelIngressService:
+         candidates = [
+             binding
+             for binding in self._bindings.values()
+-            if (method, request.scope["path"]) in binding.routes
++            if (method, get_route_path(request.scope)) in binding.routes
+             and (not selectors or binding.wire.route_selector == selectors[0])
+             and self._current(binding, binding.reference)
+         ]
+diff --git a/src/qwenpaw/app/routers/agent_scoped.py b/src/qwenpaw/app/routers/agent_scoped.py
+index 217d572..d304108 100755
+--- a/src/qwenpaw/app/routers/agent_scoped.py
++++ b/src/qwenpaw/app/routers/agent_scoped.py
+@@ -11,6 +11,7 @@ from starlette.middleware.base import (
+     RequestResponseEndpoint,
+ )
+ from starlette.responses import Response
++from starlette.routing import get_route_path
+ 
+ 
+ class AgentContextMiddleware(BaseHTTPMiddleware):
+@@ -29,7 +30,7 @@ class AgentContextMiddleware(BaseHTTPMiddleware):
+         agent_id = None
+ 
+         # Priority 1: Extract agentId from path: /api/agents/{agentId}/...
+-        path_parts = request.url.path.split("/")
++        path_parts = get_route_path(request.scope).split("/")
+         if len(path_parts) >= 4 and path_parts[1] == "api":
+             if path_parts[2] == "agents":
+                 agent_id = path_parts[3]
+diff --git a/src/qwenpaw/app/routers/providers.py b/src/qwenpaw/app/routers/providers.py
+index f80697c..ebce61e 100755
+--- a/src/qwenpaw/app/routers/providers.py
++++ b/src/qwenpaw/app/routers/providers.py
+@@ -16,6 +16,7 @@ from fastapi import (
+     Request,
+ )
+ from pydantic import BaseModel, Field, field_validator
++from starlette.routing import get_route_path
+ 
+ from qwenpaw.exceptions import (
+     AppBaseException,
+@@ -104,7 +105,7 @@ async def get_provider_manager(request: Request) -> ProviderManager:
+     """
+     if hub_mode() and request.path_params.get("provider_id") == PROVIDER_ID:
+         require_model_route(
+-            request.url.path.removeprefix(f"/api/"),
++            get_route_path(request.scope).removeprefix("/api/"),
+             request.method,
+         )
+     return request.app.state.provider_manager
+diff --git a/src/qwenpaw/app/routers/voice.py b/src/qwenpaw/app/routers/voice.py
+index df00746..d2952b1 100755
+--- a/src/qwenpaw/app/routers/voice.py
++++ b/src/qwenpaw/app/routers/voice.py
+@@ -4,6 +4,7 @@
+ from urllib.parse import parse_qsl
+ 
+ from fastapi import APIRouter, Request, Response, WebSocket
++from starlette.routing import get_route_path
+ 
+ from ..channels.ingress import route_is_unowned
+ 
+@@ -32,7 +33,7 @@ def _legacy_unowned(request, service):
+     return route_is_unowned(
+         registry,
+         request.method,
+-        request.scope["path"],
++        get_route_path(request.scope),
+         service=service,
+     )
+ 
+diff --git a/tests/unit/app/auth/test_browser_session_cleanup.py b/tests/unit/app/auth/test_browser_session_cleanup.py
+new file mode 100755
+index 0000000..33227a8
+--- /dev/null
++++ b/tests/unit/app/auth/test_browser_session_cleanup.py
+@@ -0,0 +1,24 @@
++from types import SimpleNamespace
++
++import pytest
++from starlette.requests import Request
++
++from qwenpaw.app import auth
++
++
++@pytest.mark.parametrize("base", ["", "/app/qwenpaw/web"])
++@pytest.mark.parametrize("method, allowed", [("DELETE", True), ("GET", False), ("POST", False)])
++def test_only_browser_grant_cleanup_is_public(monkeypatch, base, method, allowed):
++    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
++    monkeypatch.setattr(auth, "has_registered_users", lambda: True)
++    config = SimpleNamespace(security=SimpleNamespace(allow_no_auth_hosts=[]))
++    monkeypatch.setattr(auth, "_get_config_cached", lambda: (config, []))
++    request = Request({
++        "type": "http",
++        "method": method,
++        "path": f"{base}/api/hub/pawapps/sessions",
++        "root_path": base,
++        "client": ("203.0.113.10", 1234),
++        "headers": [],
++    })
++    assert auth.AuthMiddleware._should_skip_auth(request) is allowed
+diff --git a/tests/unit/app/auth/test_client_ip.py b/tests/unit/app/auth/test_client_ip.py
+index adb8bb6..e524b9d 100755
+--- a/tests/unit/app/auth/test_client_ip.py
++++ b/tests/unit/app/auth/test_client_ip.py
+@@ -103,6 +103,7 @@ def _make_request(
+     request = MagicMock()
+     request.client = MagicMock()
+     request.client.host = client_host
++    request.scope = {"type": "http", "path": "/api/hubtected", "root_path": ""}
+ 
+     headers = {}
+     if xff:
+diff --git a/tests/unit/app/test_base_path.py b/tests/unit/app/test_base_path.py
+new file mode 100755
+index 0000000..edf3715
+--- /dev/null
++++ b/tests/unit/app/test_base_path.py
+@@ -0,0 +1,225 @@
++# -*- coding: utf-8 -*-
++"""Runtime base-path mounting keeps application routes prefix-aware."""
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import sys
++import textwrap
++
++import pytest
++from fastapi import FastAPI, Request, WebSocket
++from fastapi.testclient import TestClient
++from starlette.routing import get_route_path
++
++from qwenpaw.app.base_path import (
++    BasePathMiddleware,
++    ConsoleIndexResponse,
++    normalize_base_path,
++)
++
++
++@pytest.mark.parametrize(
++    ("value", "expected"),
++    [
++        (None, ""),
++        ("", ""),
++        (" / ", ""),
++        ("/app/qwenpaw/web/", "/app/qwenpaw/web"),
++        ("/app/中文/", "/app/中文"),
++    ],
++)
++def test_normalize_base_path(value, expected):
++    assert normalize_base_path(value) == expected
++
++
++@pytest.mark.parametrize(
++    "value",
++    [
++        "app/qwenpaw",
++        "/app//qwenpaw",
++        "/app/../admin",
++        "/app/%2e%2e/admin",
++        "/app%2fadmin",
++        "/app?x=1",
++        "/app#x",
++        "/app/%71wenpaw/web",
++        "/app/qwenpaw%20web",
++        "/app/%2571wenpaw/web",
++    ],
++)
++def test_normalize_base_path_rejects_ambiguous_paths(value):
++    with pytest.raises(ValueError):
++        normalize_base_path(value)
++
++
++def _mounted_app(base_path: str = "/app/qwenpaw/web") -> FastAPI:
++    application = FastAPI()
++    application.add_middleware(BasePathMiddleware, base_path=base_path)
++
++    @application.get("/api/version", name="version")
++    def version(request: Request):
++        return {
++            "path": get_route_path(request.scope),
++            "root_path": request.scope["root_path"],
++            "url": str(request.url_for("version")),
++        }
++
++    @application.websocket("/api/events")
++    async def events(websocket: WebSocket):
++        await websocket.accept()
++        await websocket.send_json({"root_path": websocket.scope["root_path"]})
++        await websocket.close()
++
++    return application
++
++
++def test_prefixed_http_and_websocket_routes_share_the_same_mount():
++    with TestClient(_mounted_app()) as client:
++        response = client.get("/app/qwenpaw/web/api/version")
++        assert response.status_code == 200
++        assert response.json() == {
++            "path": "/api/version",
++            "root_path": "/app/qwenpaw/web",
++            "url": "http://testserver/app/qwenpaw/web/api/version",
++        }
++        assert client.get("/api/version").status_code == 404
++        assert (
++            client.get("/app/qwenpaw/web-other/api/version").status_code == 404
++        )
++
++        with client.websocket_connect("/app/qwenpaw/web/api/events") as socket:
++            assert socket.receive_json() == {"root_path": "/app/qwenpaw/web"}
++
++
++def test_mount_root_redirects_to_slash_without_losing_the_query():
++    with TestClient(_mounted_app(), follow_redirects=False) as client:
++        response = client.get("/app/qwenpaw/web?from=fnos")
++        assert response.status_code == 307
++        assert response.headers["location"] == "/app/qwenpaw/web/?from=fnos"
++
++
++def test_console_index_injects_only_base_path_tokens(tmp_path):
++    index = tmp_path / "index.html"
++    index.write_text(
++        '<html><head><base href="/" />'
++        '<script>window.__qpBase = "";</script>'
++        '</head><body><script src="./assets/index.js"></script></body></html>',
++        encoding="utf-8",
++    )
++    application = FastAPI()
++
++    @application.get("/")
++    def index_response():
++        return ConsoleIndexResponse(index, base_path="/app/qwenpaw/web")
++
++    with TestClient(application) as client:
++        response = client.get("/")
++        assert response.status_code == 200
++        assert '<base href="/app/qwenpaw/web/">' in response.text
++        assert (
++            "window.__qpBase = "
++            + json.dumps(
++                "/app/qwenpaw/web",
++            )
++            in response.text
++        )
++        assert '<script src="./assets/index.js"></script>' in response.text
++        assert "__QWENPAW_BASE_HREF__" not in response.text
++        assert "__QWENPAW_BASE_PATH_JSON__" not in response.text
++        assert response.headers["content-length"] == str(len(response.content))
++
++
++def test_console_index_escapes_html_attributes_and_inline_script(tmp_path):
++    index = tmp_path / "index.html"
++    index.write_text(
++        '<base href="/" /><script>window.__qpBase = "";</script>',
++        encoding="utf-8",
++    )
++    application = FastAPI()
++    malicious_path = '/app/"><script>alert(1)</script>'
++    application.get("/")(
++        lambda: ConsoleIndexResponse(index, base_path=malicious_path),
++    )
++
++    with TestClient(application) as client:
++        response = client.get("/")
++        assert response.status_code == 200
++        assert "&quot;&gt;&lt;script&gt;" in response.text
++        assert "\\u003cscript\\u003e" in response.text
++        assert "\\u003c/script\\u003e" in response.text
++        assert '"><script>alert(1)</script>' not in response.text
++        assert response.text.count("<script>") == 1
++        assert response.text.count("</script>") == 1
++
++
++def test_production_app_serves_api_console_and_assets_below_base_path(
++    tmp_path,
++):
++    console = tmp_path / "console"
++    assets = console / "assets"
++    assets.mkdir(parents=True)
++    (console / "index.html").write_text(
++        '<base href="/" />'
++        '<script>window.__qpBase = "";</script>'
++        '<script type="module" src="./assets/index.js"></script>',
++        encoding="utf-8",
++    )
++    (assets / "index.js").write_text(
++        "export const asset = 'unmodified';\n",
++        encoding="utf-8",
++    )
++    env = {
++        **os.environ,
++        "QWENPAW_BASE_PATH": "/app/qwenpaw/web",
++        "QWENPAW_CONSOLE_STATIC_DIR": str(console),
++        "QWENPAW_WORKING_DIR": str(tmp_path / "work"),
++        "QWENPAW_SECRET_DIR": str(tmp_path / "secrets"),
++        "QWENPAW_TELEMETRY_DISABLED": "1",
++    }
++    result = subprocess.run(
++        [
++            sys.executable,
++            "-c",
++            textwrap.dedent(
++                """
++                from fastapi.testclient import TestClient
++                from qwenpaw.app import _app
++
++                client = TestClient(_app.app, follow_redirects=False)
++                assert client.get("/api/version").status_code == 404
++                version = client.get("/app/qwenpaw/web/api/version")
++                assert version.status_code == 200, version.text
++                assert version.json()["version"]
++                cleared = client.delete(
++                    "/app/qwenpaw/web/api/hub/pawapps/sessions",
++                    headers={"cookie": "qwenpaw_app_example=grant; unrelated=keep"},
++                )
++                assert cleared.status_code == 204, cleared.text
++                cookies = cleared.headers.get_list("set-cookie")
++                assert any("Path=/app/qwenpaw/web/api/" in value for value in cookies), cookies
++                assert any("Path=/api/" in value for value in cookies), cookies
++                assert all("unrelated" not in value for value in cookies), cookies
++                redirect = client.get("/app/qwenpaw/web?from=fnos")
++                assert redirect.status_code == 307
++                assert redirect.headers["location"] == "/app/qwenpaw/web/?from=fnos"
++                for path in ("/app/qwenpaw/web/", "/app/qwenpaw/web/chat", "/app/qwenpaw/web/chat/"):
++                    page = client.get(path)
++                    assert page.status_code == 200, path
++                    assert '<base href="/app/qwenpaw/web/">' in page.text
++                    assert 'window.__qpBase = "/app/qwenpaw/web"' in page.text
++                    assert 'src="./assets/index.js"' in page.text
++                asset = client.get("/app/qwenpaw/web/assets/index.js")
++                assert asset.status_code == 200
++                assert asset.content == b"export const asset = 'unmodified';\\n"
++                """,
++            ),
++        ],
++        env=env,
++        capture_output=True,
++        text=True,
++        timeout=60,
++        check=False,
++    )
++    assert result.returncode == 0, result.stdout + result.stderr
+diff --git a/src/qwenpaw/app/_app.py b/src/qwenpaw/app/_app.py
+index 24adf85..5cf5fb1 100755
+--- a/src/qwenpaw/app/_app.py
++++ b/src/qwenpaw/app/_app.py
+@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
+ from pathlib import Path
+ from typing import Any
+ 
+-from fastapi import FastAPI, HTTPException
++from fastapi import FastAPI, HTTPException, Request, Response
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse
+ from fastapi.staticfiles import StaticFiles
+@@ -41,6 +41,12 @@ from ..utils.logging import (
+ )
+ from ..utils.startup_display import AgentStartupDisplay
+ from ..utils.system_info import summarize_python_environment
++from .base_path import (
++    BasePathMiddleware,
++    ConsoleIndexResponse,
++    normalize_base_path,
++)
++from .console_static import ConsoleStaticFiles
+ from .auth import (
+     AuthMiddleware,
+     RuntimeBoundaryMiddleware,
+@@ -835,6 +841,8 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
+         startup_display.stop()
+ 
+ 
++_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++
+ app = FastAPI(
+     lifespan=lifespan,
+     docs_url="/docs" if DOCS_ENABLED else None,
+@@ -921,10 +929,27 @@ _INDEX_NO_CACHE_HEADERS = {
+ }
+ 
+ 
++@app.delete("/api/hub/pawapps/sessions", status_code=204)
++def clear_browser_sessions(request: Request):
++    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
++
++    response = Response(status_code=204)
++    clear_sessions(request, response)
++    if _BASE_PATH:
++        for name in request.cookies:
++            if name.startswith(COOKIE_PREFIX):
++                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
++    return response
++
++
+ @app.get("/")
+ def read_root():
+     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
++        return ConsoleIndexResponse(
++            _CONSOLE_INDEX,
++            base_path=_BASE_PATH,
++            headers=_INDEX_NO_CACHE_HEADERS,
++        )
+     return {
+         "message": (
+             f"{PROJECT_NAME} web console is not available. "
+@@ -1014,8 +1039,9 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
+ 
+     def _serve_console_index():
+         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-            return FileResponse(
++            return ConsoleIndexResponse(
+                 _CONSOLE_INDEX,
++                base_path=_BASE_PATH,
+                 headers=_INDEX_NO_CACHE_HEADERS,
+             )
+ 
+@@ -1025,7 +1051,7 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
+     if _assets_dir.is_dir():
+         app.mount(
+             "/assets",
+-            StaticFiles(directory=str(_assets_dir)),
++            ConsoleStaticFiles(directory=str(_assets_dir)),
+             name="assets",
+         )
+ 
+@@ -1059,6 +1085,18 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
+             except (OSError, ValueError):
+                 return _serve_console_index()
+             if file_stat and stat.S_ISREG(file_stat.st_mode):
+-                return FileResponse(static_file, stat_result=file_stat)
++                if Path(static_file) == _CONSOLE_INDEX:
++                    return _serve_console_index()
++                headers = (
++                    _INDEX_NO_CACHE_HEADERS
++                    if Path(static_file).suffix.lower() in (".html", ".htm")
++                    else {"Cache-Control": "public, max-age=300"}
++                )
++                return FileResponse(
++                    static_file, stat_result=file_stat, headers=headers,
++                )
+ 
+         return _serve_console_index()
++
++
++app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
+diff --git a/src/qwenpaw/app/console_static.py b/src/qwenpaw/app/console_static.py
+new file mode 100755
+index 0000000..753965c
+--- /dev/null
++++ b/src/qwenpaw/app/console_static.py
+@@ -0,0 +1,101 @@
++# -*- coding: utf-8 -*-
++"""Serve the Console's prebuilt representations without runtime compression."""
++
++from __future__ import annotations
++
++import math
++import mimetypes
++import os
++import re
++import stat
++
++import anyio
++from fastapi.responses import Response
++from starlette.datastructures import Headers
++from starlette.exceptions import HTTPException
++from starlette.types import Scope
++
++from ..hub.static_files import CompressedStaticFiles
++
++_HASHED_ASSET = re.compile(r".+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$")
++_INDEX_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
++
++
++def _encoding_preferences(scope: Scope) -> list[tuple[str | None, str]]:
++    raw = ",".join(Headers(scope=scope).getlist("accept-encoding"))
++    qualities: dict[str, float] = {}
++    for entry in raw.split(","):
++        parts = entry.split(";")
++        name = parts[0].strip().lower()
++        if not name:
++            continue
++        quality = 1.0
++        for parameter in parts[1:]:
++            key, separator, value = parameter.strip().partition("=")
++            if key.strip().lower() == "q":
++                try:
++                    parsed = float(value) if separator else 0.0
++                except ValueError:
++                    parsed = 0.0
++                quality = min(
++                    quality,
++                    parsed if math.isfinite(parsed) and 0 <= parsed <= 1 else 0.0,
++                )
++        qualities[name] = min(quality, qualities.get(name, 1.0))
++
++    wildcard = qualities.get("*", 0.0)
++    ranked = [
++        (qualities.get(name, wildcard), index, name, suffix)
++        for index, (name, suffix) in enumerate((("br", ".br"), ("gzip", ".gz")))
++        if qualities.get(name, wildcard) > 0
++    ]
++    if "identity" in qualities and qualities["identity"] > 0:
++        ranked.append((qualities["identity"], 2, None, ""))
++    ranked.sort(key=lambda item: (-item[0], item[1]))
++    result = [(name, suffix) for _, _, name, suffix in ranked]
++    if "identity" not in qualities and qualities.get("*") != 0:
++        result.append((None, ""))
++    return result
++
++
++class ConsoleStaticFiles(CompressedStaticFiles):
++    """Keep StaticFiles validation and conditional responses for every encoding."""
++
++    def _representation(self, path: str, preferences):
++        _, original = self.lookup_path(path)
++        if original is None or not stat.S_ISREG(original.st_mode):
++            raise HTTPException(status_code=404)
++        for encoding, suffix in preferences:
++            full_path, metadata = self.lookup_path(path + suffix)
++            if metadata is not None and stat.S_ISREG(metadata.st_mode):
++                return full_path, metadata, encoding
++        raise HTTPException(status_code=406, headers={"Vary": "Accept-Encoding"})
++
++    async def get_response(self, path: str, scope: Scope) -> Response:
++        if scope["method"] not in ("GET", "HEAD"):
++            raise HTTPException(status_code=405, headers={"Allow": "GET, HEAD"})
++        if path.lower().endswith((".br", ".gz")):
++            raise HTTPException(status_code=404)
++        try:
++            full_path, metadata, encoding = await anyio.to_thread.run_sync(
++                self._representation, path, _encoding_preferences(scope),
++            )
++        except (OSError, ValueError):
++            raise HTTPException(status_code=404) from None
++
++        response = self.file_response(full_path, metadata, scope)
++        media_type, _ = mimetypes.guess_type(path)
++        response.headers["Content-Type"] = media_type or "application/octet-stream"
++        if encoding is not None:
++            response.headers["Content-Encoding"] = encoding
++        response.headers.add_vary_header("Accept-Encoding")
++        filename = os.path.basename(path)
++        if filename.lower().endswith((".html", ".htm")):
++            response.headers["Cache-Control"] = _INDEX_CACHE_CONTROL
++            response.headers["Pragma"] = "no-cache"
++            response.headers["Expires"] = "0"
++        elif _HASHED_ASSET.fullmatch(filename):
++            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
++        else:
++            response.headers["Cache-Control"] = "public, max-age=300"
++        return response
+diff --git a/console/src/App.pluginStartup.test.tsx b/console/src/App.pluginStartup.test.tsx
+new file mode 100755
+index 0000000..0cab0d9
+--- /dev/null
++++ b/console/src/App.pluginStartup.test.tsx
+@@ -0,0 +1,77 @@
++import { cleanup, render, screen } from "@testing-library/react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++const backendInfoMock = vi.hoisted(() => vi.fn());
++const pluginProviderMock = vi.hoisted(() => vi.fn());
++
++vi.mock("./auth/gate", async (importOriginal) => {
++  const actual = await importOriginal<typeof import("./auth/gate")>();
++  return { ...actual, resolveBackendInfo: backendInfoMock };
++});
++vi.mock("@agentscope-ai/design", () => ({
++  ConfigProvider: ({ children }: { children: React.ReactNode }) => children,
++  bailianDarkTheme: { theme: {} },
++  bailianTheme: { theme: {} },
++}));
++vi.mock("react-i18next", () => ({
++  useTranslation: () => ({
++    t: (key: string) => key,
++    i18n: { language: "en", resolvedLanguage: "en" },
++  }),
++}));
++vi.mock("./contexts/ThemeContext", () => ({
++  useTheme: () => ({ isDark: false, previewTheme: {} }),
++}));
++vi.mock("./api/modules/language", () => ({
++  languageApi: { getLanguage: vi.fn().mockResolvedValue({ language: "en" }) },
++}));
++vi.mock("./stores/uploadLimitStore", () => ({
++  useUploadLimitStore: { getState: () => ({ fetch: vi.fn() }) },
++}));
++vi.mock("./plugins/PluginContext", () => ({
++  PluginProvider: ({ children }: { children: React.ReactNode }) => {
++    pluginProviderMock();
++    return <>{children}</>;
++  },
++}));
++vi.mock("./pages/Login/index", () => ({
++  default: () => <div>login page</div>,
++}));
++vi.mock("./layouts/MainLayout", () => ({
++  default: () => <div>main application</div>,
++}));
++vi.mock("./components/UpdateTakeoverPage", () => ({
++  UpdateTakeoverGate: ({ children }: { children: React.ReactNode }) => children,
++}));
++
++import App from "./App";
++
++describe("Console plugin startup boundary", () => {
++  beforeEach(() => {
++    backendInfoMock.mockResolvedValue({
++      mode: "standard",
++      authStatus: { enabled: false, has_users: true },
++    });
++  });
++
++  afterEach(() => {
++    cleanup();
++    vi.clearAllMocks();
++  });
++
++  it("does not initialize chat plugins on the login page", async () => {
++    window.history.replaceState({}, "", "/login");
++    render(<App />);
++
++    expect(await screen.findByText("login page")).toBeInTheDocument();
++    expect(pluginProviderMock).not.toHaveBeenCalled();
++  });
++
++  it("initializes plugins for the protected main application", async () => {
++    window.history.replaceState({}, "", "/chat");
++    render(<App />);
++
++    expect(await screen.findByText("main application")).toBeInTheDocument();
++    expect(pluginProviderMock).toHaveBeenCalled();
++  });
++});

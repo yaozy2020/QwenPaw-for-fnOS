@@ -18,8 +18,14 @@ BACKEND_FILES = (
     "app/routers/providers.py",
     "app/routers/voice.py",
 )
-SOURCE_COMMIT = "0a21644e90d8ba37e20035b3bfb63880872cc2a2"
-SOURCE_PATCH_SHA256 = "c65666afb8f7c90e22d457b90f3d9a7e4be070e1b6e6c77d3c4b1710e46b3b20"
+SOURCE_COMMITS = {
+    "2.3.0": "0a21644e90d8ba37e20035b3bfb63880872cc2a2",
+    "2.3.0.post1": "ee58cb1a64f2b21e825c525f73dc44bc7941edea",
+}
+SOURCE_PATCH_SHA256 = {
+    "2.3.0": "c65666afb8f7c90e22d457b90f3d9a7e4be070e1b6e6c77d3c4b1710e46b3b20",
+    "2.3.0.post1": "cd86c589785e78bb985c39e9edec2e5151785272cb61e92e3ba847a3302fc094",
+}
 PREVIOUS_SHA256 = {
     "app/_app.py": ["38541ce134eb38f7ec64a82125365400cc2f3ca69ea5aef86b6f1ba42500877c"],
     "app/base_path.py": ["d4a4091d8a9832b6cb09ab3985c69b0927c5817570dbf31ba79638e7513687f1"],
@@ -54,9 +60,9 @@ def valid_digest(value):
     return value.lower()
 
 
-def merge_previous_manifest(previous, manifest):
-    if manifest.get("schema_version") != 1 or manifest.get("base_version") != "2.3.0":
-        raise ValueError("previous patch manifest is not schema 1 / QwenPaw 2.3.0")
+def merge_previous_manifest(previous, manifest, base_version):
+    if manifest.get("schema_version") != 1 or manifest.get("base_version") != base_version:
+        raise ValueError(f"previous patch manifest is not schema 1 / QwenPaw {base_version}")
     paths = set()
     for key in ("files", "delete_files"):
         for entry in manifest.get(key, []):
@@ -72,20 +78,21 @@ def merge_previous_manifest(previous, manifest):
                     values.append(value)
 
 
-def previous_patch_hashes(fpks, manifests=()):
+def previous_patch_hashes(fpks, manifests=(), base_version="2.3.0"):
     previous = {}
+    patch_directory = f"qwenpaw-{base_version}-base-path"
     for fpk in fpks:
         with tarfile.open(fpk, "r:gz") as outer:
             app_data = outer.extractfile("app.tgz").read()
         with tarfile.open(fileobj=io.BytesIO(app_data), mode="r:gz") as archive:
             member = next(
                 item for item in archive.getmembers()
-                if item.name.endswith("/patches/qwenpaw-2.3.0-base-path/manifest.json")
+                if item.name.endswith(f"/patches/{patch_directory}/manifest.json")
             )
             manifest = json.load(archive.extractfile(member))
-        merge_previous_manifest(previous, manifest)
+        merge_previous_manifest(previous, manifest, base_version)
     for path in manifests:
-        merge_previous_manifest(previous, json.loads(path.read_text(encoding="utf-8-sig")))
+        merge_previous_manifest(previous, json.loads(path.read_text(encoding="utf-8-sig")), base_version)
     return previous
 
 
@@ -122,22 +129,24 @@ def console_sources(console):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build the QwenPaw 2.3.0 + PR #8719 compatibility payload."
+        description="Build a version-matched QwenPaw + PR #8719 compatibility payload."
     )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--official-wheel", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--console", type=Path, required=True)
+    parser.add_argument("--version", choices=SOURCE_COMMITS, default="2.3.0")
     parser.add_argument("--previous-patch", type=Path, action="append", default=[])
     parser.add_argument("--previous-manifest", type=Path, action="append", default=[])
     args = parser.parse_args()
     source = args.source.resolve()
     wheel = args.official_wheel.resolve()
     output = args.output.resolve()
-    previous = previous_patch_hashes(args.previous_patch, args.previous_manifest)
+    previous = previous_patch_hashes(args.previous_patch, args.previous_manifest, args.version)
     console_paths = console_sources(args.console.absolute())
-    if output.name != "qwenpaw-2.3.0-base-path":
-        raise SystemExit("output directory must be named qwenpaw-2.3.0-base-path")
+    expected_output = f"qwenpaw-{args.version}-base-path"
+    if output.name != expected_output:
+        raise SystemExit(f"output directory must be named {expected_output}")
 
     files = []
     delete_files = []
@@ -206,10 +215,10 @@ def main():
         target.chmod(0o644)
     manifest = {
         "schema_version": 1,
-        "base_version": "2.3.0",
+        "base_version": args.version,
         "upstream_pr": 8719,
-        "upstream_commit": SOURCE_COMMIT,
-        "source_patch_sha256": SOURCE_PATCH_SHA256,
+        "upstream_commit": SOURCE_COMMITS[args.version],
+        "source_patch_sha256": SOURCE_PATCH_SHA256[args.version],
         "official_wheel_sha256": sha256(wheel.read_bytes()),
         "console_complete": True,
         "files": files,
