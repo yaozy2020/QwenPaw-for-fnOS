@@ -38,14 +38,69 @@ pub fn index_url(mirror: &str) -> Result<Url, IndexError> {
     Url::parse(&value).map_err(|_| IndexError::InvalidMirror("URL 格式无效".into()))
 }
 
-pub fn parse_simple_index(base: &Url, html: &str) -> Result<Vec<String>, IndexError> {
+pub type Releases = std::collections::BTreeMap<String, Option<String>>;
+
+// Simple API timestamps are UTC; normalize fractional precision before comparing files.
+fn upload_time(raw: &str) -> Option<String> {
+    let utc = raw
+        .strip_suffix('Z')
+        .or_else(|| raw.strip_suffix("+00:00"))?;
+    let (whole, frac) = utc.split_once('.').unwrap_or((utc, ""));
+    if whole.len() != 19
+        || !whole.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b'T',
+            13 | 16 => b == b':',
+            _ => b.is_ascii_digit(),
+        })
+        || !frac.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!("{whole}.{:0<9}Z", &frac[..frac.len().min(9)]))
+}
+
+fn record(releases: &mut Releases, filename: &str, date: Option<&str>) {
+    if let Some(version) = artifact_version(filename) {
+        let first = releases.entry(version.to_string()).or_default();
+        if let Some(date) = date.and_then(upload_time) {
+            if first.as_ref().is_none_or(|existing| &date < existing) {
+                *first = Some(date);
+            }
+        }
+    }
+}
+
+fn parse_json_index(body: &[u8]) -> Result<Releases, IndexError> {
+    #[derive(serde::Deserialize)]
+    struct File {
+        filename: String,
+        #[serde(rename = "upload-time")]
+        date: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Index {
+        files: Vec<File>,
+    }
+    let index: Index = serde_json::from_slice(body).map_err(|_| IndexError::Empty)?;
+    let mut versions = Releases::new();
+    for file in index.files {
+        record(&mut versions, &file.filename, file.date.as_deref());
+    }
+    if versions.is_empty() {
+        Err(IndexError::Empty)
+    } else {
+        Ok(versions)
+    }
+}
+
+pub fn parse_simple_index(base: &Url, html: &str) -> Result<Releases, IndexError> {
     use percent_encoding::percent_decode_str;
     use scraper::{Html, Selector};
-    use std::collections::BTreeSet;
 
     let document = Html::parse_document(html);
     let selector = Selector::parse("a[href]").expect("static link selector");
-    let mut versions = BTreeSet::new();
+    let mut versions = Releases::new();
     for anchor in document.select(&selector) {
         let Some(href) = anchor.value().attr("href") else {
             continue;
@@ -59,15 +114,17 @@ pub fn parse_simple_index(base: &Url, html: &str) -> Result<Vec<String>, IndexEr
         let Ok(filename) = percent_decode_str(encoded_filename).decode_utf8() else {
             continue;
         };
-        if let Some(version) = artifact_version(&filename) {
-            versions.insert(version.to_string());
-        }
+        record(
+            &mut versions,
+            &filename,
+            anchor.value().attr("data-upload-time"),
+        );
     }
 
     if versions.is_empty() {
         return Err(IndexError::Empty);
     }
-    Ok(versions.into_iter().collect())
+    Ok(versions)
 }
 
 fn artifact_version(filename: &str) -> Option<&str> {
@@ -111,7 +168,7 @@ fn normalize_distribution(name: &str) -> String {
     normalized
 }
 
-pub fn fetch_versions(url: &Url) -> Result<Vec<String>, IndexError> {
+pub fn fetch_versions(url: &Url) -> Result<Releases, IndexError> {
     use std::time::Duration;
 
     fetch_versions_with_timeouts(url, Duration::from_secs(5), Duration::from_secs(15))
@@ -121,7 +178,7 @@ fn fetch_versions_with_timeouts(
     url: &Url,
     connect_timeout: std::time::Duration,
     total_timeout: std::time::Duration,
-) -> Result<Vec<String>, IndexError> {
+) -> Result<Releases, IndexError> {
     use std::io::Read;
 
     const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
@@ -135,6 +192,7 @@ fn fetch_versions_with_timeouts(
         .map_err(|_| IndexError::Request)?;
     let response = client
         .get(url.clone())
+        .header(reqwest::header::ACCEPT, "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html;q=0.9, text/html;q=0.8")
         .send()
         .map_err(|_| IndexError::Request)?;
     if !response.status().is_success() {
@@ -161,7 +219,11 @@ fn fetch_versions_with_timeouts(
     if body.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(IndexError::TooLarge);
     }
-    parse_simple_index(&index_url, &String::from_utf8_lossy(&body))
+    if body.iter().find(|c| !c.is_ascii_whitespace()) == Some(&b'{') {
+        parse_json_index(&body)
+    } else {
+        parse_simple_index(&index_url, &String::from_utf8_lossy(&body))
+    }
 }
 
 #[cfg(test)]
@@ -244,7 +306,7 @@ mod tests {
         "#;
         let actual = parse_simple_index(&base, html).unwrap();
         assert_eq!(
-            actual.into_iter().collect::<BTreeSet<_>>(),
+            actual.into_keys().collect::<BTreeSet<_>>(),
             ["2.0.0", "2.1.0", "2.2.0+nas"]
                 .into_iter()
                 .map(str::to_string)
@@ -288,7 +350,38 @@ mod tests {
             &[("Content-Type", "text/html")],
             "<a href='../files/qwenpaw-3.0.0.tar.gz'>release</a>",
         )]);
-        assert_eq!(fetch_versions(&base).unwrap(), ["3.0.0"]);
+        assert_eq!(
+            fetch_versions(&base)
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            ["3.0.0"]
+        );
+    }
+
+    #[test]
+    fn release_time_orders_a_backport_ahead_of_a_higher_beta_without_changing_actions() {
+        let url = serve(vec![route(
+            "/simple/qwenpaw/",
+            200,
+            &[("Content-Type", "application/vnd.pypi.simple.v1+json")],
+            r#"{"files":[
+          {"filename":"qwenpaw-3.0b1.zip","upload-time":"2026-10-03T10:00:00Z"},
+          {"filename":"qwenpaw-2.1.post1.zip","upload-time":"2026-10-04T10:00:00Z"},
+          {"filename":"qwenpaw-3.0b1-py3-none-any.whl","upload-time":"2026-10-05T10:00:00.01Z"},
+          {"filename":"qwenpaw-8.0.zip"}] }"#,
+        )]);
+        let list = crate::version::build_version_list(&fetch_versions(&url).unwrap(), "3.0b1");
+        assert_eq!(
+            list.versions
+                .iter()
+                .map(|v| v.version.as_str())
+                .collect::<Vec<_>>(),
+            ["2.1.post1", "3.0b1", "8.0"]
+        );
+        assert_eq!(list.versions[0].action, "downgrade");
+        assert!(list.versions[1].is_beta);
+        assert!(list.versions[2].published_at.is_none());
     }
 
     #[test]
@@ -352,7 +445,13 @@ mod tests {
         ];
         let url = serve(routes);
         let url = url.join("/r0").unwrap();
-        assert_eq!(fetch_versions(&url).unwrap(), ["3.1.0"]);
+        assert_eq!(
+            fetch_versions(&url)
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            ["3.1.0"]
+        );
 
         let routes = vec![
             route("/r0", 302, &[("Location", "/r1")], ""),

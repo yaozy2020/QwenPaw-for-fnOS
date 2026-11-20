@@ -1,0 +1,258 @@
+use crate::kernel::KernelManager;
+use axum::{
+    body::Body,
+    http::{Request, Response, StatusCode},
+};
+use hyper::body::Incoming;
+use hyper_util::rt::TokioIo;
+use std::{
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+pub const RECORD: &str = "entry-login-default.v1";
+
+pub fn path(pid_file: &Path) -> PathBuf {
+    pid_file.with_file_name(RECORD)
+}
+
+pub fn selected(path: &Path) -> bool {
+    !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind()==std::io::ErrorKind::NotFound)
+}
+
+pub async fn send(
+    kernel: &KernelManager,
+    mut req: Request<Body>,
+) -> Result<Response<Incoming>, StatusCode> {
+    let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+    let identity = kernel.entry_identity().ok_or(unavailable)?;
+    let uid = unsafe { libc::geteuid() };
+    let name = format!("\0qwenpaw.entry.v2.{uid}.{}", identity.pid);
+    let stream = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::UnixStream::connect(Path::new(std::ffi::OsStr::from_bytes(name.as_bytes()))),
+    )
+    .await
+    .map_err(|_| unavailable)?
+    .map_err(|_| unavailable)?;
+    let peer = stream.peer_cred().map_err(|_| unavailable)?;
+    if peer.pid() != Some(identity.pid)
+        || peer.uid() != uid
+        || !matches!(
+            crate::procfs::identity_status(identity),
+            crate::procfs::IdentityStatus::Alive
+        )
+    {
+        return Err(unavailable);
+    }
+    let target = req
+        .uri()
+        .path_and_query()
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .as_str()
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    *req.uri_mut() = target;
+    req.headers_mut().insert(
+        axum::http::header::HOST,
+        axum::http::HeaderValue::from_static("localhost"),
+    );
+    let (mut client, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| unavailable)?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    client
+        .send_request(req)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)
+}
+
+pub fn compatible(venv: &Path) -> bool {
+    let Ok(dirs) = std::fs::read_dir(venv.join("lib")) else {
+        return false;
+    };
+    let mut apps = dirs
+        .flatten()
+        .filter(|d| d.file_name().to_string_lossy().starts_with("python3."))
+        .map(|d| d.path().join("site-packages/qwenpaw/app"))
+        .filter(|d| d.is_dir());
+    let Some(app) = apps.next() else { return false };
+    if apps.next().is_some() {
+        return false;
+    }
+    [
+        (
+            "fnos_entry.py",
+            include_bytes!("../../patches/qwenpaw-2.3.0.post1-base-path/payload/app/fnos_entry.py")
+                .as_slice(),
+        ),
+        (
+            "auth.py",
+            include_bytes!("../../patches/qwenpaw-2.3.0.post1-base-path/payload/app/auth.py")
+                .as_slice(),
+        ),
+        (
+            "_app.py",
+            include_bytes!("../../patches/qwenpaw-2.3.0.post1-base-path/payload/app/_app.py")
+                .as_slice(),
+        ),
+    ]
+    .iter()
+    .all(|(name, expected)| std::fs::read(app.join(name)).is_ok_and(|b| b == *expected))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Record {
+    v: u8,
+    instance: String,
+    owner: String,
+}
+
+pub async fn migrate(
+    kernel: &KernelManager,
+    token: String,
+) -> Result<(), (StatusCode, &'static str)> {
+    let record = kernel.entry_record();
+    if selected(&record) {
+        return Err((StatusCode::CONFLICT, "已选择入口登录；不会覆盖迁移记录"));
+    }
+    let owner = prove_owner(kernel, token).await?;
+    let data = serde_json::to_string(&owner)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "记录编码失败"))?;
+    crate::install::atomic_write_0600(
+        record
+            .to_str()
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "迁移记录路径无效"))?,
+        &data,
+    )
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "迁移记录保存失败"))
+}
+
+type LoginError = (StatusCode, &'static str);
+
+async fn prove_owner(kernel: &KernelManager, token: String) -> Result<Record, LoginError> {
+    if token.is_empty() || token.len() > 4096 || !token.is_ascii() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "请先从飞牛桌面用原 QwenPaw 账号登录一次",
+        ));
+    }
+    let path = format!("{}/api/auth/verify", kernel.base_path());
+    let req = Request::post(path)
+        .header("x-fnos-entry-command", "prove")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "无效的旧会话"))?;
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let resp = send(kernel, req).await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "尚无可用的迁移版内核，请先安装匹配的内核适配并启动服务",
+            )
+        })?;
+        if resp.status() != StatusCode::OK {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "旧账号归属无法确认；请重新登录原账号",
+            ));
+        }
+        let body = axum::body::to_bytes(Body::new(resp.into_body()), 2048)
+            .await
+            .map_err(|_| (StatusCode::BAD_GATEWAY, "内核返回无效"))?;
+        let r: Record = serde_json::from_slice(&body)
+            .map_err(|_| (StatusCode::BAD_GATEWAY, "内核不支持迁移协议"))?;
+        if r.v != 1
+            || r.instance != crate::proxy_auth::DEFAULT_INSTANCE
+            || r.owner.trim().is_empty()
+            || r.owner.len() > 256
+            || r.owner.chars().any(char::is_control)
+        {
+            return Err((StatusCode::BAD_GATEWAY, "内核身份无效"));
+        }
+        Ok(r)
+    })
+    .await
+    .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, "旧账号校验超时"))?
+}
+
+pub async fn confirm_native_login(
+    kernel: &KernelManager,
+    username: &str,
+    password: &str,
+) -> Result<(), LoginError> {
+    let unavailable = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "请先启动含匹配适配的受管内核，再切换登录方式",
+    );
+    let denied = (
+        StatusCode::UNAUTHORIZED,
+        "未能验证 QwenPaw 原账号，请检查用户名和密码",
+    );
+    if !kernel.supports_native_proxy() {
+        return Err(unavailable);
+    }
+    let login = Request::post(format!("{}/api/auth/login", kernel.base_path()))
+        .header("x-fnos-entry-command", "native")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"username": username, "password": password, "expires_in": 30})
+                .to_string(),
+        ))
+        .map_err(|_| unavailable)?;
+    let check = async {
+        let reply = send(kernel, login).await.map_err(|_| unavailable)?;
+        match reply.status() {
+            StatusCode::OK => (),
+            s @ (StatusCode::LOCKED | StatusCode::TOO_MANY_REQUESTS) => {
+                return Err((s, "原账号登录尝试过多，请稍后重试"))
+            }
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(denied),
+            _ => return Err(unavailable),
+        }
+        #[derive(serde::Deserialize)]
+        struct Login {
+            username: String,
+            token: String,
+        }
+        let bytes = axum::body::to_bytes(Body::new(reply.into_body()), 8192)
+            .await
+            .map_err(|_| unavailable)?;
+        let login: Login = serde_json::from_slice(&bytes).map_err(|_| unavailable)?;
+        if login.username != username || login.token.is_empty() {
+            return Err(denied);
+        }
+        if prove_owner(kernel, login.token).await?.owner != username {
+            return Err(denied);
+        }
+        if selected(&kernel.entry_record()) {
+            // Read the existing desktop binding via the kernel's validated private transport.
+            let req = Request::get(format!("{}/api/auth/verify", kernel.base_path()))
+                .body(Body::empty())
+                .map_err(|_| unavailable)?;
+            let reply = send(kernel, req).await.map_err(|_| unavailable)?;
+            if reply.status() != StatusCode::OK {
+                return Err(unavailable);
+            }
+            #[derive(serde::Deserialize)]
+            struct Binding {
+                valid: bool,
+                username: String,
+            }
+            let bytes = axum::body::to_bytes(Body::new(reply.into_body()), 2048)
+                .await
+                .map_err(|_| unavailable)?;
+            let bound: Binding = serde_json::from_slice(&bytes).map_err(|_| unavailable)?;
+            if !bound.valid || bound.username != username {
+                return Err((StatusCode::CONFLICT, "原账号与已绑定的飞牛入口身份不符"));
+            }
+        }
+        Ok(())
+    };
+    tokio::time::timeout(Duration::from_secs(6), check)
+        .await
+        .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, "校验原账号超时"))?
+}

@@ -1,61 +1,60 @@
-export function createMobileNavigation() {
-  const sections = ["overview", "configuration", "authorization", "logs"];
-  const nav = document.getElementById("mobileSectionNav");
-  const links = Array.from(nav?.querySelectorAll<HTMLAnchorElement>("a[data-section][href^='#']") || []);
-  const validStructure = links.length === sections.length && sections.every(section =>
-    links.some(link => link.dataset.section === section && link.getAttribute("href") === `#${section}`)
-    && document.getElementById(section)?.dataset.mobilePanel === section
-  );
-  let started = false;
+import { computed, nextTick, ref } from 'vue';
 
-  function select(section: string, updateHistory = false): void {
-    const valid = sections.includes(section) || section === "version";
-    const selected = section === "version" ? "overview" : valid ? section : "overview";
-    const hash = `#${section === "version" ? section : selected}`;
-    if (updateHistory && window.location.hash !== hash) {
-      history.pushState(history.state, "", hash);
-    } else if (!updateHistory && !valid && window.matchMedia("(max-width: 768px)").matches) {
-      history.replaceState(history.state, "", hash);
-    }
-    for (const link of links) {
-      if (link.dataset.section === selected) link.setAttribute("aria-current", "page");
-      else link.removeAttribute("aria-current");
-    }
-    document.documentElement.setAttribute("data-mobile-section", selected);
+export const sectionLabels = {
+  overview: '概览', configuration: '配置', authorization: '授权与备份', logs: '日志',
+} as const;
+type Section = keyof typeof sectionLabels;
+export type ConsoleView = Section | 'version';
+
+function isView(value: string): value is ConsoleView {
+  return value === 'version' || Object.prototype.hasOwnProperty.call(sectionLabels, value);
+}
+
+export function createNavigation(onView: (view: ConsoleView | null) => void) {
+  const current = ref<ConsoleView | null>(null);
+  const section = computed(() => current.value === 'version' ? 'overview' : current.value);
+
+  function stop() {
+    window.removeEventListener('hashchange', sync);
+    window.removeEventListener('popstate', sync);
   }
-
-  const handlers = links.map(link => ({
-    link,
-    click: (event: MouseEvent) => {
-      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      event.preventDefault();
-      select(link.dataset.section || "overview", true);
-    },
-  }));
-  const syncSection = () => select(window.location.hash.slice(1));
-
-  function stop(): void {
-    if (!started) return;
-    started = false;
-    for (const { link, click } of handlers) link.removeEventListener("click", click);
-    window.removeEventListener("hashchange", syncSection);
-    window.removeEventListener("popstate", syncSection);
-    document.documentElement.removeAttribute("data-mobile-section");
-  }
-
-  function start(): void {
-    if (started || !validStructure) return;
-    try {
-      syncSection();
-      for (const { link, click } of handlers) link.addEventListener("click", click);
-      window.addEventListener("hashchange", syncSection);
-      window.addEventListener("popstate", syncSection);
-      started = true;
-    } catch (error) {
-      stop();
-      console.error("mobile navigation err:", error);
+  function sync() {
+    const requested = location.hash.slice(1);
+    const view = isView(requested) ? requested : 'overview';
+    if (requested !== view) {
+      try { history.replaceState(history.state, '', `#${view}`); }
+      catch (error) {
+        stop();
+        current.value = null;
+        delete document.documentElement.dataset.mobileSection;
+        console.warn('navigation unavailable', error);
+        onView(null);
+        return;
+      }
     }
+    if (current.value === view) return;
+    const changed = current.value !== null;
+    current.value = view;
+    document.documentElement.dataset.mobileSection = section.value ?? 'overview';
+    onView(view);
+    if (changed || view === 'version') void nextTick(() => {
+      if (current.value !== view) return;
+      const target = document.getElementById(view);
+      if (!target) return;
+      if (changed) target.focus({ preventScroll: true });
+      if (view === 'version') target.scrollIntoView({ block: 'start' });
+      else window.scrollTo(0, 0);
+    });
   }
-
-  return { start, stop, select };
+  function start() {
+    window.addEventListener('hashchange', sync);
+    window.addEventListener('popstate', sync);
+    sync();
+  }
+  return {
+    start, stop,
+    get section() { return section.value; },
+    get title() { return sectionLabels[section.value ?? 'overview']; },
+    hides(id: Section) { return section.value !== null && section.value !== id; },
+  };
 }

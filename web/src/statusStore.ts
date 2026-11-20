@@ -1,8 +1,6 @@
 import type { StatusResponse } from "./api";
 
-// 状态快照类型与格式化工具(Preact 版:纯数据契约,无框架绑定)。
-// 渲染契约:vanilla 轮询(fetchStatus 等)每拍以最新数据调 render() 重渲染,
-// Preact 负责 diff —— 行为语义(节奏/隐藏页暂停/旁路副作用)全部留在 vanilla。
+// 状态快照与格式化独立于 UI；组件不拥有轮询和订阅。
 export interface StatusData {
   // undefined = 尚未取得首个快照；null = 后端不可达、安装状态未知
   // 三态必须区分:把"未知"写成 false 会被下游当成"确定未安装"
@@ -10,10 +8,11 @@ export interface StatusData {
   running: boolean;
   pid: string;
   startAt: number | null; // epoch 秒
-  cpu: number | null; // 占总 CPU 百分比(监督者 300ms 采样)
+  cpu: number | null; // 相邻进程采样的 CPU 百分比，首个样本暂无差值
   memKB: number | null; // RSS
   degraded?: boolean; // true = 后端不可达(502/网络错误/会话过期),非"未安装"
   degradedDetail?: string;
+  recoveryReason?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -34,7 +33,7 @@ export function isStatusSnapshot(value: unknown): value is StatusResponse {
     && (typeof value.pid === "string" && /^\d+$/.test(value.pid)
       || typeof value.pid === "number" && Number.isSafeInteger(value.pid) && value.pid >= 0)
     && nonnegativeNumber(value.startAt) && Number.isSafeInteger(value.startAt)
-    && nonnegativeNumber(value.cpu)
+    && (value.cpu === null || nonnegativeNumber(value.cpu))
     && nonnegativeNumber(value.memKB) && Number.isSafeInteger(value.memKB)
     && typeof value.version === "string"
     && typeof value.port === "number" && Number.isInteger(value.port) && value.port > 0 && value.port <= 65535
@@ -45,14 +44,16 @@ export function isStatusSnapshot(value: unknown): value is StatusResponse {
 }
 
 export function formatUptime(seconds: number | null): string {
-  if (!seconds || seconds <= 0) return "-";
+  if (seconds === null || seconds < 0) return "-";
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = Math.floor(seconds % 60);
-  // 进程运行时长须显示到秒:刚重启的 59 秒内只显示"0分钟"会被误读为卡住
-  if (days > 0) return `${days}天 ${hours}小时 ${minutes}分`;
-  if (hours > 0) return `${hours}小时 ${minutes}分`;
+  if (hours > 0 || days > 0) {
+    const units = days ? [hours, minutes] : [hours, minutes, secs];
+    const clock = units.map(n => String(n).padStart(2, '0')).join(':');
+    return days ? `${days}天 ${clock}` : clock;
+  }
   if (minutes > 0) return `${minutes}分 ${secs}秒`;
   return `${secs}秒`;
 }

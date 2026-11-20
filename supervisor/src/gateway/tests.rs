@@ -390,9 +390,11 @@ const WRITE_ROUTES: &[&str] = &[
     "kernel/install",
     "kernel/uninstall",
     "kernel/pin",
-    "kernel/reset-auth",
+    "kernel/admin-password",
     "port",
     "web-proxy/port",
+    "web-proxy/use-native-login",
+    "entry-login/migrate",
     "settings",
     "mirror",
 ];
@@ -1393,6 +1395,8 @@ async fn capture_web_upstream(
         || parts.uri.path().to_owned(),
         |value| value.as_str().to_owned(),
     );
+    let authenticated = parts.headers.get(header::AUTHORIZATION)
+        == Some(&HeaderValue::from_static("Bearer upstream-token"));
     let _ = sender.send(CapturedWebRequest {
         method: parts.method.clone(),
         uri: uri.clone(),
@@ -1400,6 +1404,16 @@ async fn capture_web_upstream(
         body: bytes.to_vec(),
     });
 
+    if matches!(
+        uri.as_str(),
+        "/api/auth/verify" | "/app/qwenpaw/web/api/auth/verify"
+    ) {
+        return if authenticated {
+            Json(json!({"valid": true, "username": "fixture"})).into_response()
+        } else {
+            StatusCode::UNAUTHORIZED.into_response()
+        };
+    }
     if uri == "/" {
         return upstream_sample(
             include_bytes!("testdata/qwenpaw-2.2.2.post1-index.html"),
@@ -1583,17 +1597,135 @@ async fn start_web_upstream(
     (receiver, server)
 }
 
-async fn start_tcp_web_proxy(
-    state: AppState,
-) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+#[tokio::test]
+async fn proxy_login_http_validates_origin_and_keeps_session_out_of_upstream() {
+    let (_dir, state, _) = fixture("proxy-http-login");
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    state.proxy_auth.set_password("fixture-lan").unwrap();
+    let manager = WebProxyManager::start(state, 0, false).await.unwrap();
+    let addr = ([127, 0, 0, 1], manager.state().await.0).into();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("nas.test:3079"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    for origin in [
+        None,
+        Some("null"),
+        Some("http://nas.test:3078"),
+        Some("http://other.test:3079"),
+    ] {
+        if let Some(origin) = origin {
+            headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+        }
+        let response = tcp_web_request(
+            addr,
+            Method::POST,
+            "/_qwenpaw_proxy/login",
+            headers.clone(),
+            Body::from("password=fixture-lan"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+    }
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://nas.test:3079"),
+    );
+    let response = tcp_web_request(
+        addr,
+        Method::POST,
+        "/_qwenpaw_proxy/login",
+        headers.clone(),
+        Body::from("password=fixture-lan"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+    assert!(!cookie.starts_with("__Host-") && !cookie.contains("; Secure"));
+    assert!(cookie.contains("; HttpOnly") && cookie.contains("; SameSite=Strict"));
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(cookie.split(';').next().unwrap()).unwrap(),
+    );
+    let response = tcp_web_request(
+        addr,
+        Method::POST,
+        "/api/auth/login",
+        headers,
+        Body::from("{}"),
+    )
+    .await;
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    let forwarded = captured.try_recv().unwrap();
+    assert_eq!(forwarded.uri, "/api/auth/login");
+    assert!(!forwarded.headers.contains_key(header::COOKIE));
+    upstream.abort();
+}
+
+async fn start_tcp_web_proxy(state: AppState) -> (AuthenticatedProxy, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
+    let auth = state.proxy_auth.clone();
     let server = tokio::spawn(async move {
         axum::serve(listener, web_tcp_router(state)).await.unwrap();
     });
-    (addr, server)
+    (authenticate_proxy(addr, &auth).await, server)
+}
+
+struct AuthenticatedProxy {
+    addr: std::net::SocketAddr,
+    cookie: String,
+}
+async fn authenticate_proxy(
+    addr: std::net::SocketAddr,
+    auth: &Arc<crate::proxy_auth::ProxyAuth>,
+) -> AuthenticatedProxy {
+    auth.set_password("test-only-pw").unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("proxy.test"));
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://proxy.test"),
+    );
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    let response = tcp_web_request(
+        addr,
+        Method::POST,
+        "/_qwenpaw_proxy/login",
+        headers,
+        Body::from("password=test-only-pw"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    AuthenticatedProxy { addr, cookie }
+}
+async fn authenticated_request(
+    proxy: &AuthenticatedProxy,
+    method: Method,
+    path: &str,
+    mut headers: HeaderMap,
+    body: Body,
+) -> hyper::Response<hyper::body::Incoming> {
+    headers.append(
+        header::COOKIE,
+        HeaderValue::from_str(&proxy.cookie).unwrap(),
+    );
+    tcp_web_request(proxy.addr, method, path, headers, body).await
 }
 
 async fn tcp_web_request(
@@ -1711,6 +1843,20 @@ async fn start_config_auth_upstream(
                     ))
                     .unwrap();
             }
+            for (session, payload) in [
+                ("anonymous-principal", r#"{"valid":true,"username":""}"#),
+                ("blank-principal", r#"{"valid":true,"username":"  "}"#),
+                (
+                    "invalid-principal",
+                    r#"{"valid":false,"username":"fixture"}"#,
+                ),
+                ("no-principal", r#"{"valid":true}"#),
+                ("not-json", "not a verification response"),
+            ] {
+                if has_session(session) {
+                    return (StatusCode::OK, payload).into_response();
+                }
+            }
             if has_session("large-response") {
                 return Response::builder()
                     .status(StatusCode::OK)
@@ -1730,9 +1876,10 @@ async fn start_config_auth_upstream(
                     ))
                     .unwrap();
             }
-            let status = if has_session("valid") || (has_bearer && cookie.is_empty()) {
-                StatusCode::OK
-            } else if has_session("valid-201") {
+            if has_session("valid") || (has_bearer && cookie.is_empty()) {
+                return Json(json!({"valid": true, "username": "fixture"})).into_response();
+            }
+            let status = if has_session("valid-201") {
                 StatusCode::CREATED
             } else if has_session("valid-204") {
                 StatusCode::NO_CONTENT
@@ -1790,8 +1937,8 @@ async fn tcp_config_anonymous_and_forged_sessions_never_reach_config() {
         ("forged", forged, Some("qwenpaw_session=forged"), true, true),
         ("internal only", internal_only, None, false, false),
     ] {
-        let response = tcp_web_request(
-            addr,
+        let response = authenticated_request(
+            &addr,
             Method::GET,
             "/api/config/channels",
             headers,
@@ -1846,8 +1993,8 @@ async fn tcp_config_denies_before_reading_or_forwarding_a_pending_body() {
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<&'static str, io::Error>>(1);
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        tcp_web_request(
-            addr,
+        authenticated_request(
+            &addr,
             Method::POST,
             "/api/config/channels",
             config_cookie("wrong"),
@@ -1884,8 +2031,8 @@ async fn tcp_options_preflight_is_forwarded_without_management_csrf() {
         "access-control-request-headers",
         HeaderValue::from_static("authorization,content-type"),
     );
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::OPTIONS,
         "/api/models/active",
         headers,
@@ -1920,8 +2067,8 @@ async fn tcp_model_mutation_methods_reach_upstream_with_original_bodies() {
         (Method::PATCH, "/api/models/active", "{\\\"model\\\":true}"),
         (Method::DELETE, "/api/models/libwrt/config", ""),
     ] {
-        let response = tcp_web_request(
-            addr,
+        let response = authenticated_request(
+            &addr,
             method.clone(),
             path,
             root_auth_headers(),
@@ -1942,13 +2089,14 @@ async fn tcp_model_mutation_methods_reach_upstream_with_original_bodies() {
 async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
     let (_dir, state, _) = fixture("tcp-public-upstream-auth");
     let (mut captured, upstream) = start_web_upstream(&state).await;
+    let auth = state.proxy_auth.clone();
     let manager = WebProxyManager::start(state, 0, true).await.unwrap();
     let (port, public) = manager.state().await;
     assert!(public);
-    let addr = format!("127.0.0.1:{port}").parse().unwrap();
+    let addr = authenticate_proxy(format!("127.0.0.1:{port}").parse().unwrap(), &auth).await;
 
-    let denied = tcp_web_request(
-        addr,
+    let denied = authenticated_request(
+        &addr,
         Method::GET,
         "/api/files/preview/etc/passwd",
         HeaderMap::new(),
@@ -1961,8 +2109,8 @@ async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
         "unauthenticated preview reached upstream"
     );
 
-    let login = tcp_web_request(
-        addr,
+    let login = authenticated_request(
+        &addr,
         Method::POST,
         "/api/auth/login",
         HeaderMap::new(),
@@ -1972,8 +2120,8 @@ async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
     assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/login");
 
-    let accepted = tcp_web_request(
-        addr,
+    let accepted = authenticated_request(
+        &addr,
         Method::GET,
         "/api/models/active",
         root_auth_headers(),
@@ -1996,11 +2144,12 @@ async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
 async fn same_port_public_switch_survives_an_idle_sse_connection() {
     let (_dir, state, _) = fixture("tcp-public-switch-sse");
     let (_captured, upstream) = start_web_upstream(&state).await;
+    let auth = state.proxy_auth.clone();
     let manager = WebProxyManager::start(state, 0, false).await.unwrap();
     let (port, _) = manager.state().await;
-    let addr = format!("127.0.0.1:{port}").parse().unwrap();
-    let response = tcp_web_request(
-        addr,
+    let addr = authenticate_proxy(format!("127.0.0.1:{port}").parse().unwrap(), &auth).await;
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/sse-hold",
         HeaderMap::new(),
@@ -2014,7 +2163,7 @@ async fn same_port_public_switch_survives_an_idle_sse_connection() {
         .expect("same-port switch hung behind an idle SSE connection");
     assert!(switched.is_ok(), "same-port switch failed: {switched:?}");
     assert_eq!(manager.state().await, (port, true));
-    let mut probe = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut probe = tokio::net::TcpStream::connect(addr.addr).await.unwrap();
     let error = tokio::time::timeout(
         Duration::from_millis(100),
         tokio::io::AsyncReadExt::read_to_end(&mut probe, &mut Vec::new()),
@@ -2034,8 +2183,8 @@ async fn tcp_config_rejects_missing_session_without_calling_upstream() {
     let (_dir, state, _) = fixture("tcp-config-auth-no-session");
     let (mut captured, upstream) = start_web_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/api/config/channels",
         HeaderMap::new(),
@@ -2075,8 +2224,8 @@ async fn tcp_config_failed_verify_connection_never_reaches_config() {
             .is_err()
     });
     let (addr, server) = start_tcp_web_proxy(state).await;
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/api/config/channels",
         config_cookie("valid"),
@@ -2105,15 +2254,10 @@ async fn tcp_config_valid_session_is_verified_before_forwarding_original_request
             "/api/config/channels?format=json",
             Vec::new(),
         ),
-        (
-            Method::HEAD,
-            "valid-201",
-            "/api/config/channels",
-            Vec::new(),
-        ),
+        (Method::HEAD, "valid", "/api/config/channels", Vec::new()),
         (
             Method::POST,
-            "valid-204",
+            "valid",
             "/api/config/channels?update=1",
             vec![b'x'; 128 * 1024],
         ),
@@ -2123,8 +2267,8 @@ async fn tcp_config_valid_session_is_verified_before_forwarding_original_request
             header::COOKIE,
             HeaderValue::from_str(&format!("ost=fnos; qwenpaw_session={session}; qwenpaw_csrf=internal; supervisor-token=secret; supervisor_token=secret2")).unwrap(),
         );
-        let response = tcp_web_request(
-            addr,
+        let response = authenticated_request(
+            &addr,
             method.clone(),
             path,
             headers,
@@ -2181,8 +2325,8 @@ async fn tcp_config_bearer_session_is_verified_without_requiring_a_cookie() {
     let (addr, server) = start_tcp_web_proxy(state).await;
     let mut headers = root_auth_headers();
     headers.remove(header::COOKIE);
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/api/config/channels",
         headers,
@@ -2213,13 +2357,20 @@ async fn tcp_config_rejects_non_success_and_broken_or_oversized_verify_responses
     let (mut captured, upstream) = start_config_auth_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
     for (session, expected) in [
+        ("anonymous-principal", StatusCode::UNAUTHORIZED),
+        ("blank-principal", StatusCode::UNAUTHORIZED),
+        ("invalid-principal", StatusCode::UNAUTHORIZED),
+        ("no-principal", StatusCode::BAD_GATEWAY),
+        ("not-json", StatusCode::BAD_GATEWAY),
+        ("valid-201", StatusCode::BAD_GATEWAY),
+        ("valid-204", StatusCode::BAD_GATEWAY),
         ("redirect", StatusCode::UNAUTHORIZED),
         ("unavailable", StatusCode::UNAUTHORIZED),
         ("large-response", StatusCode::BAD_GATEWAY),
         ("broken-response", StatusCode::BAD_GATEWAY),
     ] {
-        let response = tcp_web_request(
-            addr,
+        let response = authenticated_request(
+            &addr,
             Method::GET,
             "/api/config/channels",
             config_cookie(session),
@@ -2240,8 +2391,8 @@ async fn tcp_config_verify_timeout_covers_response_headers_and_body_together() {
     let (mut captured, upstream) = start_config_auth_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
     let start = tokio::time::Instant::now();
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/api/config/channels",
         config_cookie("slow-both"),
@@ -2272,12 +2423,12 @@ async fn tcp_config_encoded_paths_cannot_bypass_verify() {
         "/api/%2563onfig/channels",
     ] {
         let response =
-            tcp_web_request(addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
+            authenticated_request(&addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         assert!(captured.try_recv().is_err(), "{path} reached upstream");
     }
-    let other = tcp_web_request(
-        addr,
+    let other = authenticated_request(
+        &addr,
         Method::GET,
         "/api/configuration",
         HeaderMap::new(),
@@ -2324,7 +2475,8 @@ async fn tcp_root_serves_html_at_root_with_guarded_chinese_default() {
     let (_dir, state, _) = fixture("tcp-web-root-html");
     let (mut captured, upstream) = start_web_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
-    let response = tcp_web_request(addr, Method::GET, "/", HeaderMap::new(), Body::empty()).await;
+    let response =
+        authenticated_request(&addr, Method::GET, "/", HeaderMap::new(), Body::empty()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = to_bytes(Body::new(response.into_body()), 128 * 1024)
         .await
@@ -2346,7 +2498,8 @@ async fn tcp_root_forwards_assets_without_rewriting() {
     let (mut captured, upstream) = start_web_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
     let path = "/assets/index-BpFaGbCq.js";
-    let response = tcp_web_request(addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
+    let response =
+        authenticated_request(&addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
     let body = to_bytes(Body::new(response.into_body()), 2 * 1024 * 1024)
@@ -2535,7 +2688,7 @@ async fn tcp_root_compresses_uncompressed_upstream_javascript_as_gzip() {
     let mut headers = HeaderMap::new();
     headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
 
-    let response = tcp_web_request(addr, Method::GET, path, headers, Body::empty()).await;
+    let response = authenticated_request(&addr, Method::GET, path, headers, Body::empty()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
     assert_eq!(
@@ -2607,7 +2760,8 @@ async fn tcp_sse_with_gzip_accepted_stays_uncompressed_and_streaming() {
     let (addr, server) = start_tcp_web_proxy(state).await;
     let mut headers = HeaderMap::new();
     headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
-    let mut response = tcp_web_request(addr, Method::GET, "/sse", headers, Body::empty()).await;
+    let mut response =
+        authenticated_request(&addr, Method::GET, "/sse", headers, Body::empty()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers()[header::CONTENT_TYPE],
@@ -2657,8 +2811,8 @@ async fn tcp_root_forwards_upstream_auth_and_scrubs_gateway_credentials() {
     let (mut captured, upstream) = start_web_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
     let path = "/api/auth/login?next=chat";
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::POST,
         path,
         root_auth_headers(),
@@ -2697,8 +2851,8 @@ async fn tcp_root_does_not_mount_supervisor_management_api() {
     let (_dir, state, _) = fixture("tcp-web-no-management");
     let (mut captured, upstream) = start_web_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/api/status",
         HeaderMap::new(),
@@ -2724,8 +2878,8 @@ async fn tcp_prefixed_management_path_is_proxied_instead_of_mounted() {
     let (addr, server) = start_tcp_web_proxy(state).await;
     let mut headers = root_auth_headers();
     headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
-    let response = tcp_web_request(
-        addr,
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/app/qwenpaw/api/status",
         headers,
@@ -2804,7 +2958,7 @@ async fn tcp_root_javascript_preserves_the_client_accept_encoding_header() {
         HeaderValue::from_static("gzip, br"),
     );
 
-    let response = tcp_web_request(addr, Method::GET, path, headers, Body::empty()).await;
+    let response = authenticated_request(&addr, Method::GET, path, headers, Body::empty()).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
@@ -3097,9 +3251,9 @@ async fn installed_status_remains_true_when_python_metadata_times_out() {
     fs::write(&python, "#!/bin/sh\nexec sleep 60\n").unwrap();
     fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(state.kernel.installed());
-
+    let started = std::time::Instant::now();
     let response = tokio::time::timeout(
-        Duration::from_secs(25),
+        Duration::from_secs(1),
         router.oneshot(request(
             "GET",
             "/app/qwenpaw/api/status",
@@ -3116,6 +3270,17 @@ async fn installed_status_remains_true_when_python_metadata_times_out() {
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(payload["installed"], true);
     assert_eq!(payload["version"], "");
+    eprintln!(
+        "cold Gateway /status with stalled metadata: {:?}",
+        started.elapsed()
+    );
+    // The authoritative probe still times out; do not leave its child running after the fixture.
+    assert!(
+        tokio::task::spawn_blocking(move || state.kernel.kernel_version())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -3264,9 +3429,9 @@ async fn gateway_proxy_port_api_requires_admin_and_csrf_and_switches_the_listene
         "1\n"
     );
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], new_port));
-    let response = tcp_web_request(
-        addr,
+    let addr = authenticate_proxy(([127, 0, 0, 1], new_port).into(), &state.proxy_auth).await;
+    let response = authenticated_request(
+        &addr,
         Method::GET,
         "/api/status",
         root_auth_headers(),
@@ -4609,6 +4774,45 @@ async fn web_proxy_preserves_mount_boundaries_head_errors_and_dynamic_kernel_por
 }
 
 #[tokio::test]
+async fn stopped_web_entry_offers_retry_only_for_html_navigation() {
+    let (_dir, state, router) = fixture("stopped-web-entry");
+    state.core.kernel.set_port(0);
+    for (method, path, accept, expect_page) in [
+        (
+            "GET",
+            "/app/qwenpaw/web/",
+            "text/html,application/xhtml+xml",
+            true,
+        ),
+        ("GET", "/app/qwenpaw/web/", "application/json", false),
+        ("GET", "/app/qwenpaw/web/api/status", "text/html", false),
+        ("HEAD", "/app/qwenpaw/web/", "text/html", false),
+    ] {
+        let mut headers = admin_headers();
+        headers.insert(header::ACCEPT, HeaderValue::from_static(accept));
+        let response = router
+            .clone()
+            .oneshot(request(method, path, headers, Body::empty(), Some(peer())))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        if expect_page {
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-store"
+            );
+            assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
+        }
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        if expect_page {
+            assert!(std::str::from_utf8(&bytes).unwrap().contains("重新检查"));
+        } else {
+            assert!(bytes.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn web_proxy_streams_sse_and_rejects_websocket_upgrade_explicitly() {
     let (_dir, state, router) = fixture("gateway-web-proxy-stream");
     let (mut captured, server) = start_web_upstream(&state).await;
@@ -4927,5 +5131,60 @@ async fn web_proxy_releases_sse_permit_when_downstream_disconnects() {
         released.is_ok(),
         "SSE permit leaked after downstream disconnect"
     );
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn unconfigured_proxy_serves_native_entry_in_both_bind_modes() {
+    for public in [false, true] {
+        let (_dir, state, _) = fixture("unconfigured-proxy");
+        let (mut captured, upstream) = start_web_upstream(&state).await;
+        let manager = WebProxyManager::start(state, 0, public).await.unwrap();
+        let addr = ([127, 0, 0, 1], manager.state().await.0).into();
+        for path in ["/", "/api/version", "/assets/example.js"] {
+            let response =
+                tcp_web_request(addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
+            assert!(
+                response.status().is_success(),
+                "{path}: {}",
+                response.status()
+            );
+            assert_eq!(captured.try_recv().unwrap().uri, path);
+        }
+        upstream.abort();
+    }
+}
+
+#[tokio::test]
+async fn proxy_password_rotation_closes_open_stream_and_port_change_preserves_login() {
+    let (_dir, state, _) = fixture("proxy-rotation-stream");
+    let (_captured, upstream) = start_web_upstream(&state).await;
+    let auth = state.proxy_auth.clone();
+    let manager = WebProxyManager::start(state, 0, false).await.unwrap();
+    let mut client =
+        authenticate_proxy(([127, 0, 0, 1], manager.state().await.0).into(), &auth).await;
+    let port = manager.reconfigure(0, false).await.unwrap();
+    client.addr.set_port(port);
+    let response = authenticated_request(
+        &client,
+        Method::GET,
+        "/sse-hold",
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    auth.set_password("test-new-pw").unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(2),
+        to_bytes(Body::new(response.into_body()), 512),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(bytes.is_empty());
+    let denied =
+        authenticated_request(&client, Method::GET, "/", HeaderMap::new(), Body::empty()).await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     upstream.abort();
 }

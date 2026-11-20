@@ -6,6 +6,7 @@ export interface ApiMessageResponse {
 export interface VersionItem {
   version: string;
   is_beta: boolean;
+  published_at?: string;
   action?: string;
 }
 
@@ -16,7 +17,7 @@ export interface StatusResponse extends ApiMessageResponse {
   startAt?: number | null;
   cpu?: number | null;
   memKB?: number | null;
-  install?: { running?: boolean };
+  install?: { running?: boolean; recovery_required?: boolean; recovery_error?: string | null };
   version?: string;
   authStatus?: string;
   authEnabled?: boolean;
@@ -26,6 +27,7 @@ export interface StatusResponse extends ApiMessageResponse {
 export interface VersionListResponse extends ApiMessageResponse {
   versions?: VersionItem[];
   latest_stable?: string;
+  recommended_version?: string | null;
   latest_beta?: string;
 }
 
@@ -120,16 +122,18 @@ export interface ApiClient {
   readonly base: string;
   status(): Promise<ApiResult<StatusResponse>>;
   changePort(port: number): Promise<ApiResult<ApiMessageResponse>>;
-  webProxyPort(): Promise<ApiResult<{ port: number; public: boolean }>>;
+  webProxyPort(): Promise<ApiResult<{ port: number; public: boolean; passwordConfigured?: boolean | null; entryLogin?: boolean }>>;
   changeWebProxyPort(port: number, publicAccess: boolean): Promise<ApiResult<ApiMessageResponse & { port: number }>>;
-  resetAuth(): Promise<ApiResult<ApiMessageResponse>>;
+  useNativeLogin(username: string, password: string): Promise<ApiResult<ApiMessageResponse>>;
+  migrateEntry(token: string): Promise<ApiResult<ApiMessageResponse>>;
+  resetAuth(password: string): Promise<ApiResult<ApiMessageResponse>>;
   uninstallKernel(): Promise<ApiResult<ApiMessageResponse>>;
   controlService(action: ServiceAction): Promise<ApiResult<ApiMessageResponse>>;
   getMirror(): Promise<ApiResult<MirrorResponse>>;
   setMirror(mirror: string): Promise<ApiResult<ApiMessageResponse>>;
   versionList(): Promise<ApiResult<VersionListResponse>>;
   upgradeStatus(): Promise<ApiResult<InstallStatusResponse>>;
-  upgrade(version: string, mirror: string): Promise<ApiResult<InstallStatusResponse>>;
+  upgrade(version: string, mirror: string, backup?: boolean): Promise<ApiResult<InstallStatusResponse>>;
   upgradeLogs(seq: number, instance: string): Promise<ApiResult<LogsResponse>>;
   logs(lines: number): Promise<ApiResult<LogsResponse>>;
   clearLogs(): Promise<ApiResult<ApiMessageResponse>>;
@@ -224,17 +228,19 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     return request<T>(`${base}/${route}`, init, writeTimeoutMs);
   }
 
-  function upgrade(version: string, mirror: string): Promise<ApiResult<InstallStatusResponse>> {
-    return post<InstallStatusResponse>("kernel/install", { version, mirror }, true);
+  function upgrade(version: string, mirror: string, backup?: boolean): Promise<ApiResult<InstallStatusResponse>> {
+    return post<InstallStatusResponse>("kernel/install", { version, mirror, ...(backup ? { backup: true } : {}) }, true);
   }
 
   return {
     base,
     status: () => get<StatusResponse>("status"),
     changePort: (port) => post<ApiMessageResponse>("port", { port }),
-    webProxyPort: () => get<{ port: number; public: boolean }>("web-proxy/port"),
+    webProxyPort: () => get<{ port: number; public: boolean; passwordConfigured?: boolean | null; entryLogin?: boolean }>("web-proxy/port"),
     changeWebProxyPort: (port, publicAccess) => post<ApiMessageResponse & { port: number }>("web-proxy/port", { port, public: publicAccess }),
-    resetAuth: () => post<ApiMessageResponse>("kernel/reset-auth"),
+    migrateEntry: (token) => post<ApiMessageResponse>("entry-login/migrate", {token}),
+    useNativeLogin: (username, password) => post<ApiMessageResponse>("web-proxy/use-native-login", { confirm: true, username, password }),
+    resetAuth: (password) => post<ApiMessageResponse>("kernel/admin-password", { password }),
     uninstallKernel: () => post<ApiMessageResponse>("kernel/uninstall"),
     controlService: (action) => post<ApiMessageResponse>(action),
     getMirror: () => get<MirrorResponse>("mirror"),

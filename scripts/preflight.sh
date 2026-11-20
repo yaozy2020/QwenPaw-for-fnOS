@@ -66,10 +66,10 @@ else
 fi
 echo
 
-# [4/7] 前端源码完整性(控制台由 web/src 经 esbuild 编译,源码即 SSOT;
+# [4/7] 前端源码完整性(控制台由 web/src 经 Vue/Vite 编译,源码即 SSOT;
 # 产物 app/www/index.html 自 -6 起退为构建时生成,不再入库)
 echo "[4/7] 前端源码完整性 ..."
-REQUIRED_WEB=(web/src/index.html web/src/main.ts web/src/components.tsx web/src/statusStore.ts web/src/style.css web/build.mjs web/package.json)
+REQUIRED_WEB=(web/src/index.html web/src/main.ts web/src/App.vue web/src/panelContext.ts web/src/views/StatusCard.vue web/build-panel.mjs web/src/statusStore.ts web/src/style.css web/build.mjs web/package.json)
 MISSING_WEB=()
 for f in "${REQUIRED_WEB[@]}"; do
   if [ ! -f "$PROJ_DIR/$f" ]; then

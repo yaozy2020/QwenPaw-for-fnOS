@@ -45,16 +45,6 @@ impl AuthReset {
         .sync_all()
     }
 
-    fn write(&self, committed: bool) -> io::Result<()> {
-        crate::install::atomic_write_0600(
-            &self.journal.to_string_lossy(),
-            &serde_json::to_string(&Record {
-                schema: 1,
-                committed,
-            })?,
-        )
-    }
-
     fn clear(&self) -> io::Result<()> {
         fs::remove_file(&self.journal)?;
         fs::File::open(
@@ -67,24 +57,6 @@ impl AuthReset {
 
     pub(crate) fn pending(&self) -> io::Result<bool> {
         Ok(regular_exists(&self.journal)? || regular_exists(&self.backup)?)
-    }
-
-    pub(crate) fn begin(&self) -> io::Result<bool> {
-        if self.pending()? {
-            return Err(io::Error::other("认证重置尚待恢复"));
-        }
-        if !regular_exists(&self.auth)? {
-            return Ok(false);
-        }
-        self.write(false)?;
-        fs::rename(&self.auth, &self.backup)?;
-        self.sync_auth()?;
-        Ok(true)
-    }
-
-    pub(crate) fn commit(&self) -> io::Result<()> {
-        self.write(true)?;
-        self.recover()
     }
 
     pub(crate) fn recover(&self) -> io::Result<()> {
@@ -126,13 +98,18 @@ mod tests {
     use super::*;
     use crate::api::test_support::TestDir;
 
+    fn legacy_prepared(tx: &AuthReset) {
+        fs::write(&tx.journal, br#"{"schema":1,"committed":false}"#).unwrap();
+        fs::rename(&tx.auth, &tx.backup).unwrap();
+    }
+
     #[test]
     fn pending_reset_restores_original_even_if_new_auth_was_created() {
         let dir = TestDir::new("auth-reset-pending");
         let auth = dir.0.join("auth.json");
         fs::write(&auth, "old-secret").unwrap();
         let tx = AuthReset::new(&auth, &dir.0);
-        assert!(tx.begin().unwrap());
+        legacy_prepared(&tx);
         fs::write(&auth, "new-secret").unwrap();
         tx.recover().unwrap();
         tx.recover().unwrap();
@@ -146,8 +123,8 @@ mod tests {
         let auth = dir.0.join("auth.json");
         fs::write(&auth, "old-secret").unwrap();
         let tx = AuthReset::new(&auth, &dir.0);
-        tx.begin().unwrap();
-        tx.write(true).unwrap(); // crash before cleanup
+        legacy_prepared(&tx);
+        fs::write(&tx.journal, br#"{"schema":1,"committed":true}"#).unwrap(); // crash before cleanup
         fs::write(&auth, "new-secret").unwrap();
         tx.recover().unwrap();
         assert_eq!(fs::read_to_string(auth).unwrap(), "new-secret");

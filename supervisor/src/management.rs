@@ -112,7 +112,7 @@ impl ManagementCore {
     ) -> Result<InstallAcceptance, ManagementError> {
         let (channel, mirror) = Self::resolve_install_request(version, mirror)?;
         let operation = self.try_operation()?;
-        self.submit_install_prepared(channel, mirror, operation)
+        self.submit_install_prepared(channel, mirror, operation, false)
             .await
     }
 
@@ -121,6 +121,7 @@ impl ManagementCore {
         channel: InstallChannel,
         mirror: String,
         _operation: OperationGuard,
+        backup: bool,
     ) -> Result<InstallAcceptance, ManagementError> {
         self.ensure_recovery_ready()?;
         let snapshot = self.install_snapshot();
@@ -128,11 +129,18 @@ impl ManagementCore {
             return Ok(InstallAcceptance::Busy { seq: snapshot.seq });
         }
 
+        let mut worker = self.install.clone();
+        if backup {
+            worker = worker.with_preinstall_backup(
+                Path::new(&self.share_dir),
+                self.kernel.status_now().running,
+            );
+        }
         self.kernel.stop().await;
         if let Some(error) = self.kernel.stop_verification_error() {
             return Err(ManagementError::OperationFailed(error));
         }
-        let started = self.install.try_start(
+        let started = worker.try_start(
             self.runtime_adapter(),
             self.kernel.port(),
             channel,

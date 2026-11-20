@@ -7,6 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub fn verified_kernel_version() -> &'static str {
+    include_str!("../../patches/verified-version").trim_end()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pep440Version {
     pub raw: String,
@@ -83,7 +87,12 @@ impl Pep440Version {
             let b = bytes[idx];
             if b.is_ascii_digit() {
                 let digit = (b - b'0') as u64;
-                current_num = Some(current_num.unwrap_or(0) * 10 + digit);
+                current_num = Some(
+                    current_num
+                        .unwrap_or(0)
+                        .checked_mul(10)?
+                        .checked_add(digit)?,
+                );
                 idx += 1;
             } else if b == b'.' {
                 // 点前必须是数字,否则是 .dev/.post 之类的后缀分隔符或非法输入
@@ -175,6 +184,8 @@ pub struct VersionItem {
     pub version: String,
     pub is_beta: bool,
     pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -183,6 +194,7 @@ pub struct VersionListResponse {
     pub versions: Vec<VersionItem>,
     pub latest_stable: String,
     pub latest_beta: String,
+    pub recommended_version: Option<String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub message: String,
 }
@@ -214,9 +226,12 @@ pub fn determine_action(current: &str, selected: &str) -> &'static str {
 }
 
 /// 对原始版本字符串列表做 PEP 440 权威排序并生成结构化响应
-pub fn build_version_list(raw_versions: &[String], current_version: &str) -> VersionListResponse {
+pub fn build_version_list(
+    raw_versions: &crate::version_index::Releases,
+    current_version: &str,
+) -> VersionListResponse {
     let mut parsed: Vec<Pep440Version> = raw_versions
-        .iter()
+        .keys()
         .filter_map(|v| Pep440Version::parse(v))
         .collect();
 
@@ -224,8 +239,8 @@ pub fn build_version_list(raw_versions: &[String], current_version: &str) -> Ver
     parsed.sort_by(|a, b| b.cmp(a));
     parsed.dedup_by(|a, b| a.raw == b.raw);
 
-    // 取前 14 个版本
-    parsed.truncate(14);
+    let verified = verified_kernel_version();
+    let recommended = parsed.iter().position(|v| v.raw == verified);
 
     let mut latest_stable = String::new();
     let mut latest_beta = String::new();
@@ -238,11 +253,13 @@ pub fn build_version_list(raw_versions: &[String], current_version: &str) -> Ver
         }
     }
 
+    parsed.sort_by(|a, b| raw_versions[&b.raw].cmp(&raw_versions[&a.raw]));
     let items: Vec<VersionItem> = parsed
         .into_iter()
         .map(|v| {
             let action = determine_action(current_version, &v.raw).to_string();
             VersionItem {
+                published_at: raw_versions[&v.raw].clone(),
                 is_beta: v.is_beta(),
                 action,
                 version: v.raw,
@@ -255,6 +272,7 @@ pub fn build_version_list(raw_versions: &[String], current_version: &str) -> Ver
         versions: items,
         latest_stable,
         latest_beta,
+        recommended_version: recommended.map(|_| verified.to_owned()),
         message: String::new(),
     }
 }
@@ -262,6 +280,10 @@ pub fn build_version_list(raw_versions: &[String], current_version: &str) -> Ver
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn index(versions: &[String]) -> crate::version_index::Releases {
+        versions.iter().cloned().map(|v| (v, None)).collect()
+    }
 
     #[test]
     fn pep440_order_cases() {
@@ -311,6 +333,33 @@ mod tests {
     }
 
     #[test]
+    fn all_releases_and_the_recommendation_remain_selectable() {
+        let mut mirror: Vec<String> = (0..20).map(|n| format!("98.{n}.0")).collect();
+        let verified = "2.3.0.post1";
+        mirror.push(verified.into());
+        let list = build_version_list(&index(&mirror), "99.0.0");
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!(json["recommended_version"], verified);
+        assert_eq!(list.latest_stable, "98.19.0");
+        assert_eq!(list.versions.len(), 21);
+        assert!(list
+            .versions
+            .iter()
+            .any(|v| v.version == verified && v.action == "downgrade"));
+    }
+
+    #[test]
+    fn missing_verified_version_is_reported_as_null() {
+        let list = build_version_list(&index(&["98.0.0".into()]), "");
+        let json = serde_json::to_value(list).unwrap();
+        assert_eq!(
+            json.get("recommended_version"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(json["latest_stable"], "98.0.0");
+    }
+
+    #[test]
     fn build_version_list_output() {
         let list = vec![
             "2.0.0".into(),
@@ -319,7 +368,7 @@ mod tests {
             "2.1.0b2".into(),
             "2.1.0".into(),
         ];
-        let res = build_version_list(&list, "2.1.0");
+        let res = build_version_list(&index(&list), "2.1.0");
         assert!(res.success);
         assert_eq!(res.latest_stable, "2.10.0");
         assert_eq!(res.latest_beta, "2.1.0b2");

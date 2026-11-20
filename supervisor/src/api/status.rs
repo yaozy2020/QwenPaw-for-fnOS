@@ -88,7 +88,13 @@ fn auth_status(state: &AppState, running: bool, port: u16) -> String {
 /// 快照形状供桌面控制台和 Gateway API 使用。
 pub fn render_snapshot(state: &AppState) -> String {
     let st = state.kernel.status_now();
-    let version = state.kernel.kernel_version();
+    let installed = state.kernel.installed();
+    let version = if installed {
+        let events = state.events.clone();
+        state.kernel.display_version(move || events.invalidate())
+    } else {
+        String::new()
+    };
     let inst = state.install.snapshot();
     let auth_state = auth_status(state, st.running, st.port);
     let auth = auth_state == "protected";
@@ -106,7 +112,7 @@ pub fn render_snapshot(state: &AppState) -> String {
         "pid": st.pid.to_string(),
         "startAt": start_epoch,
         "version": version,
-        "installed": state.kernel.installed(),
+        "installed": installed,
         // 内核由 /proc 重新收养(监督者曾被 SIGKILL)时为 true,排障用
         "adopted": st.adopted,
         "authEnabled": auth,
@@ -165,6 +171,8 @@ pub(super) async fn events(
     }
     let rx = state.events.subscribe();
     let first = render_snapshot_blocking(state.clone()).await;
+    let log_path = (req.uri().query() == Some("watch=logs")).then(|| state.kernel_log.clone());
+    let metrics = (req.uri().query() == Some("watch=metrics")).then(|| state.kernel.clone());
     let updates_state = state;
     let snap_stream = BroadcastStream::new(rx).then(move |_| {
         let state = updates_state.clone();
@@ -174,17 +182,95 @@ pub(super) async fn events(
         }
     });
     let first_stream = tokio_stream::once(Ok(Event::default().event("snapshot").data(first)));
+    let snapshots = first_stream.chain(snap_stream);
     let merged: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-        Box::pin(tokio_stream::StreamExt::chain(first_stream, snap_stream));
+        if let Some(path) = log_path {
+            Box::pin(snapshots.merge(log_changes(path, std::time::Duration::from_secs(2))))
+        } else if let Some(kernel) = metrics {
+            use std::time::Duration;
+            let period = Duration::from_secs(1);
+            let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let samples = tokio_stream::wrappers::IntervalStream::new(timer)
+                .then(move |_| {
+                    let kernel = kernel.clone();
+                    async move {
+                        let (pid, start, cpu, mem) =
+                            tokio::task::spawn_blocking(move || kernel.metrics_now())
+                                .await
+                                .ok()?;
+                        let start = start
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs());
+                        Some(Ok(Event::default().event("metrics").data(
+                            json!({"pid":pid,"startAt":start,"cpu":cpu,"memKB":mem}).to_string(),
+                        )))
+                    }
+                })
+                .filter_map(|sample| sample);
+            Box::pin(snapshots.merge(samples))
+        } else {
+            Box::pin(snapshots)
+        };
     Sse::new(merged)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+// Only an opted-in management stream watches metadata. Log text stays on the bounded /logs route.
+fn log_changes(
+    path: String,
+    period: std::time::Duration,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previous = None;
+    tokio_stream::wrappers::IntervalStream::new(interval)
+        .then(move |_| {
+            let path = path.clone();
+            async move {
+                tokio::fs::metadata(path)
+                    .await
+                    .ok()
+                    .map(|m| (m.ino(), m.len(), m.mtime(), m.mtime_nsec()))
+            }
+        })
+        .filter_map(move |next| {
+            let changed = previous.replace(next).is_some_and(|old| old != next);
+            changed.then(|| Ok(Event::default().event("log-change").data("1")))
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::test_support::TestDir;
+
+    #[tokio::test]
+    async fn subscribed_log_file_wakes_on_write_and_removal_but_not_idle_ticks() {
+        use std::time::Duration;
+        let dir = TestDir::new("log-changes");
+        let state = dir.state(crate::api::test_support::free_port());
+        let file = state.kernel_log.clone();
+        let changes = log_changes(file.clone(), Duration::from_millis(10));
+        tokio::pin!(changes);
+        let idle = Duration::from_millis(80);
+        assert!(tokio::time::timeout(idle, changes.next()).await.is_err());
+        std::fs::write(&file, "sample\n").unwrap();
+        let _change = tokio::time::timeout(Duration::from_secs(2), changes.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(tokio::time::timeout(idle, changes.next()).await.is_err());
+        std::fs::remove_file(file).unwrap();
+        let _change = tokio::time::timeout(Duration::from_secs(2), changes.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn render_snapshot_does_not_modify_ui_config() {

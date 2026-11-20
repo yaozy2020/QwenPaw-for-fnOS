@@ -7,8 +7,8 @@
 
 The tiny hub fixture is unmodified SOURCE from the pinned upstream commit, not
 an installed/production package. --hub-source may select that same file from an
-external source checkout; its SHA256 must still match. Only the three payload
-app modules needed by test-console-static.py are copied. No QwenPaw initializer
+external source checkout; its SHA256 must still match. Only the payload app
+modules needed by test-console-static.py are copied. No QwenPaw initializer
 or application lifespan is imported. --wheelhouse supports an offline wheel
 cache; otherwise pip uses the official index with every dependency pinned.
 An explicit --work-dir is retained for inspection; automatic temporary roots
@@ -32,7 +32,11 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-PATCH_ROOT = ROOT / "patches" / "qwenpaw-2.3.0-base-path"
+# The suite re-enters this script under python -I, without the script directory on sys.path.
+sys.path.insert(0, str(ROOT / "scripts"))
+from shipping_patch import shipping_patch
+
+_, PATCH_ROOT = shipping_patch()
 REQUIREMENTS = ROOT / "scripts" / "requirements-console-static.txt"
 UPSTREAM_COMMIT = "0a21644e90d8ba37e20035b3bfb63880872cc2a2"
 UPSTREAM_COMMITS = {UPSTREAM_COMMIT, "ee58cb1a64f2b21e825c525f73dc44bc7941edea"}
@@ -78,7 +82,8 @@ def prepare_package(work: Path, hub_source: Path, patch_root: Path = PATCH_ROOT)
         raise ValueError("payload upstream_commit is not a supported Console source")
     files = manifest["files"]
     app_sources = {}
-    for relative in APP_MODULES:
+    extra = ("app/fnos_entry.py",) if any(entry.get("path") == "app/fnos_entry.py" for entry in files) else ()
+    for relative in (*APP_MODULES, *extra):
         entries = [entry for entry in files if entry.get("path") == relative]
         if len(entries) != 1 or not re.fullmatch(r"[0-9a-f]{64}", entries[0].get("sha256", "")):
             raise ValueError(f"missing, duplicate or invalid payload manifest entry: {relative}")

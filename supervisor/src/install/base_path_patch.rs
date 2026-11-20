@@ -10,8 +10,6 @@ use std::{
 };
 
 const MARKER_FILE: &str = ".qwenpaw-base-path-patch";
-const PATCH_DIRECTORY: &str = "www/patches/qwenpaw-2.3.0-base-path";
-const PATCH_DIRECTORY_POST1: &str = "www/patches/qwenpaw-2.3.0.post1-base-path";
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MANIFEST_FILES: usize = 4096;
 const MAX_PAYLOAD_FILE_BYTES: usize = 16 * 1024 * 1024;
@@ -56,7 +54,9 @@ pub(crate) struct BasePathPatch {
 fn channel_base_version(channel: &InstallChannel) -> Option<&str> {
     match channel {
         InstallChannel::Exact(version) if version == "2.3.0" => Some("2.3.0"),
-        InstallChannel::Exact(version) if version == "2.3.0.post1" => Some("2.3.0.post1"),
+        InstallChannel::Exact(version) if version == crate::version::verified_kernel_version() => {
+            Some(version)
+        }
         _ => None,
     }
 }
@@ -70,12 +70,7 @@ pub(crate) fn for_channel(channel: &InstallChannel) -> Result<Option<BasePathPat
         let appdest = std::env::var_os("TRIM_APPDEST")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/var/apps/qwenpaw/target"));
-        let directory = if base_version == "2.3.0.post1" {
-            PATCH_DIRECTORY_POST1
-        } else {
-            PATCH_DIRECTORY
-        };
-        appdest.join(directory)
+        appdest.join(format!("www/patches/qwenpaw-{base_version}-base-path"))
     });
     if explicit.is_none() && !root.exists() {
         return Ok(None);
@@ -321,8 +316,12 @@ fn insert_manifest_path(paths: &mut BTreeSet<String>, value: &str) -> Result<(),
 fn relative_payload_path(value: &str) -> Result<&Path, String> {
     let path = Path::new(value);
     let mut components = path.components();
-    let valid_root = matches!(components.next(), Some(Component::Normal(root)) if root == "app" || root == "console");
-    if !valid_root
+    let valid_root = matches!(components.next(), Some(Component::Normal(root)) if root == "app" || root == "browser" || root == "cli" || root == "console");
+    let extra_client = matches!(
+        value,
+        "agents/tools/agent_management.py" | "utils/startup_display.py"
+    );
+    if !(valid_root || extra_client)
         || !value.contains('/')
         || value.len() > 4096
         || value.contains(['\\', ':'])
@@ -873,6 +872,30 @@ mod tests {
     }
 
     #[test]
+    fn accepts_browser_and_cli_payloads_without_opening_other_roots() {
+        for relative in [
+            "app/_app.py",
+            "browser/control_link/chrome/ws_handler.py",
+            "cli/http.py",
+            "agents/tools/agent_management.py",
+            "utils/startup_display.py",
+            "console/index.html",
+        ] {
+            assert_eq!(
+                relative_payload_path(relative).unwrap(),
+                Path::new(relative)
+            );
+        }
+        for other in [
+            "tests/unit/app/test_base_path.py",
+            "utils/other.py",
+            "agents/tools/other.py",
+        ] {
+            assert!(relative_payload_path(other).is_err());
+        }
+    }
+
+    #[test]
     fn rejects_duplicate_overlapping_and_noncanonical_paths_and_invalid_digests() {
         for problem in [
             "duplicate",
@@ -1163,22 +1186,25 @@ mod tests {
         edit_manifest(&root, |manifest| {
             manifest["base_version"] = serde_json::json!("2.3.0.post1");
         });
-        let journal = staged.parent().unwrap().join(".venv.transaction.123.1.json");
+        let journal = staged
+            .parent()
+            .unwrap()
+            .join(".venv.transaction.123.1.json");
         let mut record: serde_json::Value =
             serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
         record["target_version"] = serde_json::json!("2.3.0.post1");
         fs::write(journal, serde_json::to_vec(&record).unwrap()).unwrap();
 
         assert!(BasePathPatch::from_root(&root, &InstallChannel::Exact("2.3.0".into())).is_err());
-        let patch = BasePathPatch::from_root(
-            &root,
-            &InstallChannel::Exact("2.3.0.post1".into()),
-        )
-        .unwrap()
-        .unwrap();
+        let patch = BasePathPatch::from_root(&root, &InstallChannel::Exact("2.3.0.post1".into()))
+            .unwrap()
+            .unwrap();
         patch.apply(&staged).unwrap();
 
-        assert_eq!(fs::read(package.join("console/index.html")).unwrap(), b"new-index");
+        assert_eq!(
+            fs::read(package.join("console/index.html")).unwrap(),
+            b"new-index"
+        );
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 }

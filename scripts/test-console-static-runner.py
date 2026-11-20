@@ -21,8 +21,8 @@ class ConsoleStaticRunnerTests(unittest.TestCase):
             self.assertFalse(work.is_relative_to(RUNNER.ROOT))
             package = RUNNER.prepare_package(work, RUNNER.HUB_FIXTURE)
             actual = {path.relative_to(package).as_posix() for path in package.rglob("*") if path.is_file()}
-            self.assertEqual(actual, {*RUNNER.APP_MODULES, "hub/static_files.py", "__init__.py", "app/__init__.py", "hub/__init__.py"})
-            for relative in RUNNER.APP_MODULES:
+            self.assertEqual(actual, {*RUNNER.APP_MODULES, "app/fnos_entry.py", "hub/static_files.py", "__init__.py", "app/__init__.py", "hub/__init__.py"})
+            for relative in (*RUNNER.APP_MODULES, "app/fnos_entry.py"):
                 self.assertEqual((package / relative).read_bytes(), (RUNNER.PATCH_ROOT / "payload" / relative).read_bytes())
 
     def test_modified_hub_fixture_is_rejected_before_package_creation(self):

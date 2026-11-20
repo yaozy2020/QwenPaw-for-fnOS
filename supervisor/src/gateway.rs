@@ -433,12 +433,63 @@ pub fn web_tcp_router_with_access(app: AppState, public: bool) -> Router {
         web_client,
     };
     Router::new()
+        .route(
+            "/_qwenpaw_proxy/login",
+            axum::routing::post(password_gate::login)
+                .layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/_qwenpaw_proxy/login.css",
+            axum::routing::get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    include_str!("gateway/proxy_login.css"),
+                )
+            }),
+        )
+        .route(
+            "/_qwenpaw_proxy/login.js",
+            axum::routing::get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("gateway/proxy_login.js"),
+                )
+            }),
+        )
         .fallback(web_tcp_dispatch)
+        .layer(axum::middleware::from_fn(password_gate::cache_policy))
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
 }
 
-async fn web_tcp_dispatch(State(state): State<GatewayState>, request: Request<Body>) -> Response {
+async fn web_tcp_dispatch(
+    State(state): State<GatewayState>,
+    mut request: Request<Body>,
+) -> Response {
+    let rotated = state.app.proxy_auth.rotated.subscribe();
+    let native = match state.app.proxy_auth.password_status() {
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "旧反代密码记录不可读，独立入口已关闭。请管理员从备份恢复原记录，再重启应用。",
+            )
+                .into_response()
+        }
+        Some(false) => true,
+        Some(true) if password_gate::authorized(&state, request.headers()) => false,
+        Some(true) => return password_gate::challenge(&state),
+    };
+    if native {
+        request.extensions_mut().insert(web_proxy::NativeVisitor);
+    }
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) && !password_gate::same_origin_write(request.headers())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    request.extensions_mut().insert(rotated);
     let path = request.uri().path().to_owned();
     if let Err(status) = web_proxy::validate_path(&path) {
         return status.into_response();
@@ -450,7 +501,18 @@ async fn web_tcp_dispatch(State(state): State<GatewayState>, request: Request<Bo
         )
             .into_response();
     }
-    web_proxy::forward_root(&state, request, &path).await
+    let document = request.method() == Method::GET
+        && request
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|a| a.contains("text/html"))
+        && matches!(path.as_str(), "/" | "/app/qwenpaw/web/");
+    let response = web_proxy::forward_root(&state, request, &path).await;
+    if !native && document && response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        return (StatusCode::SERVICE_UNAVAILABLE, "反代登录已通过，但 QwenPaw Web 尚不可用。请从飞牛控制台确认内核已启动；若已迁移且刚重启过监督者，请重启受管内核后刷新。").into_response();
+    }
+    response
 }
 
 async fn dispatch(
@@ -1134,6 +1196,7 @@ fn csrf_input(
     Ok(supplied)
 }
 
+mod password_gate;
 mod probe;
 mod web_proxy;
 mod web_proxy_manager;

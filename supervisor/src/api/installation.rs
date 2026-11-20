@@ -16,6 +16,8 @@ use crate::{
 
 #[derive(serde::Deserialize)]
 struct InstallReq {
+    #[serde(default)]
+    backup: bool,
     version: String,
     #[serde(default)]
     mirror: String,
@@ -47,7 +49,7 @@ pub(super) async fn kernel_install(
     };
     let acceptance = match state
         .core
-        .submit_install_prepared(channel, mirror, operation)
+        .submit_install_prepared(channel, mirror, operation, req.backup)
         .await
     {
         Ok(acceptance) => acceptance,
@@ -499,6 +501,76 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
         );
         assert!(settled, "installer should finish after release");
         assert_installer_calls(&dir, &state, "https://mirror.example/custom/simple/");
+    }
+
+    #[tokio::test]
+    async fn protected_install_leaves_a_recoverable_archive_after_installer_failure() {
+        use std::{
+            fs,
+            os::unix::fs::{symlink, PermissionsExt},
+            path::Path,
+        };
+        let dir = TestDir::new("protected-install");
+        let mut state = dir.state(crate::api::test_support::free_port());
+        let data = Path::new(&state.share_dir).join(".qwenpaw");
+        let secret = data.with_file_name(".qwenpaw.secret");
+        fs::create_dir(&data).unwrap();
+        fs::create_dir(&secret).unwrap();
+        state.core.share_dir = data.to_string_lossy().into_owned();
+        fs::write(data.join("memory"), b"before-install").unwrap();
+        fs::write(secret.join("test-marker"), b"synthetic").unwrap();
+        symlink(dir.0.join("not-in-snapshot"), data.join("external")).unwrap();
+        install_python_with_installer_recorder(&dir, &state);
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .header("X-Supervisor-Token", &state.token)
+                .body(axum::body::Body::from(
+                    r#"{"version":"latest","backup":true}"#,
+                ))
+                .unwrap()
+        };
+        let submit = || kernel_install(State(state.clone()), request());
+        assert_eq!(submit().await.status(), StatusCode::OK);
+        assert!(wait_for_install(&state).await);
+        assert!(
+            dir.0.join("uv.json").is_file(),
+            "{}",
+            state.install.snapshot().error
+        );
+        assert_eq!(phase_wire(&state.install.snapshot().phase), "failed");
+        let archive = Path::new(&state.var_dir).join("preinstall-data.tar");
+        assert_eq!(
+            fs::metadata(&archive).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let original = fs::read(&archive).unwrap();
+        fs::write(data.join("memory"), b"changed").unwrap();
+        fs::remove_file(dir.0.join("uv.json")).unwrap();
+        assert_eq!(submit().await.status(), StatusCode::OK);
+        assert!(wait_for_install(&state).await);
+        assert!(!dir.0.join("uv.json").exists());
+        assert!(state.install.snapshot().error.contains("已有"));
+        assert_eq!(fs::read(&archive).unwrap(), original);
+        let restore = dir.0.join("restore-private");
+        fs::create_dir(&restore).unwrap();
+        assert!(std::process::Command::new("/usr/bin/tar")
+            .args(["-xf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&restore)
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(
+            fs::read(restore.join(".qwenpaw/memory")).unwrap(),
+            b"before-install"
+        );
+        assert_eq!(
+            fs::read(restore.join(".qwenpaw.secret/test-marker")).unwrap(),
+            b"synthetic"
+        );
+        assert!(restore.join(".qwenpaw/external").is_symlink());
     }
 
     #[tokio::test]

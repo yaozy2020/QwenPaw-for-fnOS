@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from html import escape
 from pathlib import Path
 from urllib.parse import unquote
@@ -59,7 +60,12 @@ class BasePathMiddleware:
             return
 
         path = scope.get("path", "")
-        if path == self.base_path and scope["type"] == "http":
+        peer = scope.get('client')
+        local = peer and peer[0] in ('127.0.0.1', '::1') and os.environ.get('QWENPAW_FNOS_ENTRY_RECORD')
+        if local and path.startswith('/api/'):
+            await self.app(scope, receive, send)
+            return
+        if (path == self.base_path or (local and path == '/' and scope.get('method') in ('GET', 'HEAD'))) and scope["type"] == "http":
             query = scope.get("query_string", b"").decode("latin-1")
             suffix = f"?{query}" if query else ""
             response = RedirectResponse(f"{self.base_path}/{suffix}")
@@ -98,6 +104,10 @@ class ConsoleIndexResponse(FileResponse):
         receive: Receive,
         send: Send,
     ) -> None:
+        if not self.base_path:
+            await super().__call__(scope, receive, send)
+            return
+
         content = await asyncio.to_thread(Path(self.path).read_bytes)
         base_href = f'<base href="{escape(self.base_path, quote=True)}/">'
         content = content.replace(_BASE_HREF_TOKEN, base_href.encode("utf-8"))

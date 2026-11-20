@@ -29,10 +29,16 @@ fn pending_results() -> &'static Mutex<HashMap<String, PendingResult>> {
 }
 
 fn publish_result(state: &str, search: String) -> Result<(), String> {
-    if state.is_empty() || state.len() > MAX_STATE_LENGTH || search.is_empty() || search.len() > MAX_SEARCH_LENGTH {
+    if state.is_empty()
+        || state.len() > MAX_STATE_LENGTH
+        || search.is_empty()
+        || search.len() > MAX_SEARCH_LENGTH
+    {
         return Err("invalid authorization result".into());
     }
-    let mut results = pending_results().lock().unwrap_or_else(|error| error.into_inner());
+    let mut results = pending_results()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     results.retain(|_, result| result.ts.elapsed() <= RESULT_TTL);
     if results.len() >= MAX_RESULTS {
         let oldest = results
@@ -43,12 +49,20 @@ fn publish_result(state: &str, search: String) -> Result<(), String> {
             results.remove(&oldest);
         }
     }
-    results.insert(state.into(), PendingResult { search, ts: Instant::now() });
+    results.insert(
+        state.into(),
+        PendingResult {
+            search,
+            ts: Instant::now(),
+        },
+    );
     Ok(())
 }
 
 fn take_result(state: &str) -> Option<String> {
-    let mut results = pending_results().lock().unwrap_or_else(|error| error.into_inner());
+    let mut results = pending_results()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     results.retain(|_, result| result.ts.elapsed() <= RESULT_TTL);
     results.remove(state).map(|result| result.search)
 }
@@ -65,8 +79,10 @@ struct DirectoryHealth {
 fn directory_health(path: &Path) -> Result<DirectoryHealth, String> {
     use std::os::unix::ffi::OsStrExt;
 
-    let path = std::fs::canonicalize(path).map_err(|error| format!("目录不存在或无法解析: {error}"))?;
-    let metadata = std::fs::metadata(&path).map_err(|error| format!("无法读取目录状态: {error}"))?;
+    let path =
+        std::fs::canonicalize(path).map_err(|error| format!("目录不存在或无法解析: {error}"))?;
+    let metadata =
+        std::fs::metadata(&path).map_err(|error| format!("无法读取目录状态: {error}"))?;
     if !metadata.is_dir() {
         return Err("授权目标不是目录".into());
     }
@@ -104,7 +120,8 @@ pub(super) async fn check(
     if request.path.is_empty() || request.path.len() > 4096 {
         return err_json(StatusCode::BAD_REQUEST, "目录路径为空或过长");
     }
-    let result = tokio::task::spawn_blocking(move || directory_health(Path::new(&request.path))).await;
+    let result =
+        tokio::task::spawn_blocking(move || directory_health(Path::new(&request.path))).await;
     match result {
         Ok(Ok(health)) => Json(json!({
             "success": true,
@@ -189,7 +206,8 @@ mod tests {
 
     #[test]
     fn rejects_missing_paths_and_regular_files() {
-        let dir = std::env::temp_dir().join(format!("qwenpaw-dir-health-file-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("qwenpaw-dir-health-file-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).unwrap();
         assert!(directory_health(&dir.join("missing")).is_err());

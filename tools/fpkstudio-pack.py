@@ -31,6 +31,10 @@ def normalize_tar(data, epoch, replacements=None, sort_entries=False):
         entries = []
         for member in source.getmembers():
             payload = replacements.get(member.name)
+            if payload is not None and member.isfile():
+                # Generated manifest and app.tgz are data even on fnOS volumes
+                # that give newly created files an executable ACL by default.
+                member.mode = 0o644
             if payload is None and member.isfile():
                 payload = source.extractfile(member).read()
             if payload is not None:

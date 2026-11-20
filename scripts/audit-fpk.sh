@@ -37,6 +37,13 @@ def report(condition, success, failure):
         failures.append(failure)
 
 
+def validate_patch_counts(files, delete_files):
+    if not isinstance(files, list) or not files or len(files) > 2048:
+        raise ValueError("base-path patch file count exceeds the allowed payload limit")
+    if not isinstance(delete_files, list) or len(delete_files) > 4096:
+        raise ValueError("base-path patch delete list is invalid")
+
+
 outer_files = {
     "app.tgz", "LICENSE", "ICON.PNG", "ICON_256.PNG", "manifest",
     "config/privilege", "config/resource",
@@ -55,8 +62,10 @@ app_files = {
     "www/index.html", "www/index.html.gz", "www/index.html.br", "www/auth-callback.html",
 }
 app_dirs = {"bin", "config", "ui", "ui/images", "www"}
-for patch_name, base_version in (
-        ("qwenpaw-2.3.0.post1-base-path", "2.3.0.post1"),):
+sys.path.insert(0, os.path.join(root, "scripts"))
+from shipping_patch import shipping_patch
+for base_version, directory in (shipping_patch(),):
+    patch_name = directory.name
     patch_root = f"www/patches/{patch_name}"
     patch_source_root = f"patches/{patch_name}"
     with open(os.path.join(root, patch_source_root, "manifest.json"), "rb") as source:
@@ -64,13 +73,12 @@ for patch_name, base_version in (
     patch_manifest = json.loads(patch_manifest_bytes)
     if patch_manifest.get("schema_version") != 1 or patch_manifest.get("base_version") != base_version:
         raise ValueError("unsupported base-path patch manifest")
-    if not patch_manifest.get("files") or len(patch_manifest["files"]) > 2048:
-        raise ValueError("base-path patch file count exceeds the allowed payload limit")
+    validate_patch_counts(patch_manifest.get("files"), patch_manifest.get("delete_files", []))
     app_files.add(f"{patch_root}/manifest.json")
     for entry in patch_manifest["files"]:
         relative = entry["path"]
         parts = relative.split("/")
-        if (parts[0] not in {"app", "console"} or len(parts) < 2
+        if ((parts[0] not in {"app", "browser", "cli", "console"} and "/".join(parts) not in {"agents/tools/agent_management.py", "utils/startup_display.py"}) or len(parts) < 2
                 or any(part in {"", ".", ".."} for part in parts) or "\\" in relative):
             raise ValueError(f"base-path patch payload path is invalid: {relative!r}")
         if not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
@@ -90,8 +98,6 @@ for patch_name, base_version in (
             app_dirs.add(parent)
             parent = os.path.dirname(parent)
     delete_files = patch_manifest.get("delete_files", [])
-    if not isinstance(delete_files, list) or len(patch_manifest["files"]) + len(delete_files) > 4096:
-        raise ValueError("base-path patch delete list is invalid")
     manifest_paths = {entry["path"] for entry in patch_manifest["files"]}
     for entry in delete_files:
         relative = entry["path"]
@@ -498,6 +504,14 @@ def test_patch_console_compression():
 
 
 if fpk_path == "--self-test":
+    validate_patch_counts([None] * 2048, [None] * 4096)
+    for files, deletes in (([], []), ([None] * 2049, []), ([None], [None] * 4097), ([None], None)):
+        try:
+            validate_patch_counts(files, deletes)
+        except ValueError:
+            continue
+        raise AssertionError("invalid patch counts must fail closed")
+    print("    [ OK ] patch count self-test: independent limits and invalid counts")
     test_safe_members_modes()
     test_desktop_entries()
     test_static_elf_checks()
@@ -686,7 +700,7 @@ print("audit: base-path backend and prebuilt Console payload")
 report(app_payloads[f"{patch_root}/manifest.json"] == patch_manifest_bytes,
        "包内 base-path 补丁清单与构建源一致", "包内 base-path 补丁清单发生漂移")
 manifest_paths = [entry["path"] for entry in patch_manifest["files"]]
-report(all(path.startswith(("app/", "console/")) for path in manifest_paths)
+report(all(path.startswith(("app/", "browser/", "cli/", "console/")) or path in {"agents/tools/agent_management.py", "utils/startup_display.py"} for path in manifest_paths)
        and any(path.startswith("console/") for path in manifest_paths),
        "补丁包含后端与完整预构建 Console", "补丁清单缺少 Console 或包含未知路径")
 patch_bytes = 0

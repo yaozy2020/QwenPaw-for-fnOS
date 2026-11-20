@@ -290,7 +290,7 @@ async fn web_proxy_port_api_requires_token_and_reports_the_active_port() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response_json(response).await,
-        json!({"success": true, "port": port, "public": false})
+        json!({"success": true, "port": port, "public": false, "passwordConfigured": false})
     );
 }
 
@@ -432,7 +432,7 @@ async fn web_proxy_port_api_changes_access_and_preserves_it_when_omitted() {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response_json(response).await,
-            json!({"success": true, "port": new_port, "public": expected_public})
+            json!({"success": true, "port": new_port, "public": expected_public, "passwordConfigured": false})
         );
         assert!(wait_until_bindable(previous_port).await);
         previous_port = new_port;

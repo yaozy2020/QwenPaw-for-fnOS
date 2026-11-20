@@ -33,8 +33,8 @@ pub fn run(action: PlatformAction, cfg: &Config) -> i32 {
             print!("{}", upgrade_init(&cfg.var_dir));
             0
         }
-        PlatformAction::Install => finish_operation(cfg, "安装", install_callback),
-        PlatformAction::Upgrade => finish_operation(cfg, "升级", upgrade_callback),
+        PlatformAction::Install => finish_operation(cfg, Lifecycle::Install),
+        PlatformAction::Upgrade => finish_operation(cfg, Lifecycle::Upgrade),
         PlatformAction::Uninstall => crate::uninstall::run(cfg),
         PlatformAction::MirrorGet => {
             let (status, response) = crate::mirror::get_json(&cfg.var_dir);
@@ -49,12 +49,26 @@ pub fn run(action: PlatformAction, cfg: &Config) -> i32 {
     }
 }
 
-fn finish_operation(
-    cfg: &Config,
-    label: &str,
-    operation: fn(&Config) -> Result<(), String>,
-) -> i32 {
-    match operation(cfg) {
+fn finish_operation(cfg: &Config, lifecycle: Lifecycle) -> i32 {
+    let label = if lifecycle == Lifecycle::Upgrade {
+        "升级"
+    } else {
+        "安装"
+    };
+    let existing = match preflight_var(cfg, lifecycle) {
+        Ok(existing) => existing,
+        Err(error) => {
+            let message = format!("QwenPaw {label}未开始：{error}");
+            eprintln!("{message}");
+            write_temp_error(&message, true);
+            return 1;
+        }
+    };
+    let result = match lifecycle {
+        Lifecycle::Install => install_callback(cfg, existing),
+        Lifecycle::Upgrade => upgrade_callback(cfg),
+    };
+    match result {
         Ok(()) => {
             log_message(cfg, &format!("QwenPaw {label}完成"), false);
             0
@@ -92,18 +106,17 @@ enum Lifecycle {
     Upgrade,
 }
 
-fn install_callback(cfg: &Config) -> Result<(), String> {
+fn install_callback(cfg: &Config, existing: bool) -> Result<(), String> {
     let port = env::var("wizard_port").unwrap_or_else(|_| "18088".into());
     let log_level = env::var("wizard_log_level").unwrap_or_default();
     configure_patch(&port, &log_level, cfg.listen_port)?;
-    prepare_var_directory(cfg)?;
     let mirror_seed = env::var("wizard_pypi_mirror").unwrap_or_else(|_| "aliyun".into());
     mirror_seed_if_needed(cfg, &mirror_seed)?;
     service::stop_for_reinstall(cfg)
         .map_err(|error| format!("安装前停止已登记服务失败: {error}"))?;
 
     if service::run(ServiceAction::Status, cfg) != 0 {
-        apply_platform_permissions(cfg, Lifecycle::Install)?;
+        apply_platform_permissions(cfg, existing)?;
     }
     if configure(cfg, &port, &log_level) != 0 {
         return Err("平台端口或日志设置未能通过监督者事务应用".into());
@@ -113,16 +126,13 @@ fn install_callback(cfg: &Config) -> Result<(), String> {
 
 fn upgrade_callback(cfg: &Config) -> Result<(), String> {
     log_message(cfg, "开始升级回调", false);
-    prepare_var_directory(cfg)?;
-    log_message(cfg, "准备var完成", false);
-
     if service::run(ServiceAction::Stop, cfg) != 0 {
         log_message(cfg, "ERROR: stop失败", true);
         return Err("升级前停止监督者失败".into());
     }
     log_message(cfg, "stop成功", false);
 
-    apply_platform_permissions(cfg, Lifecycle::Upgrade)?;
+    apply_platform_permissions(cfg, true)?;
     log_message(cfg, "权限应用完成", false);
 
     match env::current_exe() {
@@ -173,9 +183,7 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
         if lifecycle == Lifecycle::Upgrade {
             if let PinState::Exact(version) = &pin {
                 let post1 = "2.3.0.post1";
-                if version == "2.3.0"
-                    && health["runtime"]["version"].as_str() == Some("2.3.0")
-                {
+                if version == "2.3.0" && health["runtime"]["version"].as_str() == Some("2.3.0") {
                     let channel = crate::install::InstallChannel::Exact(post1.into());
                     if crate::install::base_path_patch::for_channel(&channel)?.is_some() {
                         plan = RuntimePlan::Repair(post1.into());
@@ -411,7 +419,7 @@ fn post1_migration_mirror(version: &str, mirror: &str) -> Result<(String, bool),
     let Ok(versions) = crate::version_index::fetch_versions(&url) else {
         return Ok((mirror.to_string(), false));
     };
-    if versions.iter().any(|version| version == "2.3.0.post1") {
+    if versions.contains_key("2.3.0.post1") {
         Ok((mirror.to_string(), false))
     } else {
         Ok((String::new(), true))
@@ -458,24 +466,108 @@ fn platform_owner() -> Result<Option<PlatformOwner>, String> {
     }))
 }
 
-fn apply_platform_permissions(cfg: &Config, lifecycle: Lifecycle) -> Result<(), String> {
+fn preflight_var(cfg: &Config, lifecycle: Lifecycle) -> Result<bool, String> {
+    let var = Path::new(&cfg.var_dir);
     let owner = platform_owner()?;
+    if lifecycle == Lifecycle::Upgrade || env::var("TRIM_APP_STATUS").is_ok_and(|s| s == "UPGRADE")
+    {
+        validate_existing_var(var, owner).map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
     let runtime = crate::runtime::RuntimeAdapter::new(
         &cfg.kernel_venv,
         &cfg.share_dir,
         &cfg.etc_dir,
         &cfg.kernel_log_level,
     );
-    let existing_install = lifecycle == Lifecycle::Upgrade
-        || env::var("TRIM_APP_STATUS").is_ok_and(|status| status == "UPGRADE")
-        || Path::new(&cfg.kernel_venv).exists()
-        || Path::new(&cfg.var_dir).join("qwenpaw-version").exists()
+    let retained = Path::new(&cfg.kernel_venv)
+        .try_exists()
+        .map_err(|e| e.to_string())?
         || runtime
             .has_initial_data()
-            .map_err(|error| format!("检查已有用户数据失败: {error}"))?;
+            .map_err(|e| format!("检查已有用户数据失败: {e}"))?;
+    if !retained {
+        prepare_var_directory(cfg)?;
+        let empty = fs::read_dir(var)
+            .and_then(|mut entries| entries.next().transpose())
+            .map_err(|e| format!("检查 var 目录失败: {e}"))?
+            .is_none();
+        if empty {
+            // Only an empty, first-install root has no user ACLs to propagate into.
+            set_owner(var, owner).map_err(|e| format!("初始化 var 属主失败: {e}"))?;
+            fs::set_permissions(var, fs::Permissions::from_mode(0o750))
+                .map_err(|e| format!("初始化 var 权限失败: {e}"))?;
+            validate_existing_var(var, owner).map_err(|e| e.to_string())?;
+            return Ok(false);
+        }
+    }
+    if retained {
+        normalize_retained_var(var, owner).map_err(|e| e.to_string())?;
+    } else {
+        validate_existing_var(var, owner).map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+fn normalize_retained_var(var: &Path, owner: Option<PlatformOwner>) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let original_error = match validate_existing_var(var, owner) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let metadata = fs::symlink_metadata(var)?;
+    let expected = owner.unwrap_or_else(|| PlatformOwner {
+        uid: unsafe { libc::geteuid() },
+        gid: unsafe { libc::getegid() },
+    });
+    let platform_group_writable = metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && metadata.uid() == expected.uid
+        && metadata.gid() == expected.gid
+        && metadata.mode() & 0o777 == 0o770;
+    if !platform_group_writable {
+        return Err(original_error);
+    }
+    // fnOS can restore this exact mode on a retained appdata root. Only narrow
+    // that root after ownership validation; upgrades and other modes stay closed.
+    fs::set_permissions(var, fs::Permissions::from_mode(0o750))?;
+    validate_existing_var(var, owner)
+}
+
+fn validate_existing_var(var: &Path, owner: Option<PlatformOwner>) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(var)
+        .map_err(|e| io::Error::new(e.kind(), format!("无法核验 var {}: {e}", var.display())))?;
+    let expected = owner.unwrap_or_else(|| PlatformOwner {
+        uid: unsafe { libc::geteuid() },
+        gid: unsafe { libc::getegid() },
+    });
+    let mode = metadata.mode() & 0o777;
+    if !metadata.is_dir()
+        || metadata.uid() != expected.uid
+        || metadata.gid() != expected.gid
+        || mode & 0o700 != 0o700
+        || mode & 0o027 != 0
+    {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!(
+            "拒绝使用 var {}（权限 {mode:04o}，属主 {}:{}）；需为实际目录、应用属主 {}:{}、权限 0700/0710/0740/0750。请管理员核对飞牛 ACL 继承，不要递归更改用户目录权限。",
+            var.display(), metadata.uid(), metadata.gid(), expected.uid, expected.gid
+        )));
+    }
+    Ok(())
+}
+
+fn apply_platform_permissions(cfg: &Config, existing_install: bool) -> Result<(), String> {
+    let owner = platform_owner()?;
     if existing_install {
-        return secure_upgrade_permissions(Path::new(&cfg.var_dir), Path::new(&cfg.home_dir), owner)
-            .map_err(|error| format!("设置管理文件权限失败: {error}"));
+        return secure_upgrade_permissions(
+            Path::new(&cfg.var_dir),
+            Path::new(&cfg.home_dir),
+            owner,
+        )
+        .map_err(|error| format!("设置管理文件权限失败: {error}"));
     }
     let roots = [
         (PathBuf::from(&cfg.var_dir), 0o750, 0o640, true),
@@ -507,12 +599,7 @@ fn secure_upgrade_permissions(
     home: &Path,
     owner: Option<PlatformOwner>,
 ) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(var)?;
-    if !metadata.file_type().is_dir() {
-        return Err(io::Error::other("应用 var 路径不是实际目录"));
-    }
-    set_owner(var, owner)?;
-    fs::set_permissions(var, fs::Permissions::from_mode(0o750))?;
+    validate_existing_var(var, owner)?;
     for name in [
         "supervisor-token",
         "qwenpaw-version",
@@ -968,12 +1055,56 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_keeps_restrictive_root_and_inherited_user_mode() {
+        let var = temp_var("upgrade-inherited");
+        fs::create_dir(&var).unwrap();
+        fs::set_permissions(&var, fs::Permissions::from_mode(0o700)).unwrap();
+        let child = var.join("local files");
+        fs::create_dir(&child).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let before = mode(&child);
+        let token = var.join("supervisor-token");
+        fs::write(&token, b"fixture").unwrap();
+        fs::set_permissions(&token, fs::Permissions::from_mode(0o644)).unwrap();
+        secure_upgrade_permissions(&var, &var.join("unused-home"), None).unwrap();
+        assert_eq!(mode(&var), 0o700);
+        assert_eq!(mode(&child), before);
+        assert_eq!(mode(&token), 0o600);
+        fs::remove_dir_all(var).unwrap();
+    }
+
+    #[test]
+    fn upgrade_refuses_untrusted_root_before_touching_records() {
+        let var = temp_var("upgrade-untrusted");
+        fs::create_dir(&var).unwrap();
+        let pin = var.join("qwenpaw-version");
+        fs::write(&pin, b"2.3.0\n").unwrap();
+        for mode in [0o777, 0o770, 0o755] {
+            fs::set_permissions(&var, fs::Permissions::from_mode(mode)).unwrap();
+            fs::set_permissions(&pin, fs::Permissions::from_mode(0o644)).unwrap();
+            let result = secure_upgrade_permissions(&var, &var.join("unused-home"), None);
+            assert!(result.is_err(), "accepted {mode:o}");
+            assert_eq!(
+                fs::metadata(&var).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert_eq!(
+                fs::metadata(&pin).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+        fs::remove_dir_all(var).unwrap();
+    }
+
+    #[test]
     fn upgrade_permissions_preserve_user_trees_and_secure_only_management_records() {
         use std::os::unix::{fs::MetadataExt, net::UnixListener};
 
         let root = temp_var("upgrade-permissions");
         let var = root.join("var");
         let home = root.join("home");
+        fs::create_dir_all(&var).unwrap();
+        fs::set_permissions(&var, fs::Permissions::from_mode(0o750)).unwrap();
         let user_files = [
             root.join("share/config.json"),
             root.join("share/workspaces/memory.db"),
@@ -990,7 +1121,13 @@ mod tests {
         }
         let before = user_files.map(|path| {
             let metadata = fs::metadata(&path).unwrap();
-            (path, metadata.mode(), metadata.uid(), metadata.gid(), metadata.mtime_nsec())
+            (
+                path,
+                metadata.mode(),
+                metadata.uid(),
+                metadata.gid(),
+                metadata.mtime_nsec(),
+            )
         });
         let private = [
             var.join("supervisor-token"),
@@ -1015,7 +1152,10 @@ mod tests {
             assert_eq!(metadata.mode(), mode, "{}", path.display());
             assert_eq!((metadata.uid(), metadata.gid()), (uid, gid));
             assert_eq!(metadata.mtime_nsec(), mtime_nsec);
-            assert_eq!(fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777, 0o710);
+            assert_eq!(
+                fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777,
+                0o710
+            );
         }
         for path in private {
             assert_eq!(fs::read(&path).unwrap(), b"keep management bytes\n");
@@ -1033,13 +1173,18 @@ mod tests {
         let root = temp_var("upgrade-permission-link");
         let var = root.join("var");
         fs::create_dir_all(&var).unwrap();
+        fs::set_permissions(&var, fs::Permissions::from_mode(0o750)).unwrap();
         let outside = root.join("outside-user-data");
         fs::write(&outside, b"keep bytes").unwrap();
         fs::set_permissions(&outside, fs::Permissions::from_mode(0o640)).unwrap();
         symlink(&outside, var.join("supervisor-token")).unwrap();
-        assert!(secure_upgrade_permissions(&var, &root.join("home"), None).is_err());
+        let error = secure_upgrade_permissions(&var, &root.join("home"), None).unwrap_err();
+        assert!(error.to_string().contains("管理权限目标"));
         assert_eq!(fs::read(&outside).unwrap(), b"keep bytes");
-        assert_eq!(fs::metadata(outside).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            fs::metadata(outside).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1464,6 +1609,57 @@ mod tests {
     }
 
     #[test]
+    fn retained_install_converges_only_platform_0770_var_root() {
+        for mode in [0o770, 0o777, 0o710] {
+            let root = temp_var(&format!("retained-install-{mode:o}"));
+            let var = root.join("var");
+            let share = root.join("share");
+            fs::create_dir_all(&var).unwrap();
+            fs::create_dir_all(&share).unwrap();
+            fs::set_permissions(&var, fs::Permissions::from_mode(mode)).unwrap();
+            fs::write(share.join("config.json"), b"retained").unwrap();
+            let cfg = Config {
+                var_dir: var.to_string_lossy().into_owned(),
+                etc_dir: root.join("etc").to_string_lossy().into_owned(),
+                home_dir: root.join("home").to_string_lossy().into_owned(),
+                share_dir: share.to_string_lossy().into_owned(),
+                ui_config_file: root.join("ui-config").to_string_lossy().into_owned(),
+                supervisor_binary: root.join("bin/qwenpaw-supervisor"),
+                kernel_venv: root.join("home/venv").to_string_lossy().into_owned(),
+                kernel_pid_file: var.join("kernel.pid").to_string_lossy().into_owned(),
+                kernel_log: var.join("kernel.log").to_string_lossy().into_owned(),
+                kernel_port: crate::api::test_support::free_port(),
+                web_proxy_port: None,
+                kernel_log_level: "info".into(),
+                token_file: var.join("supervisor-token").to_string_lossy().into_owned(),
+                supervisor_pid_file: var.join("supervisor.pid").to_string_lossy().into_owned(),
+                supervisor_log: var.join("supervisor.log").to_string_lossy().into_owned(),
+                listen_port: crate::api::test_support::free_port(),
+                auto_start: false,
+                gateway_socket: None,
+            };
+
+            let result = preflight_var(&cfg, Lifecycle::Install);
+            let actual = fs::metadata(&var).unwrap().permissions().mode() & 0o777;
+            match mode {
+                0o770 => {
+                    assert_eq!(result, Ok(true));
+                    assert_eq!(actual, 0o750);
+                }
+                0o710 => {
+                    assert_eq!(result, Ok(true));
+                    assert_eq!(actual, 0o710);
+                }
+                _ => {
+                    assert!(result.is_err());
+                    assert_eq!(actual, 0o777);
+                }
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn mirror_seed_is_written_only_when_missing_and_non_regular_paths_are_rejected() {
         use std::os::unix::fs::symlink;
 
@@ -1543,9 +1739,7 @@ mod tests {
             post1_migration_mirror("2.3.0.post1", &missing).unwrap(),
             (String::new(), true)
         );
-        let available = index(
-            "<a href=\"qwenpaw-2.3.0.post1-py3-none-any.whl\">2.3.0.post1</a>",
-        );
+        let available = index("<a href=\"qwenpaw-2.3.0.post1-py3-none-any.whl\">2.3.0.post1</a>");
         assert_eq!(
             post1_migration_mirror("2.3.0.post1", &available).unwrap(),
             (available, false)

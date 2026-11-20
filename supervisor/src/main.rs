@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod control;
 mod desktop;
+mod entry_login;
 mod events;
 mod gateway;
 mod install;
@@ -16,6 +17,7 @@ mod management;
 mod mirror;
 mod platform;
 mod procfs;
+mod proxy_auth;
 mod release_notes;
 mod runtime;
 mod runtime_settings;
@@ -194,7 +196,7 @@ fn serve() {
         },
         {
             let kernel = Arc::clone(&kernel);
-            Arc::new(move || kernel.stop_sync())
+            Arc::new(move || kernel.stop_verified_sync())
         },
         {
             let kernel = Arc::clone(&kernel);
@@ -305,7 +307,7 @@ fn serve() {
     // "进程新版 + 磁盘旧版"的错配,而该进程的依赖已被抽走。
     let stop_for_recovery = {
         let k = Arc::clone(&kernel);
-        move || k.stop_sync()
+        move || k.stop_verified_sync()
     };
     let recovery_error = if !orphan_cleanup_permits_recovery(&orphan_cleanup_result) {
         orphan_cleanup_result.err()
@@ -314,7 +316,7 @@ fn serve() {
             std::path::Path::new(&cfg.kernel_venv),
             std::path::Path::new(&pin_file),
             Some(&*logf),
-            Some(&stop_for_recovery),
+            &stop_for_recovery,
         ) {
             Ok(report) => {
                 if report.recovered > 0 {
@@ -456,6 +458,10 @@ fn serve() {
     };
     let mut state = api::AppState {
         core: core.clone(),
+        proxy_auth: proxy_auth::ProxyAuth::load(
+            std::path::Path::new(&cfg.var_dir),
+            proxy_auth::DEFAULT_INSTANCE,
+        ),
         token,
         auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
         web_proxy: None,

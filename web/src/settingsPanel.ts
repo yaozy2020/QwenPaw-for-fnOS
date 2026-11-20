@@ -1,6 +1,7 @@
 import type { ApiClient } from "./api";
 import { operationSucceeded } from "./apiResult";
-import { renderMirrorOptions } from "./components";
+import { reactive } from "vue";
+import type { ManagementState } from "./managementState";
 import type { ShowModal } from "./modal";
 
 const MIRRORS = [
@@ -12,34 +13,35 @@ const MIRRORS = [
 ];
 
 interface SettingsPanelOptions {
+  state: ManagementState;
   api: Pick<ApiClient,
-    "changePort" | "webProxyPort" | "changeWebProxyPort" | "resetAuth" | "getMirror" | "setMirror">;
+    "changePort" | "webProxyPort" | "changeWebProxyPort" | "useNativeLogin" | "migrateEntry" | "resetAuth" | "getMirror" | "setMirror">;
   showModal: ShowModal;
   showToast(message: string): void;
   errorMessage(error: unknown): string;
   supervisorReachable(): boolean | null;
   fetchStatus(): void;
   fetchLogs(): void;
-  fetchVersionList(): Promise<boolean>;
+  fetchVersionList(sourceChanged?: boolean): Promise<boolean>;
 }
 
 export function createSettingsPanel({
-  api, showModal, showToast, errorMessage, supervisorReachable, fetchStatus, fetchLogs, fetchVersionList,
+  api, state, showModal, showToast, errorMessage, supervisorReachable, fetchStatus, fetchLogs, fetchVersionList,
 }: SettingsPanelOptions) {
-  let webProxyPublic: boolean | null = null;
-  let webProxyPort: number | null = null;
   let webProxyReadSeq = 0;
-  let mirrorValue = "";
+  const mirror = reactive({ value: '', ready: false, open: false, saving: false });
+  let mirrorRead = 0;
 
   function setWebProxyScope(value: boolean | null): void {
-    webProxyPublic = value;
-    const available = value !== null && webProxyPort !== null;
-    const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
-    if (!toggle) return;
-    toggle.indeterminate = !available;
-    toggle.disabled = !available;
-    if (value !== null) toggle.checked = value;
-    toggle.title = available ? "" : "无法确认反代端口或访问范围，请重试";
+    state.proxyPublic = value;
+    if (value !== null) state.proxyDraft = value;
+  }
+
+  async function runAction(action: () => Promise<void>): Promise<void> {
+    if (state.pending) return;
+    state.pending = true;
+    try { await action(); }
+    finally { state.pending = false; state.saving = false; }
   }
 
   async function changeServicePort(): Promise<void> {
@@ -48,7 +50,7 @@ export function createSettingsPanel({
       fetchStatus();
       return;
     }
-    const currentPort = document.getElementById("valPort")?.innerText || "18088";
+    const currentPort = state.servicePort;
     const raw = await showModal({
       title: "修改服务端口",
       message: "请输入新的 QwenPaw Web 访问端口（1024~65535）。保存后服务将自动重启以应用新端口。",
@@ -74,7 +76,8 @@ export function createSettingsPanel({
       type: "warn",
       confirmText: "确认修改并重启",
     });
-    if (!ok) return;
+    if (!ok || supervisorReachable() !== true) return;
+    state.saving = true;
     try {
       showToast(`正在保存新端口 ${newPort}...`);
       const data = operationSucceeded(await api.changePort(newPort));
@@ -96,18 +99,20 @@ export function createSettingsPanel({
       if (seq !== webProxyReadSeq) return;
       const { data } = result;
       if (!result.ok || !data) {
-        webProxyPort = null;
+        state.proxyPasswordConfigured = null;
+        state.proxyPort = null;
         setWebProxyScope(null);
         return;
       }
+      state.entryLogin = data.entryLogin === true;
+      state.proxyPasswordConfigured = typeof data.passwordConfigured === "boolean" ? data.passwordConfigured : null;
       const validPort = Number.isInteger(data.port) && data.port > 0 && data.port <= 65535;
-      webProxyPort = validPort ? data.port : null;
-      const element = document.getElementById("valWebProxyPort");
-      if (element && webProxyPort !== null) element.innerText = String(webProxyPort);
+      state.proxyPort = validPort ? data.port : null;
       setWebProxyScope(typeof data.public === "boolean" ? data.public : null);
     } catch (error) {
       if (seq === webProxyReadSeq) {
-        webProxyPort = null;
+        state.proxyPasswordConfigured = null;
+        state.proxyPort = null;
         setWebProxyScope(null);
       }
       console.error("fetchWebProxyPort err:", error);
@@ -115,12 +120,12 @@ export function createSettingsPanel({
   }
 
   async function changeWebProxyPort(): Promise<void> {
-    if (webProxyPublic === null || webProxyPort === null) {
+    if (state.proxyPublic === null || state.proxyPort === null) {
       showToast("无法确认反代端口或访问范围，请重试");
-      void fetchWebProxyPort();
+      await fetchWebProxyPort();
       return;
     }
-    const currentPort = String(webProxyPort);
+    const currentPort = String(state.proxyPort);
     const raw = await showModal({
       title: "修改 Web 反代端口",
       message: "输入 0 自动选择空闲端口，或输入 1024~65535 的指定端口。新端口绑定成功后才会切换，失败保留原端口。",
@@ -147,11 +152,12 @@ export function createSettingsPanel({
       confirmText: "确认切换",
     });
     if (!ok) return;
-    const publicAccess = webProxyPublic;
+    const publicAccess = state.proxyPublic;
     if (publicAccess === null) {
       showToast("无法确认反代访问范围，请重试");
       return;
     }
+    state.saving = true;
     ++webProxyReadSeq;
     setWebProxyScope(null);
     try {
@@ -159,41 +165,38 @@ export function createSettingsPanel({
       if (!Number.isInteger(data.port) || data.port <= 0 || data.port > 65535) {
         throw new Error("后端未返回有效的反代端口");
       }
-      webProxyPort = data.port;
-      const element = document.getElementById("valWebProxyPort");
-      if (element) element.innerText = String(data.port);
+      state.proxyPort = data.port;
       setWebProxyScope(publicAccess);
       showToast(`Web 反代端口已切换为 ${data.port}`);
     } catch (error) {
       showToast(`修改反代端口失败: ${errorMessage(error)}`);
-      void fetchWebProxyPort();
+      await fetchWebProxyPort();
     }
   }
 
-  async function setWebProxyPublic(): Promise<void> {
-    const toggle = document.getElementById("webProxyPublic") as HTMLInputElement | null;
-    if (!toggle) return;
-    const previous = webProxyPublic;
-    const port = webProxyPort;
+  async function setWebProxyPublic(publicAccess: boolean): Promise<void> {
+    const previous = state.proxyPublic;
+    const port = state.proxyPort;
     if (previous === null || port === null) {
       setWebProxyScope(null);
-      void fetchWebProxyPort();
+      await fetchWebProxyPort();
       return;
     }
-    const publicAccess = toggle.checked;
+    state.proxyDraft = publicAccess;
     if (publicAccess) {
       const ok = await showModal({
         title: "允许外部访问 Web 反代",
-        message: "开启后，同一网络中的其他设备可通过该端口访问 QwenPaw 主 Web。请确认已设置 QwenPaw 管理员密码。",
+        message: "开启后，同一网络中的其他设备可通过该端口访问 QwenPaw 主 Web。请先在本机完成 QwenPaw 原账号注册，再开放端口。公网请通过 HTTPS 反代访问。",
         type: "warn",
         confirmText: "允许外部访问",
       });
       if (!ok) {
-        setWebProxyScope(previous);
+        state.proxyDraft = state.proxyPublic ?? false;
         return;
       }
     }
-    if (webProxyPublic !== previous) return;
+    if (state.proxyPublic !== previous || state.proxyPort !== port) return;
+    state.saving = true;
     ++webProxyReadSeq;
     setWebProxyScope(null);
     try {
@@ -202,72 +205,73 @@ export function createSettingsPanel({
       showToast(publicAccess ? "已允许外部访问 Web 反代" : "Web 反代已改为仅本机访问");
     } catch (error) {
       showToast(`切换访问范围失败: ${errorMessage(error)}`);
-      void fetchWebProxyPort();
+      await fetchWebProxyPort();
     }
   }
 
-  async function resetAuth(): Promise<void> {
-    const ok = await showModal({
-      title: "重置 QwenPaw 管理员密码",
-      message: "这将清除 QwenPaw 对话端的管理员密码并使现有会话失效，下次进入对话端时需要重新设置。\n\n飞牛账号及其密码不受影响，用户配置与记忆也不会删除。确认继续？",
-      type: "warn",
-      confirmText: "确认重置",
-    });
-    if (!ok) return;
+  async function useNativeLogin(username: string, password: string): Promise<void> {
+    if (state.proxyPasswordConfigured !== true) return;
+    state.saving = true;
+    ++webProxyReadSeq;
     try {
-      showToast("正在请求重置...");
-      const data = operationSucceeded(await api.resetAuth());
-      if (data.success === false) {
-        showToast(`重置失败: ${data.message || "服务重启异常,请查看日志"}`);
-      } else {
-        showToast(data.message || "密码已重置成功！");
-      }
-      setTimeout(fetchStatus, 1200);
+      operationSucceeded(await api.useNativeLogin(username, password));
+      state.proxyPasswordConfigured = false;
+      showToast('已切换为 QwenPaw 原生登录，旧反代会话已失效');
     } catch (error) {
-      showToast(`请求失败: ${errorMessage(error)}`);
+      showToast(`未确认切换：${errorMessage(error)}`);
+      await fetchWebProxyPort();
     }
   }
 
-  function renderMirrorUI(): void {
-    const label = document.getElementById("mirrorLabel");
-    if (label) label.innerText = (MIRRORS.find(mirror => mirror.value === mirrorValue) || MIRRORS[0]).label;
-    const drop = document.getElementById("mirrorDropdown");
-    if (drop) renderMirrorOptions(MIRRORS, mirrorValue, pickMirror, drop);
+  async function migrateEntry(): Promise<void> {
+    if (state.entryLogin !== false || !await showModal({title: '迁移到入口登录', message: '请先从飞牛桌面用原 QwenPaw 账号登录一次。确认后，飞牛入口使用平台管理员身份。独立反代已设密码时使用实例密码，未设时使用 QwenPaw 原生认证；本机服务端口保留原生登录。', confirmText: '确认迁移', type: 'warn'})) return;
+    state.saving = true;
+    try {
+      const token = localStorage.getItem('qwenpaw_auth_token');
+      if (!token) throw new Error('未找到旧会话，请在同一浏览器的飞牛入口登录原账号后重试');
+      operationSucceeded(await api.migrateEntry(token));
+      state.entryLogin = true;
+      if (localStorage.getItem('qwenpaw_auth_token') === token) localStorage.removeItem('qwenpaw_auth_token');
+      showToast('已迁移，重新打开对话即可使用入口登录');
+    } catch (error) { showToast(`迁移未确认：${errorMessage(error)}`); }
+    await fetchWebProxyPort();
   }
 
-  function toggleMirrorDropdown(): void {
-    const drop = document.getElementById("mirrorDropdown");
-    if (drop) drop.classList.toggle("show");
+  async function resetAuth(password: string): Promise<void> {
+    state.saving = true;
+    try {
+      operationSucceeded(await api.resetAuth(password));
+      showToast('密码已重置，请用原用户名和新密码登录');
+    } catch (error) {
+      showToast(`密码重置未确认：${errorMessage(error)}`);
+    }
   }
 
-  function pickMirror(value: string): void {
-    mirrorValue = value;
-    renderMirrorUI();
-    const drop = document.getElementById("mirrorDropdown");
-    if (drop) drop.classList.remove("show");
-    void saveMirror();
+  async function pickMirror(value: string): Promise<void> {
+    if (mirror.saving || !MIRRORS.some(item => item.value === value)) return;
+    mirror.saving = true;
+    mirror.open = false;
+    ++mirrorRead;
+    try {
+      operationSucceeded(await api.setMirror(value));
+      mirror.value = value;
+      mirror.ready = true;
+      await fetchVersionList(true);
+      showToast('下载源已保存');
+    } catch (error) {
+      showToast(`下载源保存失败: ${errorMessage(error)}`);
+      await loadMirror();
+    } finally { mirror.saving = false; }
   }
 
   async function loadMirror(): Promise<void> {
+    const request = ++mirrorRead;
     try {
-      const { data } = await api.getMirror();
-      if (data.success) {
-        mirrorValue = data.mirror || "";
-        renderMirrorUI();
-      }
-    } catch (error) {
-      console.warn("loadMirror err:", error);
-    }
-  }
-
-  async function saveMirror(): Promise<void> {
-    try {
-      operationSucceeded(await api.setMirror(mirrorValue));
-      showToast("下载源已保存，版本查询与内核安装将共用此源");
-      await fetchVersionList();
-    } catch (error) {
-      showToast(`下载源保存失败: ${errorMessage(error)}`);
-    }
+      const {data, ok} = await api.getMirror();
+      if (request !== mirrorRead) return;
+      mirror.ready = ok && data.success === true;
+      if (mirror.ready) mirror.value = data.mirror || '';
+    } catch { if (request === mirrorRead) mirror.ready = false; }
   }
 
   function closeMirrorDropdown(event: MouseEvent): void {
@@ -275,24 +279,25 @@ export function createSettingsPanel({
     const button = document.getElementById("mirrorToggleBtn");
     if (drop && drop.classList.contains("show") && event.target instanceof Node
       && !drop.contains(event.target) && !(button && button.contains(event.target))) {
-      drop.classList.remove("show");
+      mirror.open = false;
     }
   }
 
   document.addEventListener("click", closeMirrorDropdown);
 
   return {
-    changeServicePort,
-    fetchWebProxyPort,
-    changeWebProxyPort,
-    setWebProxyPublic,
-    setScope: setWebProxyScope,
-    resetAuth,
+    changeServicePort: () => runAction(changeServicePort),
+    fetchWebProxyPort: () => state.saving ? Promise.resolve() : fetchWebProxyPort(),
+    changeWebProxyPort: () => runAction(changeWebProxyPort),
+    setWebProxyPublic: (value: boolean) => runAction(() => setWebProxyPublic(value)),
+    migrateEntry: () => runAction(migrateEntry),
+    useNativeLogin: (username: string, password: string) => runAction(() => useNativeLogin(username, password)),
+    resetAuth: (password: string) => runAction(() => resetAuth(password)),
     loadMirror,
-    saveMirror,
-    toggleMirrorDropdown,
+    mirror, mirrors: MIRRORS,
+    toggleMirrorDropdown: () => { mirror.open = !mirror.open; if (mirror.open && !mirror.ready) void loadMirror(); },
     pickMirror,
-    currentMirror: () => mirrorValue,
+    currentMirror: () => mirror.value,
     destroy: () => document.removeEventListener("click", closeMirrorDropdown),
   };
 }

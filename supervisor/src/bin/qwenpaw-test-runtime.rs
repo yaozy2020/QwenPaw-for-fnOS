@@ -114,6 +114,19 @@ fn run_code_probe(code: &OsStr, control: Option<&Path>) -> io::Result<()> {
             return Ok(());
         }
     }
+    if let Some(root) = control {
+        let hold = root.join("hold-metadata");
+        if hold.exists() {
+            fs::write(root.join("metadata-started"), "1")?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while hold.exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "fixture metadata held"));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
     print_installed_version()
 }
 

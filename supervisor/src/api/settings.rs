@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::sync::Arc;
 
 use axum::{
@@ -11,133 +12,71 @@ use serde_json::json;
 use super::{
     begin_operation, check_token, err_json, management_error_response, AppState, AuthCache,
 };
-/// 重置管理员密码:移除 auth.json,下次打开 Web 端重新设定(旧 reset_auth 语义)。
-/// 事务式:先备份重命名 → 重启 → 健康检查通过才删备份;失败恢复备份并如实报错。
-/// 历史版本直接删文件 + `spawn().unwrap_or(0)`,重启失败时既丢了认证又假报成功。
 pub(super) async fn kernel_reset_auth(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
 ) -> axum::response::Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        password: String,
+    }
     if !check_token(&state.token, &req) {
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 8192).await else {
+        return err_json(StatusCode::BAD_REQUEST, "密码请求过大或无效");
+    };
+    if !serde_json::from_slice::<Input>(&bytes).is_ok_and(|v| !v.password.trim().is_empty()) {
+        return err_json(StatusCode::BAD_REQUEST, "请提供非空的新密码");
     }
     let _operation = match begin_operation(&state) {
         Ok(guard) => guard,
         Err(response) => return *response,
     };
-    let auth = std::path::Path::new(&state.share_dir)
-        .parent()
-        .map(|p| p.join(".qwenpaw.secret/auth.json"))
-        .unwrap_or_default();
-    if auth.as_os_str().is_empty() {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "认证文件路径解析失败");
-    }
-    if !auth.exists() {
-        return Json(json!({"ok": true, "success": true, "message": "密码本就未设置"}))
-            .into_response();
-    }
-    let backup = auth.with_extension("json.bak-reset");
-    state.kernel.stop().await;
-    if let Some(error) = super::lifecycle::stop_verification_error(&state.kernel) {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
-    }
-    let transaction = Arc::new(crate::auth_reset::AuthReset::new(
-        &auth,
-        std::path::Path::new(&state.var_dir),
-    ));
-    let tx = Arc::clone(&transaction);
-    let begin = tokio::task::spawn_blocking(move || tx.begin())
-        .await
-        .unwrap_or_else(|error| Err(std::io::Error::other(error)));
-    if let Err(error) = begin {
-        state
-            .install
-            .block_recovery(format!("认证重置准备失败: {error}"));
-        return err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("认证文件备份失败: {error}"),
-        );
-    }
-    let kernel = Arc::clone(&state.kernel);
-    let spawn_result = tokio::task::spawn_blocking(move || kernel.spawn())
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()));
-    let mut healthy = spawn_result.is_ok();
-    if spawn_result.is_ok() {
-        healthy = wait_healthy_blocking(&state).await;
-    }
-    if healthy {
-        let committed = tokio::task::spawn_blocking(move || transaction.commit())
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
-        if let Err(error) = committed {
-            state
-                .install
-                .block_recovery(format!("认证重置提交或清理待恢复: {error}"));
-            state.kernel.stop().await;
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("认证重置尚待恢复: {error}"),
-            );
-        }
-        *state
-            .auth_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = AuthCache::default();
-        state.events.invalidate();
-        Json(json!({"ok": true, "success": true, "message": "管理员密码已重置,服务已重启"}))
-            .into_response()
-    } else {
-        state.kernel.stop().await;
-        if let Some(error) = super::lifecycle::stop_verification_error(&state.kernel) {
-            state.install.block_recovery(error.clone());
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
-        }
-        let restore = tokio::task::spawn_blocking(move || transaction.recover())
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
-        let respawn = if let Err(error) = &restore {
-            state
-                .install
-                .block_recovery(format!("认证文件恢复失败: {error}"));
-            Err("认证文件未恢复,服务保持停止".to_string())
-        } else {
-            let kernel = Arc::clone(&state.kernel);
-            tokio::task::spawn_blocking(move || kernel.spawn())
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
-        };
-        let respawn_healthy = if respawn.is_ok() {
-            wait_healthy_blocking(&state).await
-        } else {
-            false
-        };
-        state.events.invalidate();
-        let detail = match spawn_result {
-            Err(e) => format!("服务重启失败: {e}"),
-            Ok(_) => "服务重启后健康检查未通过".to_string(),
-        };
-        let restore_msg = match (&restore, &respawn, respawn_healthy) {
-            (Err(e), _, _) => {
-                format!("认证文件恢复失败({e}),备份保留在 {}", backup.display())
-            }
-            (_, Err(e), _) => format!("已恢复原认证文件,但旧实例重启失败: {e},请手动启动服务"),
-            (_, _, false) => "已恢复原认证文件,但旧实例健康检查未通过,请检查内核日志".to_string(),
-            (_, _, true) => "已恢复原认证文件".to_string(),
-        };
+    let unavailable = || {
         err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("{detail};{restore_msg}"),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "请确认已启动带本版密码恢复适配的 QwenPaw 内核",
         )
+    };
+    if !state.kernel.supports_native_proxy() {
+        return unavailable();
     }
-}
-
-/// 阻塞式健康检查(10s 上限);spawn_blocking 包裹避免占死 IO 线程
-async fn wait_healthy_blocking(state: &AppState) -> bool {
-    let kernel = Arc::clone(&state.kernel);
-    tokio::task::spawn_blocking(move || kernel.wait_healthy(std::time::Duration::from_secs(10)))
-        .await
-        .unwrap_or(false)
+    let Ok(request) = Request::post(format!(
+        "{}/api/auth/fnos-admin-password",
+        state.kernel.base_path()
+    ))
+    .header("x-fnos-entry-command", "admin-password")
+    .header("content-type", "application/json")
+    .body(axum::body::Body::from(bytes)) else {
+        return unavailable();
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        crate::entry_login::send(&state.kernel, request),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => match reply.status() {
+            StatusCode::NO_CONTENT => Json(json!({"success":true})).into_response(),
+            StatusCode::CONFLICT => {
+                err_json(StatusCode::CONFLICT, "未启用原生鉴权或尚无已注册账号")
+            }
+            StatusCode::PRECONDITION_FAILED => {
+                err_json(StatusCode::CONFLICT, "原生账号与飞牛入口绑定不一致，未更改")
+            }
+            StatusCode::SERVICE_UNAVAILABLE => err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "无法确认账号记录或写入结果，请核对内核状态",
+            ),
+            _ => unavailable(),
+        },
+        _ => err_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "未收到内核确认，请先用新密码尝试登录",
+        ),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -211,7 +150,99 @@ pub(super) async fn web_proxy_port_get(
         return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
     };
     let (port, public) = manager.state().await;
-    Json(json!({"success": true, "port": port, "public": public})).into_response()
+    let mut data = json!({"success":true,"port":port,"public":public,"passwordConfigured":state.proxy_auth.password_status()});
+    if crate::entry_login::selected(&state.kernel.entry_record()) {
+        data["entryLogin"] = json!(true);
+    }
+    Json(data).into_response()
+}
+
+pub(super) async fn entry_migrate(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let _operation = match begin_operation(&state) {
+        Ok(g) => g,
+        Err(response) => return *response,
+    };
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Proof {
+        token: String,
+    }
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 8192).await else {
+        return err_json(StatusCode::BAD_REQUEST, "请求无效");
+    };
+    let Ok(proof) = serde_json::from_slice::<Proof>(&bytes) else {
+        return err_json(StatusCode::BAD_REQUEST, "旧会话格式无效");
+    };
+    match crate::entry_login::migrate(&state.kernel, proof.token).await {
+        Ok(()) => {
+            state.events.invalidate();
+            Json(json!({"success":true})).into_response()
+        }
+        Err((status, msg)) => err_json(status, msg),
+    }
+}
+
+pub(super) async fn use_native_login(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        confirm: bool,
+        username: String,
+        password: String,
+    }
+    if !check_token(&state.token, &req) {
+        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
+    }
+    let _operation = match begin_operation(&state) {
+        Ok(g) => g,
+        Err(response) => return *response,
+    };
+    match state.proxy_auth.password_status() {
+        Some(true) => (),
+        Some(false) => return err_json(StatusCode::CONFLICT, "当前没有旧反代密码需要切换"),
+        None => {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "旧反代密码记录不可读，未切换",
+            )
+        }
+    }
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 8192).await else {
+        return err_json(StatusCode::BAD_REQUEST, "请求无效");
+    };
+    let Ok(input) = serde_json::from_slice::<Input>(&body) else {
+        return err_json(StatusCode::BAD_REQUEST, "需要确认切换并提供原账号");
+    };
+    if !input.confirm
+        || input.username.trim().is_empty()
+        || input.username.len() > 256
+        || input.password.is_empty()
+    {
+        return err_json(StatusCode::BAD_REQUEST, "需要确认切换并提供原账号");
+    }
+    if let Err((status, message)) =
+        crate::entry_login::confirm_native_login(&state.kernel, &input.username, &input.password)
+            .await
+    {
+        return err_json(status, message);
+    }
+    if state.proxy_auth.clear_password().is_err() {
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "旧密码记录变更未确认，请重新检查配置",
+        );
+    }
+    state.events.invalidate();
+    Json(json!({"success":true})).into_response()
 }
 
 pub(super) async fn web_proxy_port_set(
@@ -462,7 +493,8 @@ mod tests {
         let dir = TestDir::new("settings-slow-auth-snapshot");
         let port = crate::api::test_support::free_port();
         let state = dir.state(port);
-        let _server = SlowAuthServer::start(crate::api::test_support::release_port_reservation(port));
+        let _server =
+            SlowAuthServer::start(crate::api::test_support::release_port_reservation(port));
         let _kernel = KernelGuard(Arc::clone(&state.kernel));
         install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
         state.kernel.spawn().unwrap();
@@ -621,61 +653,27 @@ time.sleep(3600)
     }
 
     #[tokio::test]
-    async fn auth_restore_failure_does_not_restart_without_original_auth() {
-        let dir = TestDir::new("auth-restore");
-        let port = crate::api::test_support::free_port();
-        let state = dir.state(port);
-        let _kernel = KernelGuard(Arc::clone(&state.kernel));
-        crate::api::test_support::release_port_reservation(port);
+    async fn reset_requires_existing_managed_kernel_and_valid_input() {
+        let dir = TestDir::new("native-password");
+        let state = dir.state(crate::api::test_support::free_port());
         let secret = dir.0.join(".qwenpaw.secret");
         std::fs::create_dir(&secret).unwrap();
         let auth = secret.join("auth.json");
-        std::fs::write(&auth, "original-auth").unwrap();
-        install_python(
-            &dir,
-            &state,
-            r#"with (root / 'starts').open('a') as calls:
-    calls.write('start\n')
-auth = root / '.qwenpaw.secret/auth.json'
-auth.mkdir(exist_ok=True)
-(auth / 'block-restore').write_text('keep')
-sys.exit(1)
-"#,
-        );
-        let req = Request::builder()
-            .method("POST")
-            .uri("/kernel/reset-auth")
-            .header("X-Supervisor-Token", &state.token)
-            .body(axum::body::Body::empty())
-            .unwrap();
-
-        let mut events = state.events.subscribe();
-        let response = kernel_reset_auth(State(state.clone()), req).await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(events.try_recv().unwrap(), "");
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .unwrap();
-        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(payload["error"]
-            .as_str()
-            .unwrap()
-            .contains("认证文件恢复失败"));
-        assert_eq!(
-            std::fs::read_to_string(auth.with_extension("json.bak-reset")).unwrap(),
-            "original-auth"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.0.join("starts"))
-                .unwrap()
-                .lines()
-                .count(),
-            1,
-            "restore failure must not start a service without the original auth"
-        );
-        assert!(
-            state.install.recovery_error().is_some(),
-            "future starts must remain blocked until auth is restored"
-        );
+        std::fs::write(&auth, "unchanged").unwrap();
+        for (body, status) in [
+            ("{}", StatusCode::BAD_REQUEST),
+            (r#"{"password":"   "}"#, StatusCode::BAD_REQUEST),
+            (r#"{"password":"fixture"}"#, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let req = Request::post("/kernel/admin-password")
+                .header("X-Supervisor-Token", &state.token)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            assert_eq!(
+                kernel_reset_auth(State(state.clone()), req).await.status(),
+                status
+            );
+            assert_eq!(std::fs::read_to_string(&auth).unwrap(), "unchanged");
+        }
     }
 }

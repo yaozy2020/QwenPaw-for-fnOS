@@ -76,8 +76,8 @@ def list_workflows() -> list[str]:
 
 def base_path_patch_summaries() -> list[tuple[str, str, int, int, int]]:
     result = []
-    for version in ("2.3.0.post1",):
-        root = ROOT / f"patches/qwenpaw-{version}-base-path"
+    from shipping_patch import shipping_patch
+    for version, root in (shipping_patch(),):
         raw = (root / "manifest.json").read_bytes()
         manifest = json.loads(raw)
         size = sum((root / "payload" / entry["path"]).stat().st_size

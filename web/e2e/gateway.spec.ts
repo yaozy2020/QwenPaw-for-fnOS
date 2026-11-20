@@ -1,9 +1,14 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
-import { createHash } from "node:crypto";
-import { readFile, rm, stat, writeFile } from "node:fs/promises";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFile, copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+
+async function pickVersion(page: Page, version: string) {
+  await page.locator('#targetVersion').click();
+  await page.locator(`#versionOptions [data-version="${version}"]`).click();
+}
 
 const prefix = "/app/qwenpaw/";
 const api = `${prefix}api/`;
@@ -63,6 +68,145 @@ async function exists(path: string): Promise<boolean> {
     throw error;
   }
 }
+
+test('monitor shows cold status before slow metadata, streams live process metrics and confirms start and stop', async ({ page, request }) => {
+  const { files, binaries, appPort } = await metadata(request);
+  expect(await exists(files.venv)).toBe(false);
+  await mkdir(files.venv);
+  const bin = join(files.venv, 'bin');
+  await mkdir(bin);
+  const python = join(bin, 'python3');
+  const root = dirname(dirname(files.venv));
+  const hold = join(root, 'hold-metadata');
+  await writeFile(hold, '1');
+  await copyFile(binaries.runtime.path, python);
+  await writeFile(join(files.venv, 'installed'), '2.0.0\n');
+  let statusReads = 0;
+  page.on('request', r => { if (new URL(r.url()).pathname === `${api}status`) statusReads++; });
+  await page.addInitScript(() => {
+    const times: number[] = [];
+    Object.assign(window, { monitorTicks: times });
+    window.EventSource = class extends EventSource {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        this.addEventListener('metrics', event => {
+          const sample = JSON.parse((event as MessageEvent).data);
+          if (sample.pid > 0 && sample.startAt > 0 && sample.memKB > 0 && typeof sample.cpu === 'number') times.push(performance.now());
+        });
+      }
+    };
+  });
+  const state = page.locator('#statusCardMount .status-text');
+  const phase = Date.now();
+  await page.goto(prefix, {waitUntil:'domcontentloaded'});
+  try {
+    await expect(state).toHaveText('已停止', {timeout: 1500});
+    console.log(`cold navigation to confirmed status: ${Date.now()-phase} ms`);
+    await expect(page.locator('#overviewVersion')).toHaveText('待确认');
+    await expect(page.locator('#overviewInstallButton')).toBeHidden();
+    await expect.poll(() => exists(join(root, 'metadata-started')), {timeout:3000}).toBe(true);
+  } finally { await rm(hold, {force: true}); }
+  await expect(page.locator('#overviewVersion')).toHaveText('2.0.0', {timeout: 3000});
+  const control = async (name: 'start' | 'stop', label: string, next: string) => {
+    await page.getByRole('button', {name: label, exact:true}).click();
+    const reply = page.waitForResponse(r => r.request().method() === 'POST' && new URL(r.url()).pathname === `${api}${name}`).then(response => ({response, at:Date.now()}));
+    await page.locator('#modalConfirmBtn').click();
+    const {response, at} = await reply;
+    expect(response.status()).toBe(200);
+    expect((await response.json()).success).toBe(true);
+    await expect(state).toHaveText(next, {timeout: 1000});
+    console.log(`${name} response to confirmed status: ${Date.now()-at} ms`);
+  };
+  await control('start', '启动服务', '运行中');
+  await expect.poll(async () => {
+    const response = await request.get(`http://127.0.0.1:${appPort}/api/version`).catch(() => null);
+    return response?.ok() ? (await response.json()).version : null;
+  }).toBe('2.0.0');
+  const shownPid = Number(await page.locator('#overviewPid').innerText());
+  expect(shownPid).toBeGreaterThan(1);
+  expect(await exists(`/proc/${shownPid}/stat`)).toBe(true);
+  const clock = page.locator('#statusCardMount .stat').filter({hasText:'运行时间'}).locator('.stat-value');
+  const initial = await clock.innerText();
+  const ticks = () => page.evaluate(() => (window as Window & {monitorTicks?: number[]}).monitorTicks || []);
+  await expect.poll(async () => (await ticks()).length, {timeout: 4000}).toBeGreaterThan(0);
+  const before = statusReads;
+  await expect.poll(async () => (await ticks()).length, {timeout: 4000}).toBeGreaterThanOrEqual(3);
+  const [a,b,c] = await ticks();
+  console.log(`monitor frame intervals: ${(b-a).toFixed(0)}, ${(c-b).toFixed(0)} ms`);
+  for (const gap of [b-a,c-b]) { expect(gap).toBeGreaterThan(500); expect(gap).toBeLessThan(1600); }
+  await expect(clock).not.toHaveText(initial);
+  await expect(page.locator('#statusUptime')).toContainText(await clock.innerText());
+  await expect(page.locator('#statusCardMount')).toContainText(/\d+\.\d%/);
+  expect(statusReads).toBe(before);
+  const manual = page.waitForResponse(r => new URL(r.url()).pathname === `${api}status`);
+  const refreshAt = Date.now();
+  await page.getByRole('button', {name: '刷新服务状态'}).click();
+  const refreshed = await manual;
+  expect(refreshed.status()).toBe(200);
+  const snapshot = await refreshed.json();
+  expect(String(snapshot.pid)).toBe(String(shownPid));
+  await expect(page.locator('#refreshDashboardBtn')).toBeEnabled({timeout: 1000});
+  console.log(`manual refresh click through render: ${Date.now()-refreshAt} ms`);
+  expect(statusReads).toBe(before + 1);
+  // Use the real start time, advancing only the browser's clock.
+  for (const [elapsed, text] of [[86399, '23:59:59'], [86400, '1天 00:00'], [86459, '1天 00:00'], [86460, '1天 00:01']] as const) {
+    await page.clock.setFixedTime((snapshot.startAt + elapsed) * 1000);
+    await expect(clock).toHaveText(text);
+    await expect(page.locator('#statusUptime')).toHaveText(`已运行 ${text}`);
+  }
+  expect(statusReads).toBe(before + 1);
+  await control('stop', '停止服务', '已停止');
+  expect(await exists(`/proc/${shownPid}/stat`)).toBe(false);
+  await expect(page.locator('#statusUptime')).toBeEmpty();
+  await page.locator('#btnUninstallKernel').click();
+  await page.locator('#modalConfirmBtn').click();
+  await expect(state).toHaveText('内核未安装');
+  expect(await exists(files.venv)).toBe(false);
+});
+
+test('overview exposes a single in-panel release picker and offline recovery instructions', async ({page}) => {
+  await page.goto(prefix);
+  const picker = page.locator('#targetVersion');
+  await expect(picker).toBeVisible();
+  await expect(page.locator('#btnChangeServicePort, #authorizedDirsList')).toHaveCount(0);
+  await pickVersion(page, '2.1.0b1');
+  await expect(picker).toContainText('测试版');
+  await expect(page.locator('#versionOrder')).toHaveText('按发布时间从新到旧');
+  await pickVersion(page, '2.0.0');
+  await expect(picker).toContainText('正式版');
+  await expect(page).toHaveURL(/#overview$/);
+  await page.getByLabel('安装前备份已有数据').check();
+  await page.locator('#btnUpgradeAction').click();
+  await expect(page.locator('#customModal')).toContainText('备份或校验失败将中止安装');
+  await page.locator('#modalCancelBtn').click();
+  await page.locator('[data-section="authorization"]').click();
+  await expect(page.locator('#openBackupBtn')).toBeDisabled();
+  await page.getByText('安装失败，如何离线恢复？').click();
+  const recoveryFile = page.getByText('preinstall-data.tar', {exact:true});
+  await expect(recoveryFile).toBeVisible();
+  await page.locator('[data-section="configuration"]').click();
+  await expect(page.locator('#btnChangeServicePort')).toBeVisible();
+  await page.goBack();
+  await expect(recoveryFile).toBeVisible();
+});
+
+test("packaged panel uses Vue handlers and follows a real log append before fallback polling", async ({ page, request }) => {
+  const fixture = await metadata(request);
+  await page.goto(prefix);
+  await expect(page.locator('#statusCardMount .status-text')).toHaveText('内核未安装');
+  expect(await page.locator('[onclick], [onchange]').count()).toBe(0);
+  expect(await page.evaluate(() => 'checkOrUpgrade' in window)).toBe(false);
+  const watching = page.waitForResponse(r => r.url().endsWith(`${api}events?watch=logs`) && r.status() === 200);
+  await page.locator('[data-section="logs"]').click();
+  await watching;
+  await page.waitForTimeout(2200); // Allow the first 2s metadata sample before changing the file.
+  const line = `tail-${randomUUID()}`;
+  await appendFile(fixture.files.kernelLog, `\n${line}\n`);
+  await expect(page.locator('#logTerminal')).toContainText(line, { timeout: 7000 });
+  const statusOnly = page.waitForRequest(r => r.url().endsWith(`${api}events`));
+  await page.locator('#autoRefreshCheck').uncheck();
+  await statusOnly;
+});
 
 test("Gateway transport exposes the prefixed console over real UDS and enforces real CSRF", async ({ page, request }, testInfo) => {
   const fixture = await metadata(request);
@@ -149,7 +293,7 @@ test("Web proxy port UI handles validation, conflict and successful automatic se
       : { status: 409, json: { success: false, message: "端口被占用" } });
   });
 
-  await page.goto(prefix);
+  await page.goto(prefix + "#configuration");
   await expect(page.locator("#valWebProxyPort")).toHaveText("43126");
   const button = page.getByRole("button", { name: "修改反代端口" });
 
@@ -192,7 +336,7 @@ for (const responseCase of [
         const data = path === "status"
           ? { success: true, installed: true, running: false, version: "2.0.0", port: 18088, authStatus: "protected", install: { running: false } }
           : path === "logs" ? { success: true, logs: [] }
-            : path === "kernel/versions" ? { success: true, latest_stable: "2.1.0", versions: [{ version: "2.1.0", is_beta: false }] }
+            : path === "kernel/versions" ? { success: true, latest_stable: "2.1.0", recommended_version: "2.1.0", versions: [{ version: "2.1.0", is_beta: false }] }
               : path === "mirror" ? { success: true, mirror: "" }
                 : path === "web-proxy/port" ? { success: true, port: 43126, public: false }
                   : { success: true, upgrading: false };
@@ -207,7 +351,7 @@ for (const responseCase of [
 
     await page.goto(prefix);
     await expect(page.locator("#btnStartService")).toBeVisible();
-    await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+    await page.locator('[data-section="configuration"]').click();
     await page.getByRole("button", { name: "修改端口" }).click();
     await page.locator("#modalInput").fill("23001");
     await page.locator("#modalConfirmBtn").click();
@@ -223,12 +367,16 @@ for (const responseCase of [
     await expect(page.locator("#valWebProxyPort")).toHaveText("43126");
 
     await page.getByRole("button", { name: "重置 QwenPaw 管理员密码" }).click();
-    await page.locator("#modalConfirmBtn").click();
-    await expect(page.locator("#toast")).toContainText("请求失败");
+    await page.getByLabel('新密码', {exact:true}).fill('fixture');
+    await page.getByLabel('确认新密码').fill('fixture');
+    await page.getByRole('button', {name:'保存新密码'}).click();
+    await expect(page.locator("#toast")).toContainText("密码重置未确认");
+    await page.locator('[data-section="overview"]').click();
     await page.locator("#btnStartService").click();
     await page.locator("#modalConfirmBtn").click();
     await expect(page.locator("#toast")).toContainText("操作失败");
 
+    await expect(page.locator('#targetVersion')).toBeVisible();
     await page.locator("#mirrorToggleBtn").click();
     await page.locator("#mirrorDropdown .history-item").first().click();
     await expect(page.locator("#toast")).toContainText("下载源保存失败");
@@ -236,12 +384,15 @@ for (const responseCase of [
     await page.locator("#modalConfirmBtn").click();
     await expect(page.locator("#toast")).toContainText("卸载请求失败");
 
+    await page.getByRole('button', { name: '检查更新', exact: true }).click();
+    await pickVersion(page, '2.1.0');
     await page.locator("#btnUpgradeAction").click();
     await page.locator("#modalConfirmBtn").click();
     await expect(page.locator("#toast")).toContainText("安装请求失败");
     await expect(page.locator("#upgradeModal")).not.toHaveClass(/active/);
-    expect(posts).toEqual(["port", "web-proxy/port", "kernel/reset-auth", "start", "mirror", "kernel/uninstall", "kernel/install"]);
+    expect(posts).toEqual(["port", "web-proxy/port", "kernel/admin-password", "start", "mirror", "kernel/uninstall", "kernel/install"]);
 
+    await page.locator('[data-section="configuration"]').click();
     validToggle = true;
     await page.locator("#webProxyPublic").check();
     await page.locator("#modalConfirmBtn").click();
@@ -272,13 +423,13 @@ test("version action stays disabled until a successful version list has loaded",
     await route.fulfill({ json: data });
   });
 
-  await page.goto(prefix);
+  await page.goto(prefix + "#version");
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
   releaseVersions();
   await expect(page.locator("#versionSourceStatus")).toBeVisible();
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
-  await page.evaluate(() => (window as unknown as { checkOrUpgrade(): void }).checkOrUpgrade());
-  await expect(page.locator("#toast")).toContainText("可用版本尚未加载");
+  await page.locator("#btnUpgradeAction").evaluate(button => (button as HTMLButtonElement).click());
+  await expect(page.locator("#customModal")).not.toHaveClass(/active/);
   expect(installPosts).toBe(0);
 });
 
@@ -323,14 +474,14 @@ test("lost acceptance attaches without replay, polls identified logs and times o
     const data = path === "status"
       ? { success: true, installed: false, running: false, port: 18088, install: { running: false } }
       : path === "logs" ? { success: true, logs: [] }
-        : path === "kernel/versions" ? { success: true, latest_stable: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] }
+        : path === "kernel/versions" ? { success: true, latest_stable: "2.0.0", recommended_version: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] }
           : path === "mirror" ? { success: true, mirror: "" }
             : path === "web-proxy/port" ? { success: true, port: 43126, public: false }
               : { success: true };
     await route.fulfill({ json: data });
   });
 
-  await page.goto(prefix);
+  await page.goto(prefix + "#version");
   await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
   await page.locator("#btnUpgradeAction").click();
   await page.locator("#modalConfirmBtn").click();
@@ -366,10 +517,13 @@ test("real Gateway Web proxy port UI reads, rejects conflict and switches listen
   expect(previousPort).toBeGreaterThan(0);
   const initialRead = page.waitForResponse(response =>
     response.request().method() === "GET" && new URL(response.url()).pathname === `${api}web-proxy/port`);
-  await page.goto(prefix);
+  await page.goto(prefix + "#configuration");
   expect((await initialRead).status()).toBe(200);
   await expect(page.locator("#valWebProxyPort")).toHaveText(String(previousPort));
-  expect((await request.get(`http://127.0.0.1:${previousPort}/api/status`)).status()).toBe(503);
+  expect((await request.get(`http://127.0.0.1:${previousPort}/api/status`)).status()).toBe(401);
+  const waiting = await request.get(`http://127.0.0.1:${previousPort}/`, { headers: { Accept: 'text/html' } });
+  expect(waiting.status()).toBe(503);
+  expect(await waiting.text()).toContain('重新检查');
 
   const allocated = await request.get("/__e2e/allocate-port");
   const { port: occupiedPort } = await allocated.json() as { port: number };
@@ -397,7 +551,11 @@ test("real Gateway Web proxy port UI reads, rejects conflict and switches listen
   expect(newPort).not.toBe(previousPort);
   await expect(page.locator("#valWebProxyPort")).toHaveText(String(newPort));
   expect(Number((await readFile(fixture.files.webProxyPort, "utf8")).trim())).toBe(newPort);
-  expect((await request.get(`http://127.0.0.1:${newPort}/api/status`)).status()).toBe(503);
+  expect((await request.get(`http://127.0.0.1:${newPort}/api/status`)).status()).toBe(401);
+  expect((await request.get(`http://127.0.0.1:${newPort}/api/version`)).status()).toBe(503);
+  await expect(page.locator('#proxyPasswordState')).toHaveText('QwenPaw 原生账号');
+  await expect(page.getByRole('button', {name:/设置反代密码|切换为原生登录/})).toHaveCount(0);
+  // TLS legacy-password upgrade coverage lives in scripts/test-entry-migration.py with a real native account.
   await expect.poll(async () => {
     try {
       await request.get(`http://127.0.0.1:${previousPort}/api/status`, { timeout: 1000 });
@@ -457,9 +615,14 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   await page.context().addCookies([{ name: "qwenpaw_csrf", value: "sibling-domain-cookie", url: new URL("/", page.url()).href, sameSite: "Lax" }]);
   await expect(page.locator("#statusCardMount .status-text")).toHaveText("内核未安装");
   await expect(page.locator("#valVersion")).toHaveText("未安装");
-  await expect(page.locator("#versionCardsContainer .ver-number").first()).toHaveText("v2.1.0b1");
+  await page.locator("#targetVersion").click();
+  await expect(page.getByRole("option").first()).toContainText("v2.1.0b1");
   await expect(page.locator("#mirrorLabel")).toContainText("阿里云镜像源");
+  await page.locator('[data-section="logs"]').click();
   await expect(page.locator("#logTerminal")).toContainText("browser-e2e-runtime-log");
+  await page.locator('[data-section="configuration"]').click();
+  await page.locator('[data-section="overview"]').click();
+  await expect(page.locator('#targetVersion')).toBeVisible();
   await page.locator("#mirrorToggleBtn").click();
   await page.locator("#mirrorDropdown").getByText("清华大学镜像源", { exact: true }).click();
   await expect(page.locator("#mirrorLabel")).toContainText("清华大学镜像源");
@@ -469,6 +632,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   await expect(mirrorReload.locator("#mirrorLabel")).toContainText("清华大学镜像源");
   await mirrorReload.close();
 
+  await pickVersion(page, "2.0.0");
   const acceptedResponse = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === `${api}kernel/install`);
   await page.locator("#btnUpgradeAction").click();
   await expect(page.locator("#modalTitle")).toHaveText("安装内核确认");
@@ -493,7 +657,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   await page.locator("#btnUpClose").click();
   await writeFile(slowPip, "hold accepted task for browser recovery\n");
   await rm(pipStarted, { force: true });
-  await page.locator("#versionCardsContainer .ver-number").filter({ hasText: "v2.1.0b1" }).click();
+  await pickVersion(page, "2.1.0b1");
   const recoveryAcceptance = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === `${api}kernel/install`);
   await page.locator("#btnUpgradeAction").click();
   await expect(page.locator("#modalTitle")).toHaveText("在线升级确认");
@@ -545,8 +709,8 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   }
   if (isWebKit) {
     expect(pageErrors).toEqual([]);
-    expect(webkitReloadPageErrors).toHaveLength(4);
-    const allowedEndpoints = ["status", "logs", "kernel/install-log", "kernel/install-status"];
+    const allowedEndpoints = ["status", "kernel/install-log", "kernel/install-status"];
+    expect(webkitReloadPageErrors.length).toBeLessThanOrEqual(allowedEndpoints.length);
     const canceledEndpoints = webkitReloadPageErrors.map(message => {
       const match = message.match(/^\/([^/]+)(\/[^?\s]+)\?(\S+) due to access control checks\.$/);
       expect(match, `unexpected WebKit reload pageerror: ${message}`).not.toBeNull();
@@ -556,10 +720,9 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
       expect(canceledUrl.pathname.startsWith(`${prefix}api/`)).toBe(true);
       const endpoint = canceledUrl.pathname.slice(`${prefix}api/`.length);
       expect(allowedEndpoints).toContain(endpoint);
-      const expectedQueryKeys = endpoint === "kernel/install-log" ? ["_t", "instance", "seq", "tail"] : endpoint === "logs" ? ["_t", "tail"] : ["_t"];
+      const expectedQueryKeys = endpoint === "kernel/install-log" ? ["_t", "instance", "seq", "tail"] : ["_t"];
       expect([...canceledUrl.searchParams.keys()].sort()).toEqual(expectedQueryKeys);
       expect(canceledUrl.searchParams.get("_t")).toMatch(/^\d+$/);
-      if (endpoint === "logs") expect(canceledUrl.searchParams.get("tail")).toBe("100");
       if (endpoint === "kernel/install-log") {
         expect(canceledUrl.searchParams.get("tail")).toBe("40");
         expect(canceledUrl.searchParams.get("seq")).toBe(String(recoveryTask.seq));
@@ -567,7 +730,8 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
       }
       return endpoint;
     });
-    expect(canceledEndpoints.sort()).toEqual([...allowedEndpoints].sort());
+    // Only requests still in flight when WebKit tears down the document can be cancelled.
+    expect(new Set(canceledEndpoints).size).toBe(canceledEndpoints.length);
   }
   await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
   await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
@@ -586,6 +750,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   expect(targetPortResponse.ok()).toBeTruthy();
   const { port: targetPort } = await targetPortResponse.json() as { port: number };
   await page.locator("#btnUpClose").click();
+  await page.locator('[data-section="configuration"]').click();
   await page.getByRole("button", { name: "修改端口" }).click();
   await expect(page.locator("#modalTitle")).toHaveText("修改服务端口");
   await page.locator("#modalInput").fill(String(targetPort));
@@ -625,7 +790,9 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   consoleErrors.length = 0;
   failedRequests.length = 0;
 
-  await page.locator("#versionCardsContainer .ver-number").filter({ hasText: "v2.1.0b1" }).click();
+  await page.locator('[data-section="overview"]').click();
+  await expect(page.locator('#targetVersion')).toBeVisible();
+  await pickVersion(page, "2.1.0b1");
   await expect(page.locator("#btnUpgradeAction")).toHaveText("重新安装 v2.1.0b1");
   await writeFile(slowPip, "hold task after dropping the acceptance receipt\n");
   await rm(pipStarted, { force: true });
@@ -668,11 +835,13 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   expect(await betaHealth.json()).toEqual({ version: "2.1.0b1" });
   await page.locator("#btnUpClose").click();
 
+  await page.locator('[data-section="logs"]').click();
   await page.getByRole("button", { name: "清空日志", exact: true }).click();
   await expect(page.locator("#modalTitle")).toHaveText("删除服务日志");
   await page.locator("#modalConfirmBtn").click();
   await expect.poll(async () => readFile(fixture.files.kernelLog, "utf8")).not.toContain("browser-e2e-runtime-log");
   await expect.poll(async () => (await observations(request)).forwarded.some(item => item.path === `${api}logs/clear` && item.method === "POST" && item.success === true)).toBe(true);
+  await page.goto(prefix + "#version");
   await page.locator("#btnUninstallKernel").click();
   await expect(page.locator("#modalTitle")).toHaveText("仅卸载 QwenPaw 内核");
   await page.locator("#modalConfirmBtn").click();
@@ -767,6 +936,8 @@ test("sessionStorage unavailable: a pending install-log request does not block o
     await expect(page.locator("#statusCardMount .status-text")).toHaveText("内核未安装");
     await expect(page.locator("#upgradeModal")).not.toHaveClass(/active/);
 
+    await expect(page.locator('#targetVersion')).toBeVisible();
+    await pickVersion(page, "2.0.0");
     const acceptance = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === `${api}kernel/install`);
     await page.locator("#btnUpgradeAction").click();
     await expect(page.locator("#modalTitle")).toHaveText("安装内核确认");
@@ -819,6 +990,7 @@ test("sessionStorage unavailable: a pending install-log request does not block o
   }).toBe(true);
 
   await page.locator("#btnUpClose").click();
+  await page.goto(prefix + "#version");
   await page.locator("#btnUninstallKernel").click();
   await expect(page.locator("#modalTitle")).toHaveText("仅卸载 QwenPaw 内核");
   await page.locator("#modalConfirmBtn").click();

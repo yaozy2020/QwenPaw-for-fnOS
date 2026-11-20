@@ -105,7 +105,10 @@ fn check_identity(pid: i32, starttime: u64, expected_exe: &Path) -> IdentityStat
     if matches!(parse_process_state(&stat), Some('Z' | 'X')) {
         return IdentityState::Gone;
     }
-    if !matches!(parse_process_state(&stat), Some('R' | 'S' | 'D' | 'T' | 't')) {
+    if !matches!(
+        parse_process_state(&stat),
+        Some('R' | 'S' | 'D' | 'T' | 't')
+    ) {
         return IdentityState::Mismatch;
     }
     let exe = match fs::read_link(format!("/proc/{pid}/exe")) {
@@ -465,9 +468,16 @@ pub(crate) fn with_lifecycle_lock<T>(
 
 fn managed_supervisor_path(path: &Path) -> bool {
     path.is_absolute()
-        && path.file_name().is_some_and(|name| name == "qwenpaw-supervisor")
-        && path.parent().and_then(Path::file_name).is_some_and(|name| name == "bin")
-        && path.components().any(|component| component.as_os_str() == "qwenpaw")
+        && path
+            .file_name()
+            .is_some_and(|name| name == "qwenpaw-supervisor")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "bin")
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "qwenpaw")
 }
 
 fn registered_reinstall_executable(cfg: &Config) -> Result<Option<PathBuf>, String> {
@@ -485,12 +495,16 @@ fn registered_reinstall_executable(cfg: &Config) -> Result<Option<PathBuf>, Stri
     match check_identity(pid, starttime, &executable) {
         IdentityState::Match => Ok(Some(executable)),
         IdentityState::Gone => Ok(None),
-        IdentityState::Mismatch => Err("registered supervisor identity changed before reinstall".into()),
+        IdentityState::Mismatch => {
+            Err("registered supervisor identity changed before reinstall".into())
+        }
         IdentityState::Unverifiable(error) => Err(error),
     }
 }
 
-fn orphan_supervisor(cfg: &Config) -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf)>, String> {
+fn orphan_supervisor(
+    cfg: &Config,
+) -> Result<Option<(crate::procfs::ProcessIdentity, PathBuf)>, String> {
     let expected_pid = std::env::var("QWENPAW_TEST_REINSTALL_PID")
         .ok()
         .and_then(|value| value.parse::<i32>().ok());
@@ -533,7 +547,10 @@ fn stop_orphan_supervisor(cfg: &Config) -> Result<bool, String> {
         return Err("orphan supervisor identity changed before SIGTERM".into());
     }
     if unsafe { libc::kill(identity.pid, libc::SIGTERM) } != 0 {
-        return Err(format!("stop orphan supervisor: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "stop orphan supervisor: {}",
+            io::Error::last_os_error()
+        ));
     }
     let deadline = Instant::now() + STOP_GRACE;
     loop {
@@ -556,7 +573,10 @@ fn stop_orphan_supervisor(cfg: &Config) -> Result<bool, String> {
 pub(crate) fn stop_for_reinstall(cfg: &Config) -> Result<(), String> {
     let executable = registered_reinstall_executable(cfg)?;
     let has_previous_install = Path::new(&cfg.kernel_venv).exists()
-        || cfg.gateway_socket.as_ref().is_some_and(|path| path.exists());
+        || cfg
+            .gateway_socket
+            .as_ref()
+            .is_some_and(|path| path.exists());
     if let Some(executable) = executable {
         if executable_matches(&cfg.supervisor_binary, &executable) {
             return Ok(());
@@ -1100,7 +1120,12 @@ mod tests {
             .and_then(|(_, value)| value.split_once(')'))
             .map(|(name, _)| name)
             .unwrap();
-        let mut fields: Vec<_> = current_stat.rsplit_once(") ").unwrap().1.split_whitespace().collect();
+        let mut fields: Vec<_> = current_stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
         fields[0] = "Z";
         let zombie_stat = format!("{pid} ({name}) {}", fields.join(" "));
         let zombie_starttime = parse_starttime(&zombie_stat).unwrap();
@@ -1111,7 +1136,12 @@ mod tests {
             check_identity_from_stat(pid, starttime, &zombie_stat, Path::new("/missing")),
             IdentityState::Gone
         );
-        let mut reused_stat_fields: Vec<_> = zombie_stat.rsplit_once(") ").unwrap().1.split_whitespace().collect();
+        let mut reused_stat_fields: Vec<_> = zombie_stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
         reused_stat_fields[19] = "1";
         let reused_stat = format!("{pid} ({name}) {}", reused_stat_fields.join(" "));
         assert_eq!(

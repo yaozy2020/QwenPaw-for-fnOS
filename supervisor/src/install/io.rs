@@ -220,7 +220,10 @@ pub(crate) fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()
             .write(true)
             .mode(0o600)
             .open(&tmp)?;
-        let write_result = f.write_all(content.as_bytes()).and_then(|_| f.sync_all());
+        let write_result = f
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .and_then(|_| f.write_all(content.as_bytes()))
+            .and_then(|_| f.sync_all());
         if let Err(e) = write_result {
             drop(f);
             let _ = std::fs::remove_file(&tmp);

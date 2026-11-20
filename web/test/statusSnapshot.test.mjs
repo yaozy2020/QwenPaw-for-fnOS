@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isStatusSnapshot } from "../src/statusStore.ts";
+import { formatUptime, isStatusSnapshot } from "../src/statusStore.ts";
+
+test('uptime folds seconds at 24 hours and truncates to the last completed minute', () => {
+  for (const [seconds, expected] of [[59, '59秒'], [60, '1分 0秒'], [3600, '01:00:00'],
+    [86399, '23:59:59'], [86400, '1天 00:00'], [86459, '1天 00:00'], [86460, '1天 00:01'],
+    [90065, '1天 01:01'], [172799, '1天 23:59'], [172800, '2天 00:00']]) {
+    assert.equal(formatUptime(seconds), expected);
+  }
+});
 
 const snapshot = {
   success: true, installed: true, running: true, pid: "421", startAt: 1794900000,
@@ -15,6 +23,7 @@ const snapshot = {
 test("complete Rust status snapshots accept running, stopped and uninstalled states", () => {
   assert.equal(isStatusSnapshot(snapshot), true);
   assert.equal(isStatusSnapshot({ ...snapshot, pid: 421 }), true);
+  assert.equal(isStatusSnapshot({ ...snapshot, cpu: null }), true, 'first CPU delta is unknown');
   assert.equal(isStatusSnapshot({
     ...snapshot, installed: false, running: false, pid: "0", startAt: 0, version: "",
     authEnabled: false, authStatus: "unknown", cpu: 0, memKB: 0,
@@ -40,7 +49,7 @@ test("partial, failed, malformed and wrongly typed event data cannot become serv
     { success: false }, { installed: "true" }, { running: "false" },
     { pid: "<script>" }, { pid: -1 }, { pid: 0.5 }, { pid: null },
     { startAt: -1 }, { startAt: Infinity }, { startAt: "1794900000" },
-    { cpu: NaN }, { cpu: "1.5" }, { cpu: null }, { memKB: -1 },
+    { cpu: NaN }, { cpu: "1.5" }, { cpu: -1 }, { memKB: -1 },
     { version: {} }, { port: "18088" }, { port: 0 }, { port: 65536 },
     { authEnabled: "false" }, { authStatus: "unexpected" },
     { install: null }, { install: {} }, { install: { running: "false" } },

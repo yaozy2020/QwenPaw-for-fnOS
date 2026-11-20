@@ -61,4 +61,4 @@ CI 若需运行对应引擎，应先用该锁定版本安装所需浏览器及 r
 
 ## 依赖许可证
 
-Playwright 依赖固定为 `1.56.1`，只加入 `web` 的开发依赖，不进入生产包：`@playwright/test`、`playwright` 和 `playwright-core` 使用 Apache-2.0；其可选 Darwin `fsevents` 使用 MIT。现有 `esbuild`/`preact` 为 MIT，TypeScript 为 Apache-2.0。完整版本、完整性摘要和许可证字段以 `web/package-lock.json` 为准。
+Playwright 依赖固定为 `1.56.1`，只加入 `web` 的开发依赖，不进入生产包：`@playwright/test`、`playwright` 和 `playwright-core` 使用 Apache-2.0；其可选 Darwin `fsevents` 使用 MIT。Vue 与 Vite 为 MIT，TypeScript 为 Apache-2.0。完整版本、完整性摘要和许可证字段以 `web/package-lock.json` 为准。

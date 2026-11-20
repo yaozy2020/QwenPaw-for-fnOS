@@ -749,8 +749,10 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     _bg_task = asyncio.create_task(_background_startup())
     daily_telemetry = start_daily_telemetry()
 
+    from .fnos_entry import private_listener
     try:
-        yield
+        async with private_listener(app):
+            yield
     finally:
         await daily_telemetry.close()
         community_task.cancel()

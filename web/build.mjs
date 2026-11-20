@@ -1,49 +1,11 @@
-// 控制台编译:src/main.ts + src/style.css → 单文件 dist/index.html。
-// 运行时由统一 Gateway 服务 target/www/index.html 与预压缩兄弟文件,
-// 变化的只是"源码可编译":语法错误在此处即失败,不再静默上线(r7 教训)。
-import { build } from "esbuild";
-import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { mkdir, writeFile, copyFile } from 'node:fs/promises';
+import { buildPanel } from './build-panel.mjs';
 
-const buildId = process.env.BUILD_ID || "dev";
-mkdirSync("dist", { recursive: true });
-
-await build({
-  entryPoints: ["src/main.ts"],
-  bundle: true,
-  outfile: "dist/main.js",
-  minify: true,
-  target: ["es2020"], // fnOS 桌面/Android WebView 均为 Chromium
-  jsx: "automatic",
-  jsxImportSource: "preact", // esbuild 原生 JSX,零插件零 babel
-  charset: "utf8",
-  logLevel: "warning",
-});
-
-await build({
-  entryPoints: ["src/style.css"],
-  outfile: "dist/main.css",
-  minify: true,
-  logLevel: "silent",
-});
-
-const tpl = readFileSync("src/index.html", "utf8");
-const js = readFileSync("dist/main.js", "utf8");
-const css = readFileSync("dist/main.css", "utf8");
-
-// minified 代码可能含 "</script>"(字符串拼接),内联前必须转义;
-// 用函数形式替换,避免 $&/$` 等替换模式语义
-const safeJs = js
-  .replace(/<\/script>/g, () => "<\\/script>")
-  // 内联脚本双转义态:<!-- 会吞掉其后内容直到 -->,顺带处理变体
-  .replace(/<!--/gi, () => "\\x3C!--")
-  .replace(/-->/g, () => "--\\x3E");
-const safeCss = css.replace(/<\/style>/g, () => "<\\/style>");
-const html = tpl
-  .replace("/*__INLINE_CSS__*/", () => safeCss)
-  .replace("//__INLINE_JS__", () => safeJs)
-  .replace("__BUILD_ID__", () => buildId);
-
-writeFileSync("dist/index.html", html);
-const callback = readFileSync("src/auth-callback.html", "utf8");
-writeFileSync("dist/auth-callback.html", callback);
-console.log(`dist/index.html: ${(html.length / 1024).toFixed(1)} KB (build ${buildId})`);
+const buildId = process.env.BUILD_ID || 'dev';
+const { html, js, css } = await buildPanel(buildId);
+await mkdir('dist', { recursive: true });
+await Promise.all([
+  writeFile('dist/index.html', html), writeFile('dist/main.js', js), writeFile('dist/main.css', css),
+  copyFile(new URL('./src/auth-callback.html', import.meta.url), 'dist/auth-callback.html'),
+]);
+console.log(`dist/index.html: ${(Buffer.byteLength(html) / 1024).toFixed(1)} KiB (build ${buildId})`);

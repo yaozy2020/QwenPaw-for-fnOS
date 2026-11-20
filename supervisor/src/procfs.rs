@@ -57,12 +57,24 @@ fn parse_process_identity(pid: i32, stat: &str) -> Result<(ProcessIdentity, i32)
     ))
 }
 
-pub fn process_identity(pid: i32) -> Result<Option<ProcessIdentity>, String> {
-    match fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => parse_process_identity(pid, &stat).map(|(identity, _)| Some(identity)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("read /proc/{pid}/stat: {error}")),
+fn process_entry<T>(read: io::Result<T>) -> io::Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        // procfs may return ESRCH on read if the task vanished after open.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => Ok(None),
+        Err(error) => Err(error),
     }
+}
+
+fn read_stat(pid: i32) -> Result<Option<(ProcessIdentity, i32)>, String> {
+    process_entry(fs::read_to_string(format!("/proc/{pid}/stat")))
+        .map_err(|error| format!("read /proc/{pid}/stat: {error}"))?
+        .map(|stat| parse_process_identity(pid, &stat))
+        .transpose()
+}
+
+pub fn process_identity(pid: i32) -> Result<Option<ProcessIdentity>, String> {
+    Ok(read_stat(pid)?.map(|(identity, _)| identity))
 }
 
 pub fn identity_status(identity: ProcessIdentity) -> IdentityStatus {
@@ -83,10 +95,8 @@ pub(crate) fn scan_processes() -> Result<Vec<(ProcessIdentity, i32)>, String> {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
             continue;
         };
-        match fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => processes.push(parse_process_identity(pid, &stat)?),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("read /proc/{pid}/stat while scanning: {error}")),
+        if let Some(entry) = read_stat(pid)? {
+            processes.push(entry);
         }
     }
     Ok(processes)
@@ -167,18 +177,16 @@ pub fn descendants_of_checked(root: ProcessIdentity) -> Result<Vec<ProcessIdenti
     }
 }
 
-pub fn cpu_ticks(pid: i32) -> (u64, u64) {
-    let Some(s) = fs::read_to_string(format!("/proc/{pid}/stat")).ok() else {
-        return (0, 0);
-    };
-    let Some(i) = s.rfind(')') else { return (0, 0) };
-    let fields: Vec<&str> = s[i + 2..].split_whitespace().collect();
-    if fields.len() < 14 {
-        return (0, 0);
+pub fn cpu_ticks(id: ProcessIdentity) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{}/stat", id.pid)).ok()?;
+    let mut fields = stat.get(stat.rfind(')')? + 2..)?.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X") {
+        return None;
     }
-    let utime = fields[11].parse().unwrap_or(0);
-    let stime = fields[12].parse().unwrap_or(0);
-    (utime, stime)
+    let user: u64 = fields.nth(10)?.parse().ok()?;
+    let sys: u64 = fields.next()?.parse().ok()?;
+    let start: u64 = fields.nth(6)?.parse().ok()?;
+    (start == id.starttime).then(|| user.saturating_add(sys))
 }
 
 /// 页大小(KB),进程内只探测一次。
@@ -189,22 +197,9 @@ fn page_size_kb() -> i64 {
     use std::sync::OnceLock;
     static PAGE_KB: OnceLock<i64> = OnceLock::new();
     *PAGE_KB.get_or_init(|| {
-        // getconf 是最直接的权威来源;失败时退回 sysconf(SC_PAGESIZE)
-        if let Ok(out) = std::process::Command::new("getconf")
-            .arg("PAGESIZE")
-            .output()
-        {
-            if out.status.success() {
-                if let Ok(v) = String::from_utf8_lossy(&out.stdout).trim().parse::<i64>() {
-                    if v > 0 {
-                        return (v / 1024).max(1);
-                    }
-                }
-            }
-        }
         let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if v > 0 {
-            (v as i64 / 1024).max(1)
+            (v / 1024).max(1)
         } else {
             4
         }
@@ -344,6 +339,28 @@ fn is_kernel_argv(argv: &[&str], port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_opened_before_child_exit_is_a_vanished_process() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("cat").stdin(Stdio::piped()).spawn().unwrap();
+        let pid = child.id() as i32;
+        let stat = fs::File::open(format!("/proc/{pid}/stat")).unwrap();
+        assert!(child.wait().unwrap().success()); // wait closes the child's stdin first
+        let read = io::read_to_string(stat);
+        assert_eq!(read.as_ref().unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        assert_eq!(process_entry(read).unwrap(), None);
+        assert_eq!(process_identity(pid).unwrap(), None);
+    }
+
+    #[test]
+    fn process_entry_does_not_hide_permission_or_io_errors() {
+        for errno in [libc::EACCES, libc::EPERM, libc::EIO] {
+            let read = Err::<String, _>(io::Error::from_raw_os_error(errno));
+            assert_eq!(process_entry(read).unwrap_err().raw_os_error(), Some(errno));
+        }
+    }
 
     #[test]
     fn process_identity_and_group_scans_preserve_starttime_session_and_group() {

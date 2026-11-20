@@ -38,8 +38,8 @@ MAX_BODY = 64 * 1024
 MAX_RESPONSE = 8 * 1024 * 1024
 INDEX_BODY = (
     "<html><body>"
-    "<a href='qwenpaw-2.0.0.tar.gz'>stable</a>"
-    "<a href='qwenpaw-2.1.0b1-py3-none-any.whl'>beta</a>"
+    "<a href='qwenpaw-2.0.0.tar.gz' data-upload-time='2026-07-01T00:00:00Z'>stable</a>"
+    "<a href='qwenpaw-2.1.0b1-py3-none-any.whl' data-upload-time='2026-08-01T00:00:00Z'>beta</a>"
     "<a href='unrelated-99.0.0.tar.gz'>unrelated</a>"
     "</body></html>"
 ).encode()
@@ -363,6 +363,11 @@ class GatewayFixture:
                 return False
             self.process_identity = identity
             try:
+                # bind() creates the path just before the supervisor applies its final mode.
+                info = self.gateway.lstat()
+                require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.geteuid(), "unexpected readiness socket")
+                if stat.S_IMODE(info.st_mode) != 0o600:
+                    return False
                 connection = UnixHTTPConnection(self)
                 try:
                     connection.request("GET", API + "status", headers=ADMIN)
@@ -650,14 +655,15 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                 data = {}
         except (ValueError, UnicodeDecodeError):
             data = {}
-        if self.command == "POST" and parsed.path == API + "kernel/install":
+        if self.command == "POST" and parsed.path in (API + "start", API + "kernel/install"):
             fixture.release_port(fixture.app_port)
         if self.command == "POST" and parsed.path == API + "port" and isinstance(data.get("port"), int):
             fixture.release_port(data["port"])
         record = {"method": self.command, "path": parsed.path, "origin": headers.get("Origin"),
                   "upstreamHost": headers["Host"], "fetchSite": headers.get("Sec-Fetch-Site"),
                   "contentType": headers.get("Content-Type"), "csrfHeader": bool(headers.get("X-CSRF-Token")),
-                  "csrfQuery": "_csrf=" in parsed.query, "body": data, "receiptLost": False}
+                  "csrfQuery": "_csrf=" in parsed.query,
+                  "body": {} if parsed.path in (API + "web-proxy/password", API + "web-proxy/use-native-login", API + "entry-login/migrate", API + "kernel/admin-password") else data, "receiptLost": False}
         require(TOKEN.encode() not in body, "private token appeared in a browser request")
         connection = UnixHTTPConnection(fixture)
         try:
@@ -687,7 +693,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                                 "private supervisor token was disclosed in SSE body")
                         self.wfile.write(chunk)
                         self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError, socket.timeout):
                     pass
                 finally:
                     self.close_connection = True

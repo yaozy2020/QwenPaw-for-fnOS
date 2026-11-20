@@ -93,10 +93,10 @@ jobs:
       - name: Build release binaries for runtime regressions
         run: cargo build --locked --release --manifest-path supervisor/Cargo.toml
 
-      - name: Lint (bash -n + shellcheck + management boundary + esbuild 编译)
+      - name: Lint (bash -n + shellcheck + management boundary + Vite 编译)
         run: STRICT_CI=1 bash scripts/lint.sh
 
-      - name: Console build + Gateway artifact sanity (web/src 经 esbuild 出单文件)
+      - name: Console build + Gateway artifact sanity (web/src 经 Vite 出单文件)
         run: |
           (cd web && BUILD_ID=ci node build.mjs)
           test -f web/dist/index.html

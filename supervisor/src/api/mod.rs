@@ -45,6 +45,7 @@ use status::{events, status};
 #[derive(Clone)]
 pub struct AppState {
     pub core: ManagementCore,
+    pub proxy_auth: Arc<crate::proxy_auth::ProxyAuth>,
     pub token: String,
     pub auth_cache: Arc<std::sync::Mutex<AuthCache>>,
     pub web_proxy: Option<Arc<crate::gateway::WebProxyManager>>,
@@ -80,12 +81,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/kernel/versions", get(kernel_versions))
         .route("/kernel/release-notes", get(kernel_release_notes))
         .route("/kernel/pin", post(kernel_pin))
-        .route("/kernel/reset-auth", post(kernel_reset_auth))
+        .route("/kernel/admin-password", post(kernel_reset_auth))
         .route("/port", post(port))
         .route(
             "/web-proxy/port",
             get(settings::web_proxy_port_get).post(settings::web_proxy_port_set),
         )
+        .route(
+            "/web-proxy/use-native-login",
+            post(settings::use_native_login),
+        )
+        .route("/entry-login/migrate", post(settings::entry_migrate))
         .route("/settings", post(settings))
         .route("/authorized-dirs/check", post(authorized_dirs_check))
         .route(
@@ -420,6 +426,10 @@ pub(crate) mod test_support {
                     operations: Arc::new(tokio::sync::Mutex::new(())),
                     supervisor_port,
                 },
+                proxy_auth: crate::proxy_auth::ProxyAuth::load(
+                    &var,
+                    crate::proxy_auth::DEFAULT_INSTANCE,
+                ),
                 token: "test-token".into(),
                 auth_cache: Arc::new(std::sync::Mutex::new(AuthCache::default())),
                 web_proxy: None,

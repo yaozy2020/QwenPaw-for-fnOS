@@ -1,5 +1,6 @@
-import type { ApiClient } from "./api";
-import { renderInstallSteps, renderLogLines, type InstallStep, type InstallStepsState } from "./components";
+import { nextTick, shallowReactive } from "vue";
+import type { ApiClient, LogEntry } from "./api";
+import type { InstallStep, InstallStepsState } from "./views/InstallSteps.vue";
 import {
   createInstallTask,
   acceptInstallTask,
@@ -30,6 +31,8 @@ export function createInstallProgressPanel({
   selectedVersion,
   pendingInstallAction,
 }: InstallProgressPanelOptions) {
+  const view = shallowReactive({ open: false, owned: false, spinner: true, icon: false, success: false, minimize: true, close: false,
+    title: '', subtitle: '', lines: [] as LogEntry[], empty: '', steps: { current: null, outcome: null } as InstallStepsState });
   const UPGRADE_POLL_MAX_MS = 10 * 60 * 1000;
   const UPGRADE_POLL_FAIL_MAX = 6;
   const INSTALL_STEP_NAMES: InstallStep[] = ["downloading", "installing", "starting"];
@@ -45,12 +48,15 @@ export function createInstallProgressPanel({
   let upStatusPollInFlight = false;
   let upLogsPollInFlight = false;
   let installTask = restoreInstallTask(installTaskStorage()) || createInstallTask({ attach: false });
-  let installSteps: InstallStepsState = { current: null, outcome: null };
   let upgradeRunId = 0;
   let upgradeTerminal = false;
   let upgradePreviousFocus: HTMLElement | null = null;
   let upgradeModalOpenedAt = 0;
   let upgradeLogsRendered = false;
+  function paintTaskLog(lines: LogEntry[], fallback: string) {
+    view.lines = lines;
+    view.empty = fallback;
+  }
 
   function stopUpgradePolling(): void {
     if (upgradePollTimer !== null) {
@@ -59,35 +65,19 @@ export function createInstallProgressPanel({
     }
   }
 
-  function updateUpgradeElement(id: string, update: (element: HTMLElement) => void): void {
-    const element = document.getElementById(id);
-    if (element) update(element);
-  }
-
   function showUpgradePollingFailure(timedOut: boolean): void {
-    updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-    updateUpgradeElement("upTitle", element => {
-      element.innerText = timedOut ? "任务仍未结束" : "与控制台连接中断";
-    });
-    updateUpgradeElement("upSubTitle", element => {
-      element.innerText = timedOut
-        ? "安装任务仍在后台执行，可关闭本窗口；稍后在控制台查看进度或日志"
-        : "无法连接监督者。任务可能仍在后台执行，可关闭本窗口稍后重试";
-    });
-    updateUpgradeElement("upDoneIcon", element => {
-      element.style.display = "inline-block";
-      element.style.color = "var(--danger-text)";
-    });
-    updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
+    view.spinner = false;
+    view.title = timedOut ? '任务仍未结束' : '与控制台连接中断';
+    view.subtitle = timedOut ? '安装任务仍在后台执行，可关闭本窗口；稍后在控制台查看进度或日志' : '无法连接监督者。任务可能仍在后台执行，可关闭本窗口稍后重试';
+    view.icon = view.close = true;
+    view.success = false;
   }
-
   function installStepOf(phase: unknown): InstallStep | null {
     return INSTALL_STEP_NAMES.find(step => step === phase) ?? null;
   }
 
   function setInstallSteps(next: InstallStepsState): void {
-    installSteps = next;
-    updateUpgradeElement("upSteps", element => renderInstallSteps(installSteps, element));
+    view.steps = next;
   }
 
   function hasOwnedInstallTask(): boolean {
@@ -95,20 +85,10 @@ export function createInstallProgressPanel({
   }
 
   function updateTaskCenterButton(): void {
-    const button = document.getElementById("taskCenterButton") as HTMLButtonElement | null;
-    if (!button) return;
-    const available = hasOwnedInstallTask();
-    button.hidden = !available;
-    button.style.display = available ? "" : "none";
-    button.setAttribute("aria-label", "查看安装任务详情");
-    button.setAttribute("aria-controls", "upgradeModal");
-    button.setAttribute("aria-haspopup", "dialog");
-    button.setAttribute("aria-expanded", String(Boolean(document.getElementById("upgradeModal")?.classList.contains("active"))));
+    view.owned = hasOwnedInstallTask();
   }
-
   function dismissUpgradeDialog(): void {
-    const minimize = document.getElementById("btnUpMinimize");
-    if (minimize && minimize.style.display !== "none") minimizeUpgradeModal();
+    if (view.minimize) minimizeUpgradeModal();
     else closeUpgradeModal();
   }
 
@@ -145,12 +125,13 @@ export function createInstallProgressPanel({
   function showUpgradeDialog(): void {
     const modal = document.getElementById("upgradeModal");
     const box = modal?.querySelector<HTMLElement>(".modal-box");
-    if (!modal || !box || modal.classList.contains("active")) return;
+    if (!modal || !box || view.open) return;
     upgradePreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     upgradeModalOpenedAt = Date.now();
     box.setAttribute("tabindex", "-1");
     box.setAttribute("aria-describedby", "upSubTitle");
-    modal.classList.add("active");
+    view.open = true;
+
     updateTaskCenterButton();
     modal.addEventListener("click", upgradeDialogBackdrop);
     document.addEventListener("keydown", upgradeDialogKeydown, true);
@@ -160,7 +141,7 @@ export function createInstallProgressPanel({
       const close = document.getElementById("btnUpClose");
       (minimize && minimize.style.display !== "none" ? minimize : close || box).focus();
     };
-    focusDialog();
+    void nextTick(focusDialog);
     requestAnimationFrame(focusDialog);
     modal.addEventListener("transitionend", focusDialog, { once: true });
     setTimeout(focusDialog, 300);
@@ -168,28 +149,30 @@ export function createInstallProgressPanel({
 
   function hideUpgradeDialog(): void {
     const modal = document.getElementById("upgradeModal");
-    if (!modal?.classList.contains("active")) return;
-    modal.classList.remove("active");
+    if (!modal || !view.open) return;
+    view.open = false;
+
     updateTaskCenterButton();
     modal.removeEventListener("click", upgradeDialogBackdrop);
     document.removeEventListener("keydown", upgradeDialogKeydown, true);
-    upgradePreviousFocus?.focus();
+    const trigger = upgradePreviousFocus;
+    void nextTick(() => trigger?.focus());
     upgradePreviousFocus = null;
   }
 
   function showTaskDetails(): void {
     if (!hasOwnedInstallTask()) return;
     const modal = document.getElementById("upgradeModal");
-    if (!modal || modal.classList.contains("active")) return;
+    if (!modal || view.open) return;
     if (!upgradeTerminal && upgradePollTimer === null) {
       pollFailureStreak = 0;
       upgradeStartedAt = Date.now();
-      updateUpgradeElement("upTitle", element => { element.innerText = "正在查看已归属的安装任务..."; });
-      updateUpgradeElement("upSubTitle", element => { element.innerText = "正在重新读取任务状态"; });
-      updateUpgradeElement("upSpinner", element => { element.style.display = "inline-block"; });
-      updateUpgradeElement("upDoneIcon", element => { element.style.display = "none"; });
-      updateUpgradeElement("btnUpMinimize", element => { element.style.display = ""; });
-      updateUpgradeElement("btnUpClose", element => { element.style.display = "none"; });
+      view.title = "正在查看已归属的安装任务...";
+      view.subtitle = "正在重新读取任务状态";
+      view.spinner = true;
+      view.icon = false;
+      view.minimize = true;
+      view.close = false;
       void pollUpgradeLogs(true);
       upgradePollTimer = setInterval(pollUpgradeLogs, 800);
     } else if (upgradeTerminal) {
@@ -203,14 +186,6 @@ export function createInstallProgressPanel({
     attachSeq?: number | null,
     attachInstance?: string | null,
   ): number {
-    const modal = document.getElementById("upgradeModal");
-    const title = document.getElementById("upTitle");
-    const subtitle = document.getElementById("upSubTitle");
-    const spinner = document.getElementById("upSpinner");
-    const doneIcon = document.getElementById("upDoneIcon");
-    const closeButton = document.getElementById("btnUpClose");
-    const terminal = document.getElementById("upTerminal");
-    if (!modal || !title || !subtitle || !spinner || !doneIcon || !closeButton || !terminal) return upgradeRunId;
     ++upgradeRunId;
     upgradeTerminal = false;
     installTask = createInstallTask({ attach, attachSeq, attachInstance });
@@ -218,19 +193,18 @@ export function createInstallProgressPanel({
     else clearStoredInstallTask(installTaskStorage());
     updateTaskCenterButton();
     upgradeStartedAt = Date.now();
-    title.innerText = installTask.attach
+    view.title = installTask.attach
       ? "正在查看进行中的安装任务..."
       : `QwenPaw 正在${currentInstallAction()} v${selectedVersion()}...`;
-    subtitle.innerText = installTask.attach
+    view.subtitle = installTask.attach
       ? "NAS 后端独立执行中,与本页面是否在线无关"
       : "正在执行 pip 下载与环境重构，期间服务将自动重启";
-    spinner.style.display = "inline-block";
-    doneIcon.style.display = "none";
-    closeButton.style.display = "none";
-    updateUpgradeElement("btnUpMinimize", element => { element.style.display = ""; });
+    view.spinner = true;
+    view.icon = view.close = false;
+    view.minimize = true;
     upgradeLogsRendered = false;
     setInstallSteps({ current: null, outcome: null });
-    terminal.innerHTML = "正在获取实时安装状态...\n";
+    paintTaskLog([], "正在获取实时安装状态...");
     showUpgradeDialog();
     stopUpgradePolling();
     void pollUpgradeLogs();
@@ -303,8 +277,8 @@ export function createInstallProgressPanel({
         if (data.logs.length === 0) return;
         const terminal = document.getElementById("upTerminal");
         if (!terminal) return;
-        renderLogLines(data.logs, terminal, "正在等待 pip 安装输出...", true);
-        terminal.scrollTop = terminal.scrollHeight;
+        paintTaskLog(data.logs, "正在等待 pip 安装输出...");
+        void nextTick(() => { terminal.scrollTop = terminal.scrollHeight; });
         upgradeLogsRendered = true;
       }).catch(error => {
         console.warn("pollUpgradeLogs err:", error);
@@ -332,6 +306,7 @@ export function createInstallProgressPanel({
         persistInstallTask(installTaskStorage(), installTask);
       }
       if (observed.terminal) {
+        if (!upgradeTerminal) void fetchStatus();
         upgradeTerminal = true;
         void pollUpgradeLogs(true);
         stopUpgradePolling();
@@ -342,7 +317,7 @@ export function createInstallProgressPanel({
       }
 
       const observedStep = observed.owned && !observed.terminal ? installStepOf(data.phase) : null;
-      if (observedStep && observedStep !== installSteps.current) {
+      if (observedStep && observedStep !== view.steps.current) {
         setInstallSteps({ current: observedStep, outcome: null });
       }
 
@@ -352,7 +327,7 @@ export function createInstallProgressPanel({
           : phase === "installing" ? "正在安装内核..."
             : phase === "starting" ? "正在启动并检查服务..."
               : "安装任务正在执行...";
-        updateUpgradeElement("upTerminal", element => { element.innerText = progress; });
+        paintTaskLog([], progress);
       }
 
       if (observed.owned && !observed.terminal && Date.now() - upgradeStartedAt > UPGRADE_POLL_MAX_MS) {
@@ -364,35 +339,33 @@ export function createInstallProgressPanel({
       if (!observed.owned && !data.upgrading && Date.now() - upgradeStartedAt > 10000) {
         stopUpgradePolling();
         const noReceipt = !installTask.attach && installTask.taskSeq === null;
-        updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-        updateUpgradeElement("upTitle", element => { element.innerText = "无法确认安装任务结果"; });
-        updateUpgradeElement("upSubTitle", element => {
-          element.innerText = noReceipt
+        view.spinner = false;
+        view.title = "无法确认安装任务结果";
+        view.subtitle = noReceipt
             ? "触发请求可能已送达并完成；请关闭本窗口后在控制台查看当前版本与安装日志确认"
             : "后端任务与本次操作不匹配，请关闭本窗口后在控制台查看安装日志";
-        });
-        updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
+        view.close = true;
         const minimizeWasFocused = document.activeElement === document.getElementById("btnUpMinimize");
-        updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
-        if (minimizeWasFocused) document.getElementById("btnUpClose")?.focus();
+        view.minimize = false;
+        if (minimizeWasFocused) void nextTick(() => document.getElementById("btnUpClose")?.focus());
         return;
       }
 
       if (observed.terminal) {
         stopUpgradePolling();
-        setInstallSteps({ current: installSteps.current, outcome: observed.outcome });
+        setInstallSteps({ current: view.steps.current, outcome: observed.outcome });
 
-        updateUpgradeElement("upSpinner", element => { element.style.display = "none"; });
-        updateUpgradeElement("upDoneIcon", element => { element.style.display = "inline-block"; });
-        updateUpgradeElement("btnUpClose", element => { element.style.display = ""; });
+        view.spinner = false;
+        view.icon = true;
+        view.close = true;
         const minimizeWasFocused = document.activeElement === document.getElementById("btnUpMinimize");
-        updateUpgradeElement("btnUpMinimize", element => { element.style.display = "none"; });
-        if (minimizeWasFocused) document.getElementById("btnUpClose")?.focus();
+        view.minimize = false;
+        if (minimizeWasFocused) void nextTick(() => document.getElementById("btnUpClose")?.focus());
 
         const doneAction = pendingInstallAction() || currentInstallAction();
         const titleAction = installTask.attach ? "安装任务" : doneAction;
         if (observed.outcome === "failed") {
-          updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}遇到问题`; });
+          view.title = `${titleAction}遇到问题`;
           const detail = (typeof data.error === "string" && data.error.trim())
             || (typeof data.message === "string" && data.message.trim())
             || "";
@@ -402,28 +375,14 @@ export function createInstallProgressPanel({
               ? "环境恢复未完成：" + recoveryError
               : "环境恢复未完成，请查看日志并按提示处理")
             : "请查看日志确认环境恢复状态";
-          updateUpgradeElement("upSubTitle", element => {
-            element.innerText = detail ? `${detail}；${recoveryNote}` : recoveryNote;
-          });
-          updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--danger-text)"; });
+          view.subtitle = detail ? `${detail}；${recoveryNote}` : recoveryNote;
+          view.success = false;
         } else {
-          updateUpgradeElement("upTitle", element => { element.innerText = `${titleAction}已顺利完成！`; });
-          updateUpgradeElement("upSubTitle", element => {
-            element.innerText = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
-          });
-          updateUpgradeElement("upDoneIcon", element => { element.style.color = "var(--success)"; });
-          updateUpgradeElement("upTerminal", element => {
-            const staleProgress = [
-              "正在获取实时安装状态...",
-              "正在下载依赖包...",
-              "正在安装内核...",
-              "正在启动并检查服务...",
-              "安装任务正在执行...",
-            ].includes(element.innerText.trim());
-            if (!upgradeLogsRendered || staleProgress) {
-              element.innerText = "安装任务已完成，未获取到日志输出。";
-            }
-          });
+          view.title = `${titleAction}已顺利完成！`;
+          view.subtitle = "所选版本已就绪，QwenPaw 后台服务已恢复运行";
+          view.success = true;
+          if (!upgradeLogsRendered) paintTaskLog([], '安装任务已完成，未获取到日志输出。');
+
         }
         const upModal = document.getElementById("upgradeModal");
         if (upModal && !upModal.classList.contains("active")) {
@@ -460,7 +419,7 @@ export function createInstallProgressPanel({
   }
 
   return {
-    begin,
+    view, begin,
     accept,
     open: openUpgradeModal,
     isCurrent: (runId: number) => runId === upgradeRunId,

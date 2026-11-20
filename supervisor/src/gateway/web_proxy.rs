@@ -10,6 +10,9 @@ use tokio_stream::StreamExt;
 
 use super::GatewayState;
 
+#[derive(Clone, Copy)]
+pub(super) struct NativeVisitor;
+
 const WEB_PATH: &str = "/web";
 const WEB_PREFIX: &str = "/app/qwenpaw/web";
 
@@ -63,6 +66,21 @@ pub(crate) async fn forward_root(
     forward_impl(state, request, path, false, false).await
 }
 
+fn unavailable(html_entry: bool) -> Response {
+    if !html_entry {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::RETRY_AFTER, "5"),
+        ],
+        axum::response::Html(include_str!("web_waiting.html")),
+    )
+        .into_response()
+}
+
 async fn forward_impl(
     state: &GatewayState,
     request: Request<Body>,
@@ -76,6 +94,14 @@ async fn forward_impl(
     let rewrite_paths = rewrite_paths && !native_base_path;
     let method = request.method().clone();
     let head_request = method == Method::HEAD;
+    let html_entry = method == Method::GET
+        && matches!(path, "/" | WEB_PREFIX | "/app/qwenpaw/web/")
+        && request.headers().get_all(header::ACCEPT).iter().any(|v| {
+            v.to_str().is_ok_and(|s| {
+                s.split(',')
+                    .any(|t| t.trim().eq_ignore_ascii_case("text/html"))
+            })
+        });
     if !matches!(
         method,
         Method::GET
@@ -127,8 +153,27 @@ async fn forward_impl(
     }
 
     let port = state.app.core.kernel.port();
-    if !rewrite_paths
-        && (is_config_path(path) || (state.public_access && requires_upstream_auth(path, &method)))
+    let migrated = crate::entry_login::selected(&state.app.kernel.entry_record());
+    let guest = request.extensions().get::<NativeVisitor>().is_some();
+    let native_transport = guest && state.app.kernel.supports_native_proxy();
+    if guest && migrated && !native_transport {
+        return unavailable(html_entry);
+    }
+    let owner_transport = migrated && !guest;
+    if native_transport {
+        headers.insert("x-fnos-entry-command", HeaderValue::from_static("native"));
+    } else if owner_transport {
+        headers.remove(header::AUTHORIZATION);
+    }
+    let relative = path
+        .strip_prefix(WEB_PREFIX)
+        .filter(|p| p.starts_with('/'))
+        .unwrap_or(path);
+    if !native_transport
+        && !owner_transport
+        && !rewrite_paths
+        && (is_config_path(relative)
+            || ((guest || state.public_access) && requires_upstream_auth(relative, &method)))
     {
         if let Err(status) = verify_upstream_session(state, port, &headers, native_base_path).await
         {
@@ -151,6 +196,9 @@ async fn forward_impl(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     let (mut parts, body) = request.into_parts();
+    let mut rotated = parts
+        .extensions
+        .remove::<tokio::sync::watch::Receiver<()>>();
     parts.uri = uri;
     parts.headers = headers;
     if rewrite_head {
@@ -158,12 +206,18 @@ async fn forward_impl(
     }
     let request = Request::from_parts(parts, body);
 
-    let upstream = match state.web_client.request(request).await {
-        Ok(response) => response,
-        Err(error) if error.is_connect() => {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let upstream = if native_transport || owner_transport {
+        match crate::entry_login::send(&state.app.kernel, request).await {
+            Ok(response) => response,
+            Err(StatusCode::SERVICE_UNAVAILABLE) => return unavailable(html_entry),
+            Err(status) => return status.into_response(),
         }
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    } else {
+        match state.web_client.request(request).await {
+            Ok(response) => response,
+            Err(error) if error.is_connect() => return unavailable(html_entry),
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        }
     };
 
     let status = upstream.status();
@@ -189,8 +243,19 @@ async fn forward_impl(
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut stream = upstream_body.into_data_stream();
+                let revocation = async {
+                    match rotated.as_mut() {
+                        Some(watch) => {
+                            let _ = watch.changed().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::pin!(revocation);
                 loop {
                     tokio::select! {
+                        biased;
+                        _ = &mut revocation => break,
                         _ = sender.closed() => break,
                         chunk = stream.next() => {
                             let Some(chunk) = chunk else { break; };
@@ -274,6 +339,7 @@ fn is_config_path(path: &str) -> bool {
     let decoded_twice = percent_encoding::percent_decode_str(&decoded).decode_utf8_lossy();
     let matched = [path, decoded.as_ref(), decoded_twice.as_ref()]
         .into_iter()
+        .map(|path| path.strip_prefix(WEB_PREFIX).unwrap_or(path))
         .any(|path| path == "/api/config" || path.starts_with("/api/config/"));
     matched
 }
@@ -286,6 +352,7 @@ fn requires_upstream_auth(path: &str, method: &Method) -> bool {
     let decoded_twice = percent_encoding::percent_decode_str(&decoded).decode_utf8_lossy();
     let required = [path, decoded.as_ref(), decoded_twice.as_ref()]
         .into_iter()
+        .map(|path| path.strip_prefix(WEB_PREFIX).unwrap_or(path))
         .any(|path| {
             if !path.starts_with("/api/") {
                 return false;
@@ -363,11 +430,27 @@ async fn verify_upstream_session(
         if !response.status().is_success() {
             return Err(StatusCode::UNAUTHORIZED);
         }
-        Limited::new(response.into_body(), MAX_VERIFY_BYTES)
+        if response.status() != StatusCode::OK {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        let body = Limited::new(response.into_body(), MAX_VERIFY_BYTES)
             .collect()
             .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
-        Ok(())
+            .map_err(|_| StatusCode::BAD_GATEWAY)?
+            .to_bytes();
+        #[derive(serde::Deserialize)]
+        struct VerifiedSession {
+            valid: bool,
+            username: String,
+        }
+        let session: VerifiedSession =
+            serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_GATEWAY)?;
+        // Standard kernels also return valid:true with no username when auth is disabled.
+        if session.valid && !session.username.trim().is_empty() {
+            Ok(())
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        }
     })
     .await
     .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
@@ -798,6 +881,7 @@ fn request_headers(
                 || name.as_str() == "forwarded"
                 || name.as_str() == "x-csrf-token"
                 || name.as_str() == "x-supervisor-token"
+                || name.as_str().starts_with("x-fnos-entry-")
                 || name.as_str().starts_with("x-trim-")
                 || name.as_str().starts_with("x-forwarded-")
         })
@@ -856,6 +940,7 @@ fn response_headers(source: &HeaderMap, rewrite_paths: bool) -> HeaderMap {
             || name == "forwarded"
             || name == "x-supervisor-token"
             || name == "x-csrf-token"
+            || name.as_str().starts_with("x-fnos-entry-")
             || name.as_str().starts_with("x-trim-")
             || name.as_str().starts_with("x-forwarded-")
         {
@@ -929,10 +1014,17 @@ fn rewrite_set_cookie(value: &HeaderValue, rewrite_path: bool) -> Option<HeaderV
 }
 
 fn is_internal_cookie(name: &str) -> bool {
-    matches!(
-        name,
-        "qwenpaw_csrf" | "__Host-qwenpaw_csrf" | "supervisor-token" | "supervisor_token" | "ost"
-    )
+    name.strip_prefix("__Host-")
+        .unwrap_or(name)
+        .starts_with(crate::proxy_auth::COOKIE_PREFIX)
+        || matches!(
+            name,
+            "qwenpaw_csrf"
+                | "__Host-qwenpaw_csrf"
+                | "supervisor-token"
+                | "supervisor_token"
+                | "ost"
+        )
 }
 
 fn connection_headers(headers: &HeaderMap) -> HashSet<HeaderName> {

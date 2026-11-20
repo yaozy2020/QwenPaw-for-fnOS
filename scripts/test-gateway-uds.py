@@ -674,7 +674,7 @@ class Fixture:
 def mutation_routes(port):
     return [("/start", {}), ("/stop", {}), ("/restart", {}), ("/logs/clear", {}),
             ("/kernel/install", {"version": "2.0.0"}), ("/kernel/uninstall", {}),
-            ("/kernel/pin", {"version": "3.1.4"}), ("/kernel/reset-auth", {}),
+            ("/kernel/pin", {"version": "3.1.4"}), ("/kernel/admin-password", {}),
             ("/port", {"port": port}), ("/settings", {"port": port, "log_level": "debug"}),
             ("/mirror", {"mirror": "https://mirror.example/simple"})]
 

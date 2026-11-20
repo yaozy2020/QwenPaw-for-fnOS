@@ -230,7 +230,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0u8; 1024];
             let count = stream.read(&mut request).unwrap();
-            request_tx.send(String::from_utf8_lossy(&request[..count]).into_owned()).unwrap();
+            request_tx
+                .send(String::from_utf8_lossy(&request[..count]).into_owned())
+                .unwrap();
             let body = r#"{"version":"2.3.0"}"#;
             write!(
                 stream,
@@ -534,6 +536,7 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push(std::fs::read_to_string(active.join("installed")).unwrap());
+                    Ok(())
                 }),
             );
             let (port, server) = version_server();
@@ -636,7 +639,8 @@ mod tests {
         tx.committed_or_rolled_back = true;
         let tx_file = tx.tx_file.clone();
         let report =
-            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, None).unwrap();
+            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, &|| Ok(()))
+                .unwrap();
         assert!(!report.is_ready());
         assert_eq!(report.recovered, 0);
         assert!(!report.pending.is_empty());
@@ -673,6 +677,7 @@ mod tests {
                     "new"
                 );
                 stopped.lock().unwrap().push("stop");
+                Ok(())
             }),
             Arc::new(move || {
                 assert_eq!(
@@ -725,6 +730,7 @@ mod tests {
             Arc::new(|| Err("injected failure".into())),
             Arc::new(move || {
                 stopped.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             }),
             Arc::new(move || {
                 entered_tx.send(()).unwrap();
@@ -768,7 +774,7 @@ mod tests {
                 started_tx.send(()).unwrap();
                 Ok(1)
             }),
-            Arc::new(|| {}),
+            Arc::new(|| Ok(())),
             Arc::new(move || {
                 restored.fetch_add(1, Ordering::SeqCst);
                 Ok(2)
@@ -804,7 +810,7 @@ mod tests {
                 started.fetch_add(1, Ordering::SeqCst);
                 Ok(1)
             }),
-            Arc::new(|| {}),
+            Arc::new(|| Ok(())),
             Arc::new(|| panic!("取消不得恢复服务")),
         );
         *owner.lock().unwrap() = Some(st.clone());
@@ -814,6 +820,51 @@ mod tests {
         assert!(st.shutdown(Duration::from_secs(1)));
         *owner.lock().unwrap() = None;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_verification_failure_preserves_install_for_retry() {
+        let dir = fake_venv("stop-error-no-rollback");
+        let active = dir.join("venv");
+        let pin = dir.join("pin");
+        let mut tx = VenvTransaction::prepare_with_python(
+            &active,
+            97,
+            "2.0.0",
+            &pin,
+            &active.join("base-python"),
+        )
+        .unwrap();
+        tx.activate().unwrap();
+        let state = InstallState::with_lifecycle(
+            Arc::new(|_| {}),
+            Arc::new(|| Ok(1)),
+            Arc::new(|| Err("unconfirmed stop".into())),
+            Arc::new(|| panic!("must not restart")),
+        );
+        state.finish_install(Some(&mut tx), &active, Err("install failed".into()));
+        assert!(state.snapshot().recovery_required);
+        assert!(tx.tx_file.exists() && tx.record.backup.exists() && active.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keep_data_reinstall_rollback_preserves_pin_without_old_venv() {
+        let dir = fake_venv("retained-pin");
+        let active = dir.join("absent");
+        let pin = dir.join("pin");
+        std::fs::write(&pin, "1.0.0\n").unwrap();
+        let mut tx = VenvTransaction::prepare_with_python(
+            &active,
+            98,
+            "2.0.0",
+            &pin,
+            &dir.join("venv/base-python"),
+        )
+        .unwrap();
+        tx.rollback().unwrap();
+        assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -833,7 +884,7 @@ mod tests {
         let state = InstallState::with_lifecycle(
             Arc::new(|_| {}),
             Arc::new(|| Ok(0)),
-            Arc::new(|| {}),
+            Arc::new(|| Ok(())),
             Arc::new(move || {
                 restored.fetch_add(1, Ordering::SeqCst);
                 Ok(0)
@@ -871,7 +922,7 @@ mod tests {
                 std::fs::write(&active, "cannot remove as directory").unwrap();
                 Err("injected broken active".into())
             }),
-            Arc::new(|| {}),
+            Arc::new(|| Ok(())),
             Arc::new(|| panic!("不确定环境不得启动")),
         );
         assert!(start_fake_install(&st, &dir, 0, &dir.join("pin")));
@@ -889,7 +940,7 @@ mod tests {
         assert!(!start_fake_install(&st, &dir, 0, &dir.join("pin")));
         assert!(st.shutdown(Duration::from_secs(1)));
         let report =
-            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, Some(&|| {}))
+            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, &|| Ok(()))
                 .unwrap();
         assert!(!report.is_ready());
         assert_eq!(report.recovered, 0);
@@ -906,7 +957,8 @@ mod tests {
         std::fs::write(&tx_file, "not json").unwrap();
         std::fs::create_dir(&backup).unwrap();
         let report =
-            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, None).unwrap();
+            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, &|| Ok(()))
+                .unwrap();
         assert!(!report.is_ready());
         assert_eq!(report.recovered, 0);
         assert!(report
@@ -956,7 +1008,8 @@ mod tests {
         json.as_object_mut().unwrap().remove("resolved_version");
         std::fs::write(&tx.tx_file, serde_json::to_vec(&json).unwrap()).unwrap();
         let report =
-            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, None).unwrap();
+            recover_pending_transactions(&dir.join("venv"), &dir.join("pin"), None, &|| Ok(()))
+                .unwrap();
         assert!(report.is_ready(), "{:?}", report.pending);
         assert_eq!(report.recovered, 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1156,7 +1209,7 @@ mod tests {
                     started.fetch_add(1, Ordering::SeqCst);
                     Ok(0)
                 }),
-                Arc::new(|| {}),
+                Arc::new(|| Ok(())),
                 Arc::new(move || {
                     assert_eq!(std::fs::read_to_string(&active).unwrap(), "old");
                     restored.fetch_add(1, Ordering::SeqCst);
@@ -1701,7 +1754,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(recovered.recovered, 1);
         assert!(recovered.is_ready(), "{:?}", recovered.pending);
         assert!(!staged.exists(), "Prepared 的暂存目录必须被清理");
@@ -1746,7 +1799,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(recovered.recovered, 1);
         assert!(recovered.is_ready(), "{:?}", recovered.pending);
         assert_eq!(
@@ -1793,7 +1846,12 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let refused =
+            recover_pending_transactions(&active, &pin, None, &|| Err("still running".into()))
+                .unwrap();
+        assert!(!refused.is_ready());
+        assert!(active.join("installed").is_file() && tx_file.is_file());
+        let recovered = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(recovered.recovered, 1);
         assert!(recovered.is_ready(), "{:?}", recovered.pending);
         assert!(!active.exists(), "首次安装回滚后不得保留活动环境");
@@ -1834,7 +1892,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(recovered.recovered, 1);
         assert!(recovered.is_ready(), "{:?}", recovered.pending);
         assert_eq!(
@@ -1881,7 +1939,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(recovered.recovered, 1);
         assert!(recovered.is_ready(), "{:?}", recovered.pending);
         assert_eq!(
@@ -1910,7 +1968,7 @@ if module == 'pip':
         std::fs::create_dir_all(&orphan1).unwrap();
         std::fs::create_dir_all(&orphan2).unwrap();
 
-        let _ = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let _ = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert!(!orphan1.exists(), "孤儿 staging-1 必须被清理");
         assert!(!orphan2.exists(), "孤儿 staging-2 必须被清理");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1953,7 +2011,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        let recovered = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let recovered = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(recovered.recovered, 1);
         assert!(recovered.is_ready(), "{:?}", recovered.pending);
         assert!(active.exists(), "活动环境必须被恢复,绝不允许消失");
@@ -2002,7 +2060,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert!(active.exists(), "被事务引用的备份必须归位,而不是当孤儿删掉");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2038,7 +2096,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(
             std::fs::read_to_string(&pin).unwrap(),
             "1.0.0\n",
@@ -2177,7 +2235,7 @@ if module == 'pip':
         assert_eq!(persisted.phase, TxPhase::Committed);
         assert!(transaction.rollback().is_err());
 
-        let report = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let report = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert!(report.is_ready(), "{:?}", report.pending);
         assert_eq!(report.recovered, 1);
         assert_eq!(
@@ -2272,7 +2330,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert!(active.exists(), "活动环境必须恢复,不得与备份一起消失");
         assert_eq!(
             std::fs::read_to_string(active.join("installed")).unwrap(),
@@ -2318,7 +2376,7 @@ if module == 'pip':
         };
         write_tx_record(&tx_file, &record).unwrap();
 
-        recover_pending_transactions(&active, &pin, None, None).unwrap();
+        recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert_eq!(
             std::fs::read_to_string(active.join("installed")).unwrap(),
             "old",
@@ -2361,9 +2419,12 @@ if module == 'pip':
 
         let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
         let o = Arc::clone(&order);
-        let stop = move || o.lock().unwrap_or_else(|e| e.into_inner()).push("stop");
+        let stop = move || {
+            o.lock().unwrap_or_else(|e| e.into_inner()).push("stop");
+            Ok(())
+        };
 
-        recover_pending_transactions(&active, &pin, None, Some(&stop)).unwrap();
+        recover_pending_transactions(&active, &pin, None, &stop).unwrap();
 
         let calls = order.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(
@@ -2409,9 +2470,12 @@ if module == 'pip':
 
         let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let h = Arc::clone(&hit);
-        let stop = move || h.store(true, std::sync::atomic::Ordering::SeqCst);
+        let stop = move || {
+            h.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
 
-        recover_pending_transactions(&active, &pin, None, Some(&stop)).unwrap();
+        recover_pending_transactions(&active, &pin, None, &stop).unwrap();
         assert!(
             !hit.load(std::sync::atomic::Ordering::SeqCst),
             "Prepared 阶段旧环境未动,不得停掉正在运行的内核"
@@ -2480,7 +2544,11 @@ if module == 'pip':
         cmd.args(["-c", "yes x | head -n 40000"]);
         let out = run_with_timeout(cmd, std::time::Duration::from_secs(5), "大输出命令").unwrap();
         assert!(out.status.success());
-        assert!(out.stdout.len() > 64 * 1024, "stdout was not drained: {}", out.stdout.len());
+        assert!(
+            out.stdout.len() > 64 * 1024,
+            "stdout was not drained: {}",
+            out.stdout.len()
+        );
     }
 
     #[test]
@@ -2489,7 +2557,11 @@ if module == 'pip':
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("value");
-        std::fs::write(format!("{}.tmp.{}", target.display(), std::process::id()), "stale").unwrap();
+        std::fs::write(
+            format!("{}.tmp.{}", target.display(), std::process::id()),
+            "stale",
+        )
+        .unwrap();
         atomic_write_0600(&target.to_string_lossy(), "fresh").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "fresh");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2656,7 +2728,7 @@ if module == 'pip':
         std::fs::write(&trash_pin, "old-pin").unwrap();
         std::fs::write(&tmp_pin, "tmp-pin").unwrap();
 
-        let _ = recover_pending_transactions(&active, &pin, None, None).unwrap();
+        let _ = recover_pending_transactions(&active, &pin, None, &|| Ok(())).unwrap();
         assert!(!trash_venv.exists(), "卸载残留 .venv.uninstall 必须清理");
         assert!(!orphan_rollback.exists(), "孤儿 .venv.rollback 必须清理");
         assert!(!trash_pin.exists(), "版本钉卸载残留必须清理");

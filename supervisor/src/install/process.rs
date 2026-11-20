@@ -240,6 +240,33 @@ fn process_is_alive(observed: crate::procfs::ProcessIdentity) -> std::io::Result
     }
 }
 
+fn confirm_registration_executable(
+    observed: crate::procfs::ProcessIdentity,
+    expected: ExecutableIdentity,
+) -> std::io::Result<()> {
+    match executable_identity(observed.pid as u32) {
+        Ok(actual) if actual == expected => Ok(()),
+        Ok(_) => Err(identity_error(
+            "process executable changed during identity registration",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Linux can drop /proc/PID/exe just before publishing the zombie state.
+            for _ in 0..5 {
+                if !process_is_alive(observed)? {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if process_is_alive(observed)? {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn capture_process_identity(pid: u32, pgid: i32) -> std::io::Result<ProcessIdentity> {
     if pgid <= 1 {
         return Err(identity_error("invalid process group identity"));
@@ -270,14 +297,8 @@ fn capture_process_identity(pid: u32, pgid: i32) -> std::io::Result<ProcessIdent
         ));
     }
     let second_alive = process_is_alive(second)?;
-    if first_alive
-        && second_alive
-        && executable.is_some()
-        && executable_identity(pid).ok() != executable
-    {
-        return Err(identity_error(
-            "process executable changed during identity registration",
-        ));
+    if let Some(expected) = executable.filter(|_| second_alive) {
+        confirm_registration_executable(second, expected)?;
     }
     Ok(ProcessIdentity {
         pid,
@@ -627,8 +648,7 @@ pub(crate) fn signal_process_group(identity: ProcessIdentity, signal: i32) -> st
     if !matches!(signal, libc::SIGTERM | libc::SIGKILL) {
         return Err(identity_error("unsupported process group signal"));
     }
-    if !verify_process_identity(identity)?
-        && process_group_empty(identity.pgid, identity.session)?
+    if !verify_process_identity(identity)? && process_group_empty(identity.pgid, identity.session)?
     {
         return Ok(());
     }
@@ -777,6 +797,25 @@ mod identity_registration_tests {
     }
 
     #[test]
+    fn second_executable_read_distinguishes_a_changed_image_from_an_exited_child() {
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let observed = current_process_identity(child.id()).unwrap().unwrap();
+        let expected = executable_identity(child.id()).unwrap();
+        let different = ExecutableIdentity {
+            ino: expected.ino ^ 1,
+            ..expected
+        };
+        assert!(confirm_registration_executable(observed, different).is_err());
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        confirm_registration_executable(observed, expected).unwrap();
+    }
+
+    #[test]
     fn cleans_a_registered_group_after_its_leader_has_exited() {
         let mut leader = Command::new("/bin/sh")
             .args(["-c", "sleep 30 & printf started >/dev/null; read _"])
@@ -793,7 +832,10 @@ mod identity_registration_tests {
             .len()
             < 2
         {
-            assert!(std::time::Instant::now() < deadline, "descendant did not start");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "descendant did not start"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         drop(leader.stdin.take());
@@ -806,7 +848,10 @@ mod identity_registration_tests {
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
         leader.wait().unwrap();
-        assert!(result.is_ok(), "leader exit left the registered group unrecoverable: {result:?}");
+        assert!(
+            result.is_ok(),
+            "leader exit left the registered group unrecoverable: {result:?}"
+        );
         assert!(process_group_empty(pgid, identity.session).unwrap());
     }
 }

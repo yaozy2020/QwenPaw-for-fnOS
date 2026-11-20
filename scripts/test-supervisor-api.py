@@ -293,7 +293,7 @@ def api_routes():
         ("GET", "/kernel/install-log", None),
         ("GET", "/kernel/versions", None),
         ("POST", "/kernel/pin", {"version": "3.1.4"}),
-        ("POST", "/kernel/reset-auth", None),
+        ("POST", "/kernel/admin-password", None),
         ("POST", "/port", {"port": free_port()}),
         ("POST", "/settings", {"port": free_port(), "log_level": "debug"}),
     ]

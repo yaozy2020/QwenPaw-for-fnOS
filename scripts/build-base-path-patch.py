@@ -17,14 +17,19 @@ BACKEND_FILES = (
     "app/routers/agent_scoped.py",
     "app/routers/providers.py",
     "app/routers/voice.py",
+    "browser/control_link/chrome/ws_handler.py",
+    "cli/http.py",
 )
+EXTRA_CLIENTS = ("agents/tools/agent_management.py", "utils/startup_display.py")
+POST1_FILES = ("app/fnos_entry.py", "cli/auto.py", "cli/cron_cmd.py", "cli/doctor_checks.py",
+               "cli/plugin_commands.py", "cli/process_utils.py", *EXTRA_CLIENTS)
 SOURCE_COMMITS = {
     "2.3.0": "0a21644e90d8ba37e20035b3bfb63880872cc2a2",
     "2.3.0.post1": "ee58cb1a64f2b21e825c525f73dc44bc7941edea",
 }
 SOURCE_PATCH_SHA256 = {
     "2.3.0": "c65666afb8f7c90e22d457b90f3d9a7e4be070e1b6e6c77d3c4b1710e46b3b20",
-    "2.3.0.post1": "cd86c589785e78bb985c39e9edec2e5151785272cb61e92e3ba847a3302fc094",
+    "2.3.0.post1": "3cb051db72b16e106d9c1b8e2d420e451d892ad9475c73323abea01f24a082f4",
 }
 PREVIOUS_SHA256 = {
     "app/_app.py": ["38541ce134eb38f7ec64a82125365400cc2f3ca69ea5aef86b6f1ba42500877c"],
@@ -40,10 +45,11 @@ def safe_relative(value, console_only=False):
     if not isinstance(value, str):
         raise ValueError("patch path must be a string")
     parts = value.split("/")
+    allowed_roots = ("console",) if console_only else ("app", "browser", "cli", "console")
     if (
         len(value) > 4096
         or len(parts) < 2
-        or parts[0] not in (("console",) if console_only else ("app", "console"))
+        or (parts[0] not in allowed_roots and (console_only or value not in EXTRA_CLIENTS))
         or any(part in ("", ".", "..") for part in parts)
         or any(char in value for char in ("\\", ":"))
         or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
@@ -157,7 +163,7 @@ def main():
             for name in archive.namelist()
             if not name.endswith("/")
         }
-        for relative in BACKEND_FILES:
+        for relative in (*BACKEND_FILES, *(POST1_FILES if args.version == "2.3.0.post1" else ())):
             patched_path = source / "src/qwenpaw" / relative
             patched = patched_path.read_bytes()
             original_name = f"qwenpaw/{relative}"

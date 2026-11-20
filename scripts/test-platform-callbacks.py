@@ -171,6 +171,9 @@ class Fixture:
         for path in (self.home, self.var, self.etc, self.user_data, self.user_secret,
                      self.app / "bin", self.app / "ui"):
             path.mkdir(parents=True, exist_ok=True)
+        # Match the package-owned var on an installed fnOS system. Unsafe legacy
+        # permissions are exercised explicitly before invoking the callback.
+        self.var.chmod(0o750)
         shutil.copy2(SUPERVISOR_SOURCE, self.binary)
         shutil.copy2(RUNTIME_SOURCE, self.runtime_source)
         os.chmod(self.binary, 0o755)
@@ -466,7 +469,7 @@ class Fixture:
                     f"test runtime health returned an unexpected version: {payload}")
             return info
 
-        wait_for(current_runtime, 15, "healthy test runtime process identity")
+        return wait_for(current_runtime, 15, "healthy test runtime process identity")
 
     def control_request(self, operation):
         path = self.var / "supervisor-control.sock"
@@ -677,6 +680,9 @@ def case_legacy_var_helper_is_never_executed(parent, hashes, action):
 
 def case_empty_shell(parent, hashes):
     with Fixture(parent, "empty-shell", hashes) as fixture:
+        (fixture.var / 'service_port').unlink()
+        (fixture.var / 'qwenpaw-log-level').unlink()
+        fixture.var.chmod(0o777)
         fixture.env.pop("QWENPAW_GATEWAY_SOCKET", None)
         code, output = fixture.callback("install")
         require(code == 0, f"install callback failed without a pin (rc={code}): {output}")
@@ -1381,7 +1387,7 @@ def upgrade_data_snapshot(fixture):
         "share": file_set_snapshot(fixture.share),
         "etc": file_set_snapshot(fixture.etc),
         "home": file_set_snapshot(fixture.home, {"venv"}),
-        "var": file_set_snapshot(fixture.var, UPGRADE_VAR_RUNTIME, include_root=False),
+        "var": file_set_snapshot(fixture.var, UPGRADE_VAR_RUNTIME),
         "authorized": file_set_snapshot(fixture.root / "authorized-local"),
         "outside-sentinel": file_set_snapshot(fixture.sentinel),
     }
@@ -1554,8 +1560,36 @@ def require_upgrade_data_preserved(fixture, before):
         require(not list(fixture.home.glob(pattern)), f"upgrade left unfinished runtime artifact: {pattern}")
 
 
+def case_unsafe_existing_var(parent, hashes, action):
+    with Fixture(parent, 'unsafe-' + action, hashes) as fixture:
+        fixture.stage_installed_helper()
+        fixture.create_runtime('2.2.2')
+        fixture.start_manager(expect_kernel=True)
+        manager, kernel = fixture.manager_identity(), fixture.wait_kernel()
+        user_tree = fixture.var / 'local files'
+        user_tree.mkdir()
+        (user_tree / 'notes').write_bytes(b'keep me')
+        fixture.var.chmod(0o777)
+        before = file_set_snapshot(user_tree)
+        names = set(fixture.var.iterdir())
+        log = fixture.var / 'qwenpaw-config.log'
+        log_before = file_set_snapshot(log) if log.exists() else None
+        code, output = fixture.callback(action)
+        require(code != 0 and 'var' in output and 'ACL' in output,
+                f'unsafe var was not explicitly refused: rc={code} {output[-600:]}')
+        require('ACL' in (fixture.root / 'platform.log').read_text(), 'missing wizard diagnostic')
+        require(identity_matches(fixture.manager_identity(), manager), 'manager restarted')
+        require(identity_matches(fixture.wait_kernel(), kernel), 'kernel restarted')
+        require(stat.S_IMODE(fixture.var.stat().st_mode) == 0o777, 'var mode changed')
+        require(set(fixture.var.iterdir()) == names, 'callback changed var entries')
+        require((file_set_snapshot(log) if log.exists() else None) == log_before, 'config log changed')
+        require_same_file_set(before, file_set_snapshot(user_tree), 'callback changed user data')
+
+
 def case_legacy_upgrade_keep(parent, hashes, sample):
     with legacy_upgrade_fixture(parent, "legacy-upgrade-keep-" + sample[0], hashes) as fixture:
+        if sample == LEGACY_UPGRADE_SAMPLES[0]:
+            fixture.var.chmod(0o700)
         seed_legacy_runtime(fixture, sample)
         seed_legacy_user_data(fixture, sample[3])
         before = upgrade_data_snapshot(fixture)
@@ -1756,6 +1790,9 @@ def main():
         manifest.write_text(f"{hashes['supervisor']}  {SUPERVISOR_SOURCE}\n"
                             f"{hashes['runtime']}  {RUNTIME_SOURCE}\n")
         failures = []
+        for action in ('upgrade', 'install'):
+            run_case(f'{action} refuses unsafe existing var before stopping or writing',
+                     lambda action=action: case_unsafe_existing_var(parent, hashes, action), failures)
         for sample in LEGACY_UPGRADE_SAMPLES:
             run_case(f"legacy-upgrade {sample[0]} healthy keep preserves all user data and modes",
                      lambda sample=sample: case_legacy_upgrade_keep(parent, hashes, sample), failures)

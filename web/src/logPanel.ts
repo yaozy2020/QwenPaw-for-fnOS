@@ -1,4 +1,4 @@
-import { renderLogLines } from "./components";
+import { nextTick, shallowReactive } from "vue";
 import { createPollingLifecycle } from "./pollingLifecycle";
 import type { ApiClient, LogEntry } from "./api";
 
@@ -11,6 +11,7 @@ interface LogPanelOptions {
   showToast(message: string): void;
   confirm(options: { title: string; message: string; type: "warn" | "primary" | "danger"; confirmText: string }): Promise<boolean>;
   errorMessage(error: unknown): string;
+  visible(): boolean;
 }
 
 function sameLogEntry(left: LogEntry, right: LogEntry): boolean {
@@ -34,20 +35,16 @@ function logText(entry: LogEntry): string {
   return typeof entry === "string" ? entry : entry.message || JSON.stringify(entry);
 }
 
-export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPanelOptions) {
+export function createLogPanel({ api, showToast, confirm, errorMessage, visible }: LogPanelOptions) {
   let logLines: LogEntry[] = [];
   let renderedLines: LogEntry[] | null = null;
   let logClearGeneration = 0;
   let liveLogFetchSeq = 0;
   let followLatest = true;
-  let exportBusy = false;
+  const view = shallowReactive({ lines: [] as LogEntry[], exportBusy: false, error: '' });
 
-  function renderOverviewPreview(): void {
-    const preview = document.getElementById("overviewLogPreview");
-    if (!preview) return;
-    const text = logLines.slice(-2).map(logText).join("\n") || "暂无日志";
-    if (preview.innerText !== text) preview.innerText = text;
-  }
+  let inLogs: boolean | undefined;
+  let autoRefresh = true;
 
   function render(): void {
     const terminal = document.getElementById("logTerminal");
@@ -56,27 +53,27 @@ export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPan
       && renderedLines.every((entry, index) => sameLogEntry(entry, logLines[index]))) return;
     followLatest = terminal.scrollHeight - terminal.clientHeight - terminal.scrollTop <= 24;
     const shouldScroll = followLatest;
-    renderLogLines(logLines, terminal, "（当前无日志输出）");
+    view.lines = logLines;
     renderedLines = logLines;
-    renderOverviewPreview();
     const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
-    if (autoScroll?.checked && shouldScroll) terminal.scrollTop = terminal.scrollHeight;
+    if (autoScroll?.checked && shouldScroll) void nextTick(() => { if (followLatest) terminal.scrollTop = terminal.scrollHeight; });
   }
 
   async function refresh(): Promise<void> {
-    if (document.hidden) return;
+    if (document.hidden || !visible()) return;
     const generation = logClearGeneration;
     const mySeq = ++liveLogFetchSeq;
     try {
       const result = await api.logs(logLines.length ? LOG_PAGE_SIZE : LOG_WINDOW_MAX);
-      if (!result.ok || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
+      if (document.hidden || !visible() || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
       const data = result.data;
-      if (data.success && Array.isArray(data.logs)) {
+      if (result.ok && data.success && Array.isArray(data.logs)) {
+        view.error = '';
         logLines = mergeLogWindow(logLines, data.logs);
         render();
-      }
+      } else view.error = "读取日志失败，可重试。";
     } catch (error) {
-      console.error("fetchLogs err:", error);
+      if (mySeq === liveLogFetchSeq && generation === logClearGeneration && visible()) view.error = "读取日志失败，可重试。";
     }
   }
 
@@ -103,13 +100,8 @@ export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPan
   }
 
   async function exportLogs(): Promise<void> {
-    if (exportBusy) return;
-    exportBusy = true;
-    const button = document.getElementById("exportLogsBtn") as HTMLButtonElement | null;
-    if (button) {
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-    }
+    if (view.exportBusy) return;
+    view.exportBusy = true;
     try {
       const result = await api.logs(LOG_WINDOW_MAX);
       if (!result.ok || !result.data.success || !Array.isArray(result.data.logs)) {
@@ -129,47 +121,55 @@ export function createLogPanel({ api, showToast, confirm, errorMessage }: LogPan
     } catch (error) {
       showToast(`导出日志失败: ${errorMessage(error)}`);
     } finally {
-      exportBusy = false;
-      if (button) {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-      }
+      view.exportBusy = false;
     }
   }
 
   const polling = createPollingLifecycle({ refresh, intervalMs: LOG_REFRESH_MS });
 
+  function viewChanged(): void {
+    const next = visible();
+    if (next === inLogs) return;
+    inLogs = next;
+    ++liveLogFetchSeq;
+    if (!next) { polling.stop(); return; }
+    if (autoRefresh) polling.start();
+    void polling.refresh();
+  }
+
   function setAutoRefresh(enable: boolean): void {
-    if (enable) polling.start();
+    autoRefresh = enable;
+    if (enable && visible()) polling.start();
     else polling.stop();
   }
 
-  const terminal = document.getElementById("logTerminal");
-  terminal?.addEventListener("scroll", () => {
-    followLatest = terminal.scrollHeight - terminal.clientHeight - terminal.scrollTop <= 24;
-  }, { passive: true });
-  const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
-  autoScroll?.addEventListener("change", () => {
-    if (autoScroll.checked && terminal) {
-      followLatest = true;
-      terminal.scrollTop = terminal.scrollHeight;
-    }
-  });
-  if (terminal && typeof ResizeObserver === "function") {
-    const observer = new ResizeObserver(() => {
-      if (followLatest && autoScroll?.checked && terminal.clientHeight > 0) {
+  function connect(): void {
+    const terminal = document.getElementById("logTerminal");
+    terminal?.addEventListener("scroll", () => {
+      followLatest = terminal.scrollHeight - terminal.clientHeight - terminal.scrollTop <= 24;
+    }, { passive: true });
+    const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
+    autoScroll?.addEventListener("change", () => {
+      if (autoScroll.checked && terminal) {
+        followLatest = true;
         terminal.scrollTop = terminal.scrollHeight;
       }
     });
-    observer.observe(terminal);
+    if (terminal && typeof ResizeObserver === "function") {
+      const observer = new ResizeObserver(() => {
+        if (followLatest && autoScroll?.checked && terminal.clientHeight > 0) {
+          terminal.scrollTop = terminal.scrollHeight;
+        }
+      });
+      observer.observe(terminal);
+    }
   }
-  document.getElementById("exportLogsBtn")?.addEventListener("click", () => void exportLogs());
-
   return {
-    refresh,
+    view, connect, refresh,
+    watching: () => autoRefresh && visible() && !document.hidden,
+    notifyChange: () => { if (autoRefresh && visible() && !document.hidden) void polling.refresh(); },
+    viewChanged,
     clear,
-    start: polling.start,
-    stop: polling.stop,
     destroy: polling.destroy,
     setAutoRefresh,
     exportLogs,

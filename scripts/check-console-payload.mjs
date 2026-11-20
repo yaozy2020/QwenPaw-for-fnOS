@@ -6,7 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
-const DEFAULT_PATCH = fileURLToPath(new URL("../patches/qwenpaw-2.3.0-base-path/", import.meta.url));
+const verifiedVersion = readFileSync(new URL("../patches/verified-version", import.meta.url), "utf8").trim();
+if (!/^\d+\.\d+\.\d+(?:\.post\d+)?$/.test(verifiedVersion)) throw new Error("invalid patches/verified-version");
+const DEFAULT_PATCH = fileURLToPath(new URL(`../patches/qwenpaw-${verifiedVersion}-base-path/`, import.meta.url));
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMPRESSIBLE = /\.(?:html|css|js|mjs|json|svg|txt|xml|map)$/i;
 const PRECOMPRESS_MIN_BYTES = 1024;
@@ -182,6 +184,9 @@ export function checkConsolePayload({ patchRoot = DEFAULT_PATCH, expectedFiles, 
   if (!object(manifest) || manifest.schema_version !== 1 || !Array.isArray(manifest.files) || !manifest.files.length) {
     error("invalid payload manifest schema/files");
     return result();
+  }
+  if (path.resolve(patchRoot) === path.resolve(DEFAULT_PATCH) && (manifest.base_version !== verifiedVersion || manifest.console_complete !== true)) {
+    error("shipping payload manifest does not match verified-version");
   }
   if (expectedFiles !== undefined && manifest.files.length !== expectedFiles) {
     error(`manifest file count: expected ${expectedFiles}, got ${manifest.files.length}`);

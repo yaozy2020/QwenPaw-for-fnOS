@@ -71,6 +71,16 @@ test("upgrade uses the Gateway REST route, encoded JSON body, CSRF and keepalive
   assert.equal("upgradeBeaconRequest" in client, false);
 });
 
+test("installation requests a verified cold backup only when explicitly selected", async () => {
+  const bodies = [];
+  const client = createApiClient({ pathname: '/app/qwenpaw/', fetch: async (_, init) => {
+    bodies.push(JSON.parse(init.body)); return jsonResponse({ success: true });
+  } });
+  await client.upgrade('2.3.0', 'official', true);
+  await client.upgrade('2.3.0', 'official', false);
+  assert.deepEqual(bodies, [{ version: '2.3.0', mirror: 'official', backup: true }, { version: '2.3.0', mirror: 'official' }]);
+});
+
 test("Gateway pages call native REST routes with exact request shapes", async () => {
   const captured = [];
   const client = createApiClient({
@@ -93,7 +103,7 @@ test("Gateway pages call native REST routes with exact request shapes", async ()
   assert.equal(client.base, "/app/qwenpaw/api");
   await client.status();
   await client.changePort(18099);
-  await client.resetAuth();
+  await client.resetAuth('fixture');
   await client.uninstallKernel();
   await client.controlService("start");
   await client.controlService("stop");
@@ -112,7 +122,7 @@ test("Gateway pages call native REST routes with exact request shapes", async ()
   assert.deepEqual(captured, [
     { url: "/app/qwenpaw/api/status?_t=123", method: "GET", body: null, csrf: null, contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/port", method: "POST", body: "{\"port\":18099}", csrf: "csrf-token", contentType: "application/json", keepalive: false },
-    { url: "/app/qwenpaw/api/kernel/reset-auth", method: "POST", body: null, csrf: "csrf-token", contentType: null, keepalive: false },
+    { url: "/app/qwenpaw/api/kernel/admin-password", method: "POST", body: '{"password":"fixture"}', csrf: "csrf-token", contentType: "application/json", keepalive: false },
     { url: "/app/qwenpaw/api/kernel/uninstall", method: "POST", body: null, csrf: "csrf-token", contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/start", method: "POST", body: null, csrf: "csrf-token", contentType: null, keepalive: false },
     { url: "/app/qwenpaw/api/stop", method: "POST", body: null, csrf: "csrf-token", contentType: null, keepalive: false },

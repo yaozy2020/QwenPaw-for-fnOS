@@ -58,6 +58,7 @@ try {
   await copyFile(join(web, "package.json"), join(temporary, "package.json"));
   await symlink(join(web, "node_modules"), join(temporary, "node_modules"));
   await symlink(join(web, "src"), join(temporary, "src"));
+  await symlink(join(web, "build-panel.mjs"), join(temporary, "build-panel.mjs"));
   await symlink(join(web, "build.mjs"), join(temporary, "build.mjs"));
   let code = await run(process.execPath, [join(temporary, "build.mjs")], temporary);
   if (code === 0) code = await run("cargo", ["build", "--locked", "--release", "--manifest-path", join(root, "supervisor/Cargo.toml")]);

@@ -836,156 +836,6 @@ index db9a3db..df90cb4 100755
        ...(desktop
          ? [
              {
-diff --git a/src/qwenpaw/app/auth.py b/src/qwenpaw/app/auth.py
-index 8968605..b2294d9 100755
---- a/src/qwenpaw/app/auth.py
-+++ b/src/qwenpaw/app/auth.py
-@@ -32,6 +32,7 @@ from urllib.parse import unquote
- 
- from fastapi import Request, Response
- from starlette.requests import HTTPConnection
-+from starlette.routing import get_route_path
- from starlette.types import ASGIApp, Receive, Scope, Send
- from starlette.middleware.base import BaseHTTPMiddleware
- 
-@@ -811,9 +812,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
-         if not is_auth_enabled() or not has_registered_users():
-             return True
- 
--        path = request.url.path
-+        path = get_route_path(request.scope)
-         if path == "/api/config/theme" and request.method == "GET":
-             return True
-+        if path == "/api/hub/pawapps/sessions" and request.method == "DELETE":
-+            return True
-         if (
-             request.method == "OPTIONS"
-             or path in _PUBLIC_PATHS
-diff --git a/src/qwenpaw/app/base_path.py b/src/qwenpaw/app/base_path.py
-new file mode 100755
-index 0000000..7b1231d
---- /dev/null
-+++ b/src/qwenpaw/app/base_path.py
-@@ -0,0 +1,119 @@
-+# -*- coding: utf-8 -*-
-+"""Mount the HTTP application and its prebuilt console below one URL prefix."""
-+from __future__ import annotations
-+
-+import asyncio
-+import json
-+from html import escape
-+from pathlib import Path
-+from urllib.parse import unquote
-+
-+from fastapi import Response
-+from fastapi.responses import FileResponse, RedirectResponse
-+from starlette.types import ASGIApp, Receive, Scope, Send
-+
-+_BASE_HREF_TOKEN = b'<base href="/" />'
-+_BASE_PATH_JSON_TOKEN = b'window.__qpBase = "";'
-+
-+
-+def normalize_base_path(value: str | None) -> str:
-+    """Return a canonical absolute path prefix, or an empty root prefix."""
-+    path = (value or "").strip()
-+    if not path or path == "/":
-+        return ""
-+    if not path.startswith("/"):
-+        raise ValueError("QWENPAW_BASE_PATH must start with '/'")
-+    if any(char in path for char in ("?", "#", "\\")):
-+        raise ValueError(
-+            "QWENPAW_BASE_PATH must be a URL path without query or fragment",
-+        )
-+    if "%" in path:
-+        raise ValueError(
-+            "QWENPAW_BASE_PATH must use decoded path segments, not percent encoding",
-+        )
-+    path = path.rstrip("/")
-+    segments = [unquote(segment) for segment in path.split("/")[1:]]
-+    if any(
-+        segment in ("", ".", "..") or "/" in segment or "\\" in segment
-+        for segment in segments
-+    ):
-+        raise ValueError("QWENPAW_BASE_PATH contains an invalid path segment")
-+    return path
-+
-+
-+class BasePathMiddleware:
-+    """Accept one configured prefix and expose unprefixed routes to FastAPI."""
-+
-+    def __init__(self, app: ASGIApp, base_path: str | None = None) -> None:
-+        self.app = app
-+        self.base_path = normalize_base_path(base_path)
-+
-+    async def __call__(
-+        self,
-+        scope: Scope,
-+        receive: Receive,
-+        send: Send,
-+    ) -> None:
-+        if not self.base_path or scope["type"] not in ("http", "websocket"):
-+            await self.app(scope, receive, send)
-+            return
-+
-+        path = scope.get("path", "")
-+        if path == self.base_path and scope["type"] == "http":
-+            query = scope.get("query_string", b"").decode("latin-1")
-+            suffix = f"?{query}" if query else ""
-+            response = RedirectResponse(f"{self.base_path}/{suffix}")
-+            await response(scope, receive, send)
-+            return
-+        if path != self.base_path and not path.startswith(
-+            f"{self.base_path}/",
-+        ):
-+            response = Response(status_code=404)
-+            await response(scope, receive, send)
-+            return
-+
-+        child_scope = dict(scope)
-+        child_scope["root_path"] = (
-+            scope.get("root_path", "").rstrip("/") + self.base_path
-+        )
-+        await self.app(child_scope, receive, send)
-+
-+
-+class ConsoleIndexResponse(FileResponse):
-+    """Serve the small HTML entry with its two explicit deployment tokens set."""
-+
-+    def __init__(
-+        self,
-+        path: str | Path,
-+        *,
-+        base_path: str | None = None,
-+        **kwargs,
-+    ):
-+        self.base_path = normalize_base_path(base_path)
-+        super().__init__(path, media_type="text/html", **kwargs)
-+
-+    async def __call__(
-+        self,
-+        scope: Scope,
-+        receive: Receive,
-+        send: Send,
-+    ) -> None:
-+        content = await asyncio.to_thread(Path(self.path).read_bytes)
-+        base_href = f'<base href="{escape(self.base_path, quote=True)}/">'
-+        content = content.replace(_BASE_HREF_TOKEN, base_href.encode("utf-8"))
-+        base_path_json = (
-+            json.dumps(self.base_path)
-+            .replace("&", "\\u0026")
-+            .replace("<", "\\u003c")
-+            .replace(">", "\\u003e")
-+            .replace("\u2028", "\\u2028")
-+            .replace("\u2029", "\\u2029")
-+        )
-+        runtime_config = f"window.__qpBase = {base_path_json};"
-+        content = content.replace(
-+            _BASE_PATH_JSON_TOKEN,
-+            runtime_config.encode("utf-8"),
-+        )
-+        self.body = content
-+        self.headers["content-length"] = str(len(content))
-+        await Response.__call__(self, scope, receive, send)
 diff --git a/src/qwenpaw/app/channels/ingress.py b/src/qwenpaw/app/channels/ingress.py
 index b0c718c..9d3c660 100755
 --- a/src/qwenpaw/app/channels/ingress.py
@@ -1343,110 +1193,6 @@ index 0000000..edf3715
 +        check=False,
 +    )
 +    assert result.returncode == 0, result.stdout + result.stderr
-diff --git a/src/qwenpaw/app/_app.py b/src/qwenpaw/app/_app.py
-index 24adf85..5cf5fb1 100755
---- a/src/qwenpaw/app/_app.py
-+++ b/src/qwenpaw/app/_app.py
-@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
- from pathlib import Path
- from typing import Any
- 
--from fastapi import FastAPI, HTTPException
-+from fastapi import FastAPI, HTTPException, Request, Response
- from fastapi.middleware.cors import CORSMiddleware
- from fastapi.responses import FileResponse
- from fastapi.staticfiles import StaticFiles
-@@ -41,6 +41,12 @@ from ..utils.logging import (
- )
- from ..utils.startup_display import AgentStartupDisplay
- from ..utils.system_info import summarize_python_environment
-+from .base_path import (
-+    BasePathMiddleware,
-+    ConsoleIndexResponse,
-+    normalize_base_path,
-+)
-+from .console_static import ConsoleStaticFiles
- from .auth import (
-     AuthMiddleware,
-     RuntimeBoundaryMiddleware,
-@@ -835,6 +841,8 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
-         startup_display.stop()
- 
- 
-+_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
-+
- app = FastAPI(
-     lifespan=lifespan,
-     docs_url="/docs" if DOCS_ENABLED else None,
-@@ -921,10 +929,27 @@ _INDEX_NO_CACHE_HEADERS = {
- }
- 
- 
-+@app.delete("/api/hub/pawapps/sessions", status_code=204)
-+def clear_browser_sessions(request: Request):
-+    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
-+
-+    response = Response(status_code=204)
-+    clear_sessions(request, response)
-+    if _BASE_PATH:
-+        for name in request.cookies:
-+            if name.startswith(COOKIE_PREFIX):
-+                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
-+    return response
-+
-+
- @app.get("/")
- def read_root():
-     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
--        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
-+        return ConsoleIndexResponse(
-+            _CONSOLE_INDEX,
-+            base_path=_BASE_PATH,
-+            headers=_INDEX_NO_CACHE_HEADERS,
-+        )
-     return {
-         "message": (
-             f"{PROJECT_NAME} web console is not available. "
-@@ -1014,8 +1039,9 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
- 
-     def _serve_console_index():
-         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
--            return FileResponse(
-+            return ConsoleIndexResponse(
-                 _CONSOLE_INDEX,
-+                base_path=_BASE_PATH,
-                 headers=_INDEX_NO_CACHE_HEADERS,
-             )
- 
-@@ -1025,7 +1051,7 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
-     if _assets_dir.is_dir():
-         app.mount(
-             "/assets",
--            StaticFiles(directory=str(_assets_dir)),
-+            ConsoleStaticFiles(directory=str(_assets_dir)),
-             name="assets",
-         )
- 
-@@ -1059,6 +1085,18 @@ if os.path.isdir(_CONSOLE_STATIC_DIR):
-             except (OSError, ValueError):
-                 return _serve_console_index()
-             if file_stat and stat.S_ISREG(file_stat.st_mode):
--                return FileResponse(static_file, stat_result=file_stat)
-+                if Path(static_file) == _CONSOLE_INDEX:
-+                    return _serve_console_index()
-+                headers = (
-+                    _INDEX_NO_CACHE_HEADERS
-+                    if Path(static_file).suffix.lower() in (".html", ".htm")
-+                    else {"Cache-Control": "public, max-age=300"}
-+                )
-+                return FileResponse(
-+                    static_file, stat_result=file_stat, headers=headers,
-+                )
- 
-         return _serve_console_index()
-+
-+
-+app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
 diff --git a/src/qwenpaw/app/console_static.py b/src/qwenpaw/app/console_static.py
 new file mode 100755
 index 0000000..753965c
@@ -1637,3 +1383,945 @@ index 0000000..0cab0d9
 +    expect(pluginProviderMock).toHaveBeenCalled();
 +  });
 +});
+--- a/console/src/auth/gate.test.ts
++++ b/console/src/auth/gate.test.ts
+@@ -31,6 +31,12 @@
+   it("fails closed when backend mode cannot be detected", async () => {
+     getStatus.mockRejectedValueOnce(new Error("offline"));
+     await expect(resolveBackendMode()).rejects.toThrow("offline");
++  });
++
++  it("accepts a kernel-confirmed entry without a browser bearer", async () => {
++    getStatus.mockResolvedValueOnce({ enabled: true, has_users: true, fnos_entry: true });
++    await expect(resolveAuthGate()).resolves.toBe("ok");
++    expect(localStorage.getItem("qwenpaw_auth_token")).toBeNull();
+   });
+ 
+   it("allows an explicitly disabled authentication mode", async () => {
+--- a/console/src/auth/gate.ts
++++ b/console/src/auth/gate.ts
+@@ -25,7 +25,7 @@
+   knownStatus?: AuthStatusResponse,
+ ): Promise<AuthGateState> {
+   const status = knownStatus ?? (await authApi.getStatus());
+-  if (!status.enabled) {
++  if (!status.enabled || (status.enabled && status.fnos_entry === true)) {
+     return "ok";
+   }
+ 
+--- a/console/src/api/modules/auth.ts
++++ b/console/src/api/modules/auth.ts
+@@ -10,6 +10,7 @@
+ export interface AuthStatusResponse {
+   enabled: boolean;
+   has_users: boolean;
++  fnos_entry?: boolean;
+   mode?: "hub";
+   bootstrap_required?: boolean;
+   registration_enabled?: boolean;
+--- a/src/qwenpaw/app/_app.py
++++ b/src/qwenpaw/app/_app.py
+@@ -12,7 +12,7 @@
+ from pathlib import Path
+ from typing import Any
+ 
+-from fastapi import FastAPI, HTTPException
++from fastapi import FastAPI, HTTPException, Request, Response
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse
+ from fastapi.staticfiles import StaticFiles
+@@ -41,6 +41,12 @@
+ )
+ from ..utils.startup_display import AgentStartupDisplay
+ from ..utils.system_info import summarize_python_environment
++from .base_path import (
++    BasePathMiddleware,
++    ConsoleIndexResponse,
++    normalize_base_path,
++)
++from .console_static import ConsoleStaticFiles
+ from .auth import (
+     AuthMiddleware,
+     RuntimeBoundaryMiddleware,
+@@ -743,8 +749,10 @@
+     _bg_task = asyncio.create_task(_background_startup())
+     daily_telemetry = start_daily_telemetry()
+ 
++    from .fnos_entry import private_listener
+     try:
+-        yield
++        async with private_listener(app):
++            yield
+     finally:
+         await daily_telemetry.close()
+         community_task.cancel()
+@@ -834,6 +842,8 @@
+         logger.info("Application shutdown complete")
+         startup_display.stop()
+ 
++
++_BASE_PATH = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
+ 
+ app = FastAPI(
+     lifespan=lifespan,
+@@ -921,10 +931,27 @@
+ }
+ 
+ 
++@app.delete("/api/hub/pawapps/sessions", status_code=204)
++def clear_browser_sessions(request: Request):
++    from ..hub.pawapp_access import COOKIE_PREFIX, clear_sessions
++
++    response = Response(status_code=204)
++    clear_sessions(request, response)
++    if _BASE_PATH:
++        for name in request.cookies:
++            if name.startswith(COOKIE_PREFIX):
++                response.delete_cookie(name, path=f"{_BASE_PATH}/api/")
++    return response
++
++
+ @app.get("/")
+ def read_root():
+     if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-        return FileResponse(_CONSOLE_INDEX, headers=_INDEX_NO_CACHE_HEADERS)
++        return ConsoleIndexResponse(
++            _CONSOLE_INDEX,
++            base_path=_BASE_PATH,
++            headers=_INDEX_NO_CACHE_HEADERS,
++        )
+     return {
+         "message": (
+             f"{PROJECT_NAME} web console is not available. "
+@@ -1014,8 +1041,9 @@
+ 
+     def _serve_console_index():
+         if _CONSOLE_INDEX and _CONSOLE_INDEX.exists():
+-            return FileResponse(
++            return ConsoleIndexResponse(
+                 _CONSOLE_INDEX,
++                base_path=_BASE_PATH,
+                 headers=_INDEX_NO_CACHE_HEADERS,
+             )
+ 
+@@ -1025,7 +1053,7 @@
+     if _assets_dir.is_dir():
+         app.mount(
+             "/assets",
+-            StaticFiles(directory=str(_assets_dir)),
++            ConsoleStaticFiles(directory=str(_assets_dir)),
+             name="assets",
+         )
+ 
+@@ -1059,6 +1087,18 @@
+             except (OSError, ValueError):
+                 return _serve_console_index()
+             if file_stat and stat.S_ISREG(file_stat.st_mode):
+-                return FileResponse(static_file, stat_result=file_stat)
++                if Path(static_file) == _CONSOLE_INDEX:
++                    return _serve_console_index()
++                headers = (
++                    _INDEX_NO_CACHE_HEADERS
++                    if Path(static_file).suffix.lower() in (".html", ".htm")
++                    else {"Cache-Control": "public, max-age=300"}
++                )
++                return FileResponse(
++                    static_file, stat_result=file_stat, headers=headers,
++                )
+ 
+         return _serve_console_index()
++
++
++app.add_middleware(BasePathMiddleware, base_path=_BASE_PATH)
+--- a/src/qwenpaw/app/auth.py
++++ b/src/qwenpaw/app/auth.py
+@@ -32,6 +32,7 @@
+ 
+ from fastapi import Request, Response
+ from starlette.requests import HTTPConnection
++from starlette.routing import get_route_path
+ from starlette.types import ASGIApp, Receive, Scope, Send
+ from starlette.middleware.base import BaseHTTPMiddleware
+ 
+@@ -782,6 +783,10 @@
+     """Middleware that checks Bearer token on protected routes."""
+ 
+     async def dispatch(self, request: Request, call_next):
++        from .fnos_entry import intercept
++        entry = await intercept(request, call_next)
++        if entry is not None:
++            return entry
+         if self._should_skip_auth(request):
+             return await call_next(request)
+ 
+@@ -808,11 +813,15 @@
+     def _should_skip_auth(  # pylint: disable=too-many-return-statements
+         request: Request,
+     ) -> bool:
+-        if not is_auth_enabled() or not has_registered_users():
++        if not is_auth_enabled():
+             return True
+-
+-        path = request.url.path
++        if not request.scope.get('fnos_native_proxy') and not has_registered_users():
++            return True
++
++        path = get_route_path(request.scope)
+         if path == "/api/config/theme" and request.method == "GET":
++            return True
++        if path == "/api/hub/pawapps/sessions" and request.method == "DELETE":
+             return True
+         if (
+             request.method == "OPTIONS"
+@@ -822,6 +831,8 @@
+         ):
+             return True
+ 
++        if request.scope.get('fnos_native_proxy'):
++            return False  # A forwarded visitor is not the local supervisor.
+         cfg, _ = _get_config_cached()
+         allowed = cfg.security.allow_no_auth_hosts
+         client_ip = resolve_client_ip(request)
+--- /dev/null
++++ b/src/qwenpaw/app/base_path.py
+@@ -0,0 +1,125 @@
++# -*- coding: utf-8 -*-
++"""Mount the HTTP application and its prebuilt console below one URL prefix."""
++from __future__ import annotations
++
++import asyncio
++import json
++import os
++from html import escape
++from pathlib import Path
++from urllib.parse import unquote
++
++from fastapi import Response
++from fastapi.responses import FileResponse, RedirectResponse
++from starlette.types import ASGIApp, Receive, Scope, Send
++
++_BASE_HREF_TOKEN = b'<base href="/" />'
++_BASE_PATH_JSON_TOKEN = b'window.__qpBase = "";'
++
++
++def normalize_base_path(value: str | None) -> str:
++    """Return a canonical absolute path prefix, or an empty root prefix."""
++    path = (value or "").strip()
++    if not path or path == "/":
++        return ""
++    if not path.startswith("/"):
++        raise ValueError("QWENPAW_BASE_PATH must start with '/'")
++    if any(char in path for char in ("?", "#", "\\")):
++        raise ValueError(
++            "QWENPAW_BASE_PATH must be a URL path without query or fragment",
++        )
++    if "%" in path:
++        raise ValueError(
++            "QWENPAW_BASE_PATH must use decoded path segments, not percent encoding",
++        )
++    path = path.rstrip("/")
++    segments = [unquote(segment) for segment in path.split("/")[1:]]
++    if any(
++        segment in ("", ".", "..") or "/" in segment or "\\" in segment
++        for segment in segments
++    ):
++        raise ValueError("QWENPAW_BASE_PATH contains an invalid path segment")
++    return path
++
++
++class BasePathMiddleware:
++    """Accept one configured prefix and expose unprefixed routes to FastAPI."""
++
++    def __init__(self, app: ASGIApp, base_path: str | None = None) -> None:
++        self.app = app
++        self.base_path = normalize_base_path(base_path)
++
++    async def __call__(
++        self,
++        scope: Scope,
++        receive: Receive,
++        send: Send,
++    ) -> None:
++        if not self.base_path or scope["type"] not in ("http", "websocket"):
++            await self.app(scope, receive, send)
++            return
++
++        path = scope.get("path", "")
++        peer = scope.get('client')
++        local = peer and peer[0] in ('127.0.0.1', '::1') and os.environ.get('QWENPAW_FNOS_ENTRY_RECORD')
++        if local and path.startswith('/api/'):
++            await self.app(scope, receive, send)
++            return
++        if (path == self.base_path or (local and path == '/' and scope.get('method') in ('GET', 'HEAD'))) and scope["type"] == "http":
++            query = scope.get("query_string", b"").decode("latin-1")
++            suffix = f"?{query}" if query else ""
++            response = RedirectResponse(f"{self.base_path}/{suffix}")
++            await response(scope, receive, send)
++            return
++        if path != self.base_path and not path.startswith(
++            f"{self.base_path}/",
++        ):
++            response = Response(status_code=404)
++            await response(scope, receive, send)
++            return
++
++        child_scope = dict(scope)
++        child_scope["root_path"] = (
++            scope.get("root_path", "").rstrip("/") + self.base_path
++        )
++        await self.app(child_scope, receive, send)
++
++
++class ConsoleIndexResponse(FileResponse):
++    """Serve the small HTML entry with its two explicit deployment tokens set."""
++
++    def __init__(
++        self,
++        path: str | Path,
++        *,
++        base_path: str | None = None,
++        **kwargs,
++    ):
++        self.base_path = normalize_base_path(base_path)
++        super().__init__(path, media_type="text/html", **kwargs)
++
++    async def __call__(
++        self,
++        scope: Scope,
++        receive: Receive,
++        send: Send,
++    ) -> None:
++        content = await asyncio.to_thread(Path(self.path).read_bytes)
++        base_href = f'<base href="{escape(self.base_path, quote=True)}/">'
++        content = content.replace(_BASE_HREF_TOKEN, base_href.encode("utf-8"))
++        base_path_json = (
++            json.dumps(self.base_path)
++            .replace("&", "\\u0026")
++            .replace("<", "\\u003c")
++            .replace(">", "\\u003e")
++            .replace("\u2028", "\\u2028")
++            .replace("\u2029", "\\u2029")
++        )
++        runtime_config = f"window.__qpBase = {base_path_json};"
++        content = content.replace(
++            _BASE_PATH_JSON_TOKEN,
++            runtime_config.encode("utf-8"),
++        )
++        self.body = content
++        self.headers["content-length"] = str(len(content))
++        await Response.__call__(self, scope, receive, send)
+--- /dev/null
++++ b/src/qwenpaw/app/fnos_entry.py
+@@ -0,0 +1,198 @@
++"""Private fnOS HTTP transport for the supervised, single-user Console."""
++import asyncio
++from contextlib import asynccontextmanager
++import json
++import os
++from pathlib import Path
++import socket
++import stat
++import struct
++
++from starlette.responses import JSONResponse
++from starlette.routing import get_route_path
++
++_PRIVATE = object()
++
++
++def record_path():
++    path = os.environ.get('QWENPAW_FNOS_ENTRY_RECORD')
++    return Path(path) if path else None
++
++
++def read_owner():
++    path = record_path()
++    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    with os.fdopen(fd, 'rb') as stream:
++        info = os.fstat(fd)
++        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
++            raise ValueError('invalid entry record')
++        raw = stream.read(2049)
++    if len(raw) > 2048:
++        raise ValueError('invalid entry record')
++    data = json.loads(raw)
++    if data.get('v') != 1 or data.get('instance') != 'default' or not valid_owner(data.get('owner')):
++        raise ValueError('invalid entry record')
++    return data['owner']
++
++
++def valid_owner(name):
++    return isinstance(name, str) and bool(name.strip()) and len(name.encode()) <= 256 and all(c.isprintable() for c in name)
++
++
++def migration_owner(token):
++    from . import auth
++    # A missing legacy store is not proof that a retained installation is new.
++    try:
++        info = auth.AUTH_FILE.lstat()
++    except OSError:
++        return None
++    if not stat.S_ISREG(info.st_mode) or not auth.is_auth_enabled():
++        return None
++    account = auth._load_auth_data().get('user')
++    if not isinstance(account, dict) or not valid_owner(account.get('username')) or not token:
++        return None
++    user = auth.verify_token(token)
++    return user if user == account['username'] else None
++
++
++def reset_existing_password(password):
++    from . import auth
++    import re
++    import secrets
++    import tempfile
++
++    if not auth.is_auth_enabled():
++        return 409
++    try:
++        fd = os.open(auth.AUTH_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    except FileNotFoundError:
++        return 409
++    with os.fdopen(fd, 'rb') as stream:
++        info = os.fstat(fd)
++        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
++            return 503
++        data = json.load(stream)
++    if not isinstance(data, dict) or 'user' not in data:
++        return 409
++    user = data['user']
++    if (not isinstance(user, dict) or not valid_owner(user.get('username'))
++            or not re.fullmatch(r'[0-9a-f]{64}', user.get('password_hash', ''))
++            or not re.fullmatch(r'[0-9a-f]{32}', user.get('password_salt', ''))):
++        return 503
++    try:
++        if read_owner() != user['username']:
++            return 412
++    except FileNotFoundError:
++        pass  # No desktop migration record on a fresh installation.
++    signing_key = auth.decrypt_dict_fields(data, auth.AUTH_SECRET_FIELDS).get('jwt_secret')
++    if not isinstance(signing_key, str) or not re.fullmatch(r'[0-9a-f]{64}', signing_key):
++        return 503
++    user['password_hash'], user['password_salt'] = auth._hash_password(password)
++    data['jwt_secret'] = secrets.token_hex(32)
++    encrypted = auth.encrypt_dict_fields(data, auth.AUTH_SECRET_FIELDS)
++    with tempfile.NamedTemporaryFile(dir=auth.AUTH_FILE.parent, mode='w', encoding='utf-8', delete=False) as out:
++        try:
++            os.fchmod(out.fileno(), 0o600)
++            if stat.S_IMODE(os.fstat(out.fileno()).st_mode) != 0o600:
++                return 503
++            json.dump(encrypted, out, ensure_ascii=False)
++            out.flush()
++            os.fsync(out.fileno())
++            os.replace(out.name, auth.AUTH_FILE)
++        finally:
++            Path(out.name).unlink(missing_ok=True)
++    directory = os.open(auth.AUTH_FILE.parent, os.O_RDONLY | os.O_DIRECTORY)
++    try:
++        os.fsync(directory)
++    finally:
++        os.close(directory)
++    return 204
++
++
++async def intercept(request, call_next):
++    path = get_route_path(request.scope).rstrip('/')
++    private = request.scope.get('fnos_entry') is _PRIVATE
++    if not private:
++        return None
++    if request.headers.get('x-fnos-entry-command') == 'admin-password':
++        from starlette.responses import Response
++        if request.method != 'POST' or path != '/api/auth/fnos-admin-password':
++            return Response(status_code=403)
++        try:
++            password = (await request.json())['password']
++            if not isinstance(password, str) or not password.strip():
++                return Response(status_code=400)
++            status = reset_existing_password(password)
++        except (OSError, ValueError, KeyError, TypeError, AttributeError):
++            status = 503
++        return Response(status_code=status)
++    if private and request.headers.get('x-fnos-entry-command') == 'prove':
++        if request.method != 'POST' or path != '/api/auth/verify':
++            return JSONResponse({}, status_code=403)
++        owner = migration_owner(request.headers.get('authorization', '').removeprefix('Bearer '))
++        if owner is None:
++            return JSONResponse({}, status_code=401)
++        return JSONResponse({'owner': owner, 'instance': 'default', 'v': 1})
++    try:
++        owner = read_owner()
++    except (OSError, ValueError, TypeError, AttributeError):
++        return JSONResponse({}, status_code=503)
++    if request.method == 'GET' and path == '/api/auth/status':
++        return JSONResponse({'enabled': True, 'has_users': True, 'fnos_entry': True}, headers={'cache-control':'private, no-store'})
++    if request.method == 'GET' and path == '/api/auth/verify':
++        return JSONResponse({'valid': True, 'username': owner}, headers={'cache-control':'private, no-store'})
++    if path == '/api/auth' or path.startswith('/api/auth/'):
++        return JSONResponse({'detail': 'Authentication is managed by fnOS'}, status_code=403)
++    request.state.user = owner
++    return await call_next(request)
++
++
++@asynccontextmanager
++async def private_listener(app):
++    if record_path() is None:
++        yield
++        return
++    from uvicorn import Config
++    from uvicorn.protocols.http.h11_impl import H11Protocol
++    from uvicorn.server import ServerState
++    parent = int(os.environ['QWENPAW_FNOS_ENTRY_PARENT'])
++    uid = os.geteuid()
++    if parent <= 1 or parent != os.getppid():
++        raise RuntimeError('invalid fnOS supervisor parent')
++
++    async def private_app(scope, receive, send):
++        if os.getppid() != parent:
++            await JSONResponse({}, status_code=503)(scope, receive, send)
++            return
++        native = (b'x-fnos-entry-command', b'native') in scope.get('headers', ())
++        await app(dict(scope, fnos_native_proxy=native, fnos_entry=None if native else _PRIVATE), receive, send)
++
++    config = Config(private_app, interface='asgi3', lifespan='off', ws='none', proxy_headers=False, access_log=False, log_config=None)
++    config.load()
++    state = ServerState()
++
++    class PeerHTTP(H11Protocol):
++        def connection_made(self, transport):
++            super().connection_made(transport)
++            peer = transport.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
++            pid, peer_uid, _ = struct.unpack('3i', peer)
++            self.allowed = (pid, peer_uid) == (parent, uid) and os.getppid() == parent
++            if not self.allowed:
++                transport.abort()
++
++        def data_received(self, data):
++            if self.allowed:
++                super().data_received(data)
++
++    server = await asyncio.get_running_loop().create_unix_server(
++        lambda: PeerHTTP(config, state, {}), path=b'\0' + f'qwenpaw.entry.v2.{uid}.{os.getpid()}'.encode(), backlog=64,
++    )
++    try:
++        yield
++    finally:
++        server.close()
++        await server.wait_closed()
++        for conn in list(state.connections):
++            conn.transport.abort()
++        for task in list(state.tasks):
++            task.cancel()
+--- a/console/index.html
++++ b/console/index.html
+@@ -7,7 +7,7 @@
+       window.__qpBaseUrl = window.__qpBase + "/";
+     </script>
+     <meta charset="UTF-8" />
+-    <link rel="icon" type="image/svg+xml" href="online.svg" />
++    <link rel="icon" type="image/svg+xml" href="/online.svg" />
+     <meta
+       name="viewport"
+       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+@@ -153,7 +153,7 @@
+     <div id="root">
+       <div class="qwenpaw-boot" role="status" aria-live="polite">
+         <div class="qwenpaw-boot__content">
+-          <img class="qwenpaw-boot__logo" src="qwenpaw.png" alt="QwenPaw" />
++          <img class="qwenpaw-boot__logo" src="/qwenpaw.png" alt="QwenPaw" />
+           <span class="qwenpaw-boot__label">Loading Console</span>
+         </div>
+       </div>
+--- a/console/src/App.tsx
++++ b/console/src/App.tsx
+@@ -464,6 +464,7 @@
+   ) : (
+     <BrowserRouter basename={basename}>
+       <Routes>
++        <Route path="/index.html" element={<Navigate to="/" replace />} />
+         <Route
+           path="/login"
+           element={
+--- a/console/src/utils/navigationMode.test.ts
++++ b/console/src/utils/navigationMode.test.ts
+@@ -157,6 +157,23 @@
+     expect(navigation.getOsRootHref("/login")).toBe("/os");
+   });
+ 
++  it.each(["/控制台", "/my console"])(
++    "keeps browser navigation inside %s",
++    async (base) => {
++      window.__qpBase = base;
++      try {
++        const navigation = await loadNavigation(undefined);
++        const pathname = new URL(`${base}/login`, "https://example.org").pathname;
++        expect(navigation.stripRouterBasename(pathname)).toBe("/login");
++        expect(navigation.addRouterBasename(pathname, "/chat")).toBe(
++          pathname.replace(/login$/, "chat"),
++        );
++      } finally {
++        delete window.__qpBase;
++      }
++    },
++  );
++
+   it("prefers the server-injected runtime base path", async () => {
+     window.__qpBase = "/app/qwenpaw/web";
+     const navigation = await loadNavigation(undefined);
+--- a/console/src/utils/navigationMode.ts
++++ b/console/src/utils/navigationMode.ts
+@@ -7,8 +7,10 @@
+   hash?: string;
+ }
+ 
++const runtimeBase = getRuntimeBasePath();
+ const CONSOLE_BASENAME =
+-  getRuntimeBasePath() ||
++  (runtimeBase &&
++    new URL(runtimeBase + "/", window.location.href).pathname.slice(0, -1)) ||
+   normalizeConsoleBasename(import.meta.env.VITE_CONSOLE_BASENAME);
+ const OS_PAW_APP_STATE_KEY = "osPawAppId";
+ 
+--- a/src/qwenpaw/app/base_path.py
++++ b/src/qwenpaw/app/base_path.py
+@@ -104,6 +104,10 @@
+         receive: Receive,
+         send: Send,
+     ) -> None:
++        if not self.base_path:
++            await super().__call__(scope, receive, send)
++            return
++
+         content = await asyncio.to_thread(Path(self.path).read_bytes)
+         base_href = f'<base href="{escape(self.base_path, quote=True)}/">'
+         content = content.replace(_BASE_HREF_TOKEN, base_href.encode("utf-8"))
+--- a/src/qwenpaw/app/channels/ingress.py
++++ b/src/qwenpaw/app/channels/ingress.py
+@@ -7,7 +7,7 @@
+ from dataclasses import dataclass, field
+ import math
+ import secrets
+-from urllib.parse import parse_qsl, urlsplit
++from urllib.parse import parse_qsl, quote, urlsplit
+ 
+ import aiohttp
+ from multidict import CIMultiDict
+@@ -543,13 +543,21 @@
+         host = reference.loopback_host
+         if ":" in host:
+             host = "[" + host + "]"
++        target = self._raw_target(request)
++        if request.scope.get("root_path"):
++            _, separator, query = target.partition("?")
++            target = (
++                quote(get_route_path(request.scope), safe="/")
++                + separator
++                + query
++            )
+         return URL(
+             ("ws" if websocket else "http")
+             + "://"
+             + host
+             + ":"
+             + str(reference.endpoint.port)
+-            + self._raw_target(request),
++            + target,
+             encoded=True,
+         )
+ 
+--- a/tests/unit/app/test_base_path.py
++++ b/tests/unit/app/test_base_path.py
+@@ -100,6 +100,20 @@
+         assert response.headers["location"] == "/app/qwenpaw/web/?from=fnos"
+ 
+ 
++@pytest.mark.parametrize("base_path", [None, "", "/"])
++def test_root_console_preserves_file_response(tmp_path, base_path):
++    index = tmp_path / "index.html"
++    original = b'<base href="/" /><script>window.__qpBase = "";</script>'
++    index.write_bytes(original)
++    application = FastAPI()
++    application.get("/")(lambda: ConsoleIndexResponse(index, base_path=base_path))
++    with TestClient(application) as client:
++        response = client.get("/")
++        assert response.content == original
++        assert response.headers["etag"]
++        assert response.headers["last-modified"]
++
++
+ def test_console_index_injects_only_base_path_tokens(tmp_path):
+     index = tmp_path / "index.html"
+     index.write_text(
+@@ -204,7 +218,8 @@
+                 redirect = client.get("/app/qwenpaw/web?from=fnos")
+                 assert redirect.status_code == 307
+                 assert redirect.headers["location"] == "/app/qwenpaw/web/?from=fnos"
+-                for path in ("/app/qwenpaw/web/", "/app/qwenpaw/web/chat", "/app/qwenpaw/web/chat/"):
++                for route in ("", "index.html", "chat", "chat/"):
++                    path = "/app/qwenpaw/web/" + route
+                     page = client.get(path)
+                     assert page.status_code == 200, path
+                     assert '<base href="/app/qwenpaw/web/">' in page.text
+diff --git a/src/qwenpaw/browser/control_link/chrome/ws_handler.py b/src/qwenpaw/browser/control_link/chrome/ws_handler.py
+--- a/src/qwenpaw/browser/control_link/chrome/ws_handler.py
++++ b/src/qwenpaw/browser/control_link/chrome/ws_handler.py
+@@ -8,14 +8,17 @@
+ import contextlib
+ import json
+ import logging
++import os
+ import secrets
+ from datetime import UTC, datetime
+ from pathlib import Path
+ from typing import Any
++from urllib.parse import quote
+ 
+ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+ from starlette.responses import JSONResponse
+ 
++from ....app.base_path import normalize_base_path
+ from ....utils.logging import sanitize_log_value
+ from ....utils.io_utils import write_json_atomic
+ from .bridge import get_nm_bridge, shutdown_nm_bridge as shutdown_global_bridge
+@@ -31,6 +34,10 @@
+ 
+ def resolve_default_ws_url() -> str:
+     """Resolve the WebSocket endpoint of the current core API instance."""
++    base_path = quote(
++        normalize_base_path(os.environ.get("QWENPAW_BASE_PATH")),
++        safe="/",
++    )
+     try:
+         from qwenpaw.config.utils import read_last_api
+ 
+@@ -38,12 +45,15 @@
+     except Exception:
+         api_info = None
+     if not api_info:
+-        return DEFAULT_WS_URL
++        return (
++            f"{DEFAULT_WS_URL.removesuffix('/api/ws/chrome')}"
++            f"{base_path}/api/ws/chrome"
++        )
+     host, port = api_info
+     host = "127.0.0.1" if host in {"", "0.0.0.0"} else str(host)
+     if ":" in host and not host.startswith("["):
+         host = f"[{host}]"
+-    return f"ws://{host}:{port}/api/ws/chrome"
++    return f"ws://{host}:{port}{base_path}/api/ws/chrome"
+ 
+ 
+ _bridge_state = get_nm_bridge_route_state()
+diff --git a/src/qwenpaw/cli/http.py b/src/qwenpaw/cli/http.py
+--- a/src/qwenpaw/cli/http.py
++++ b/src/qwenpaw/cli/http.py
+@@ -2,11 +2,13 @@
+ from __future__ import annotations
+ 
+ import json
++import os
+ from typing import Any, Optional
+ 
+ import click
+ import httpx
+ 
++from ..app.base_path import normalize_base_path
+ from ..utils.runtime_api import api_client
+ 
+ 
+@@ -42,4 +44,5 @@
+         return base_url.rstrip("/")
+     host = (ctx.obj or {}).get("host", "127.0.0.1")
+     port = (ctx.obj or {}).get("port", 8088)
+-    return f"http://{host}:{port}"
++    base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++    return f"http://{host}:{port}{base_path}"
+diff --git a/src/qwenpaw/agents/tools/agent_management.py b/src/qwenpaw/agents/tools/agent_management.py
+index 56ce37a9..ab1bac83 100644
+--- a/src/qwenpaw/agents/tools/agent_management.py
++++ b/src/qwenpaw/agents/tools/agent_management.py
+@@ -4,6 +4,7 @@
+ import asyncio
+ import json
+ import logging
++import os
+ import re
+ import time
+ from typing import Any, Callable, Dict, Optional
+@@ -14,6 +15,7 @@ from agentscope.message import TextBlock
+ from agentscope.tool import ToolChunk
+ from agentscope.message import ToolResultState
+ 
++from ...app.base_path import normalize_base_path
+ from ...config.config import load_agent_config
+ from ...config.utils import read_last_api
+ from ...constant import (
+@@ -54,9 +56,11 @@ def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
+     last_api = read_runtime_api() or read_last_api()
+     if last_api:
+         host, port = last_api
+-        return f"http://{host}:{port}"
++        base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++        return f"http://{host}:{port}{base_path}"
+ 
+-    return DEFAULT_AGENT_API_BASE_URL
++    base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++    return f"{DEFAULT_AGENT_API_BASE_URL}{base_path}"
+ 
+ 
+ def _normalize_api_base_url(base_url: Optional[str]) -> str:
+diff --git a/src/qwenpaw/cli/auto.py b/src/qwenpaw/cli/auto.py
+index 691a5e89..d8ab3354 100644
+--- a/src/qwenpaw/cli/auto.py
++++ b/src/qwenpaw/cli/auto.py
+@@ -26,7 +26,7 @@ from typing import Any
+ 
+ import click
+ 
+-from .http import client, print_json
++from .http import client, print_json, resolve_base_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -51,11 +51,7 @@ def _ensure_daemon_alive(base_url: str) -> None:
+ 
+ 
+ def _base_url(ctx: click.Context, base_url: str | None) -> str:
+-    if base_url:
+-        return base_url.rstrip("/")
+-    host = (ctx.obj or {}).get("host", "127.0.0.1")
+-    port = (ctx.obj or {}).get("port", 8088)
+-    return f"http://{host}:{port}"
++    return resolve_base_url(ctx, base_url)
+ 
+ 
+ def _add_command(
+diff --git a/src/qwenpaw/cli/cron_cmd.py b/src/qwenpaw/cli/cron_cmd.py
+index ed979fa9..596b7a29 100644
+--- a/src/qwenpaw/cli/cron_cmd.py
++++ b/src/qwenpaw/cli/cron_cmd.py
+@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
+ 
+ import click
+ 
+-from .http import client, print_json
++from .http import client, print_json, resolve_base_url
+ from ..app.channels.schema import DEFAULT_CHANNEL
+ 
+ 
+@@ -18,11 +18,7 @@ def _base_url(ctx: click.Context, base_url: Optional[str]) -> str:
+     2) global --host/--port
+         (already resolved in main.py, may come from config.json)
+     """
+-    if base_url:
+-        return base_url.rstrip("/")
+-    host = (ctx.obj or {}).get("host", "127.0.0.1")
+-    port = (ctx.obj or {}).get("port", 8088)
+-    return f"http://{host}:{port}"
++    return resolve_base_url(ctx, base_url)
+ 
+ 
+ @click.group("cron")
+diff --git a/src/qwenpaw/cli/doctor_checks.py b/src/qwenpaw/cli/doctor_checks.py
+index 1821dbfa..f5e6c4cd 100644
+--- a/src/qwenpaw/cli/doctor_checks.py
++++ b/src/qwenpaw/cli/doctor_checks.py
+@@ -18,6 +18,7 @@ from pathlib import Path
+ from typing import Any
+ from urllib.parse import urlparse
+ 
++from ..app.base_path import normalize_base_path
+ from ..utils.io_utils import run_sync_io
+ from ..__version__ import __version__
+ from ..agents.skill_system import (
+@@ -1298,7 +1299,8 @@ def api_target_mismatch_note(cfg: Config, cli_base: str) -> str | None:
+         return None
+     eff_host = host or "127.0.0.1"
+     eff_port = 8088 if port is None else port
+-    expected = f"http://{eff_host}:{eff_port}".rstrip("/")
++    base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++    expected = f"http://{eff_host}:{eff_port}{base_path}".rstrip("/")
+     got = cli_base.rstrip("/")
+     if got == expected:
+         return None
+diff --git a/src/qwenpaw/cli/plugin_commands.py b/src/qwenpaw/cli/plugin_commands.py
+index 8d33cace..334ced67 100644
+--- a/src/qwenpaw/cli/plugin_commands.py
++++ b/src/qwenpaw/cli/plugin_commands.py
+@@ -17,6 +17,7 @@ from typing import Optional
+ import click
+ import httpx
+ 
++from ..app.base_path import normalize_base_path
+ from ..config import utils as config_utils
+ from ..utils.runtime_api import api_client, read_runtime_api
+ 
+@@ -95,7 +96,8 @@ def _get_api_base() -> Optional[str]:
+     if api_info is None:
+         return None
+     host, port = api_info
+-    return f"http://{host}:{port}/api"
++    base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++    return f"http://{host}:{port}{base_path}/api"
+ 
+ 
+ def _api_install_plugin(source: str, force: bool = False) -> bool:
+diff --git a/src/qwenpaw/cli/process_utils.py b/src/qwenpaw/cli/process_utils.py
+index d6f1f731..901fc2e4 100644
+--- a/src/qwenpaw/cli/process_utils.py
++++ b/src/qwenpaw/cli/process_utils.py
+@@ -4,11 +4,14 @@ from __future__ import annotations
+ import csv
+ import io
+ import json
++import os
+ import re
+ import subprocess
+ import sys
+ from typing import Optional
+ 
++from ..app.base_path import normalize_base_path
++
+ 
+ _PORT_ARG_PATTERN = re.compile(r"(?:^|\s)--port(?:=|\s+)(\d+)(?=\s|$)")
+ 
+@@ -206,7 +209,8 @@ def _base_url(host: str, port: int) -> str:
+     normalized_host = host.strip()
+     if ":" in normalized_host and not normalized_host.startswith("["):
+         normalized_host = f"[{normalized_host}]"
+-    return f"http://{normalized_host}:{port}"
++    base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++    return f"http://{normalized_host}:{port}{base_path}"
+ 
+ 
+ def _candidate_hosts(host: str | None) -> list[str]:
+diff --git a/src/qwenpaw/utils/startup_display.py b/src/qwenpaw/utils/startup_display.py
+index 98f5b70d..dad01f1f 100644
+--- a/src/qwenpaw/utils/startup_display.py
++++ b/src/qwenpaw/utils/startup_display.py
+@@ -1,6 +1,7 @@
+ # -*- coding: utf-8 -*-
+ """Fancy startup display utilities using rich."""
+ import logging
++import os
+ from typing import Optional, Tuple, cast
+ 
+ from rich import box
+@@ -18,6 +19,8 @@ from rich.progress import (
+ )
+ from rich.tree import Tree
+ 
++from ..app.base_path import normalize_base_path
++
+ 
+ def _safe_print(console: Console, *args, **kwargs) -> None:
+     """Call ``console.print`` with an OSError fallback for legacy Windows.
+@@ -259,7 +262,8 @@ def _build_startup_panel(
+     )
+     if api_info:
+         host, port = api_info
+-        url = f"http://{host}:{port}"
++        base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
++        url = f"http://{host}:{port}{base_path}"
+         tree.add(
+             f"[dim]Address:[/dim] [blue underline]{url}[/blue underline]",
+         )

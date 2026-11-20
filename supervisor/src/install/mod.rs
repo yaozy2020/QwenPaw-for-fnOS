@@ -1,5 +1,6 @@
 pub(crate) mod base_path_patch;
 mod channel;
+mod data_backup;
 mod io;
 mod pip;
 #[allow(dead_code)]
@@ -81,11 +82,12 @@ const SHUTDOWN_RECOVERY_LATCH: &str = "监督者正在关闭";
 
 #[derive(Clone)]
 pub struct InstallState {
+    preinstall: Option<(std::path::PathBuf, bool)>,
     inner: Arc<Mutex<Inner>>,
     settled: Arc<std::sync::Condvar>,
     on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
     on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
-    on_stop: Arc<dyn Fn() + Send + Sync>,
+    on_stop: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     on_restore: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     on_initialize: Arc<InstallInitializer>,
     spawner: Arc<dyn PipSpawner>,
@@ -105,7 +107,7 @@ impl InstallState {
     pub fn with_stop(
         on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
         on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
-        on_stop: Arc<dyn Fn() + Send + Sync>,
+        on_stop: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     ) -> Self {
         Self::with_lifecycle(on_change, on_success, on_stop, Arc::new(|| Ok(0)))
     }
@@ -113,7 +115,7 @@ impl InstallState {
     pub fn with_lifecycle(
         on_change: Arc<dyn Fn(InstallSnapshot) + Send + Sync>,
         on_start: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
-        on_stop: Arc<dyn Fn() + Send + Sync>,
+        on_stop: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
         on_restore: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     ) -> Self {
         let mut me = Self::with_spawner(Arc::new(RealSpawner), on_change, on_start);
@@ -128,6 +130,7 @@ impl InstallState {
         on_success: Arc<dyn Fn() -> Result<i32, String> + Send + Sync>,
     ) -> Self {
         Self {
+            preinstall: None,
             inner: Arc::new(Mutex::new(Inner {
                 phase: Phase::Idle,
                 fetched: 0,
@@ -148,7 +151,7 @@ impl InstallState {
             settled: Arc::new(std::sync::Condvar::new()),
             on_change,
             on_success,
-            on_stop: Arc::new(|| {}),
+            on_stop: Arc::new(|| Ok(())),
             on_restore: Arc::new(|| Ok(0)),
             on_initialize: Arc::new(|_, _| Ok(())),
             spawner,
@@ -303,7 +306,7 @@ impl InstallState {
 
     fn stop_kernel(&self) -> Result<(), String> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.on_stop)()))
-            .map_err(|_| "停止内核回调异常".into())
+            .map_err(|_| "停止内核回调异常".to_owned())?
     }
 
     fn finish_install(
@@ -363,7 +366,13 @@ impl InstallState {
                     .as_ref()
                     .map(|tx| tx.record.had_active)
                     .unwrap_or_else(|| active.join("bin/python3").exists());
-                if !self.cancelled() && self.recovery_error().is_none() && had_active {
+                let restore_service = transaction.is_some()
+                    || self.preinstall.as_ref().is_none_or(|(_, running)| *running);
+                if !self.cancelled()
+                    && self.recovery_error().is_none()
+                    && had_active
+                    && restore_service
+                {
                     restored_service = true;
                     let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         (self.on_restore)()
@@ -406,6 +415,11 @@ impl InstallState {
     /// `pin_path` 是版本钉;成功(且元数据校验通过)后原子写入实际安装版本。
     pub fn with_initializer(mut self, initializer: Arc<InstallInitializer>) -> Self {
         self.on_initialize = initializer;
+        self
+    }
+
+    pub fn with_preinstall_backup(mut self, data: &Path, was_running: bool) -> Self {
+        self.preinstall = Some((data.to_owned(), was_running));
         self
     }
 
@@ -475,6 +489,13 @@ impl InstallState {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                 || -> Result<String, String> {
                     this.check_cancelled()?;
+                    if let Some((data, _)) = &this.preinstall {
+                        this.set(|g| g.message = "正在备份并校验已有数据，尚未开始安装".into());
+                        data_backup::create(&this, data, &pid_file)
+                            .map_err(|e| format!("安装前备份未完成，已停止安装：{e}"))?;
+                        this.check_cancelled()?;
+                        this.set(|g| g.message = "备份预检完成，准备独立安装环境".into());
+                    }
                     let target_hint = match &channel {
                         InstallChannel::Exact(v) => v.as_str(),
                         _ => "",
@@ -659,7 +680,7 @@ printf '2.0.0\n'
                 start_count.fetch_add(1, Ordering::SeqCst);
                 Ok(1)
             }),
-            Arc::new(|| {}),
+            Arc::new(|| Ok(())),
             Arc::new(|| Ok(0)),
         )
         .with_initializer(Arc::new(move |_, _| {

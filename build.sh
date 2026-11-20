@@ -84,8 +84,8 @@ fi
 SUP_SHA256=$(sha256sum "$SUP_BIN_SRC" | awk '{print $1}')
 echo "  监督者 SHA256: ${SUP_SHA256}"
 
-# [2a/4] 编译控制台(esbuild:web/src → 单文件 dist/index.html,app/www 运行时契约不变)
-echo "[2a/4] 编译控制台 (esbuild) ..."
+# [2a/4] 编译控制台(vite:web/src → 单文件 dist/index.html,app/www 运行时契约不变)
+echo "[2a/4] 编译控制台 (vite) ..."
 NODE_BIN="$(command -v node 2>/dev/null || true)"
 if [ -z "$NODE_BIN" ] && [ -x /var/apps/nodejs_v24/target/bin/node ]; then
   NODE_BIN=/var/apps/nodejs_v24/target/bin/node
@@ -94,8 +94,8 @@ if [ -z "$NODE_BIN" ]; then
   echo -e "${RED}ERROR: 未找到 node,控制台编译需要${NC}"
   exit 1
 fi
-if [ ! -x "$PROJ_DIR/web/node_modules/.bin/esbuild" ]; then
-  echo "  esbuild 未安装,执行 npm ci (npmmirror) ..."
+if [ ! -x "$PROJ_DIR/web/node_modules/.bin/vite" ]; then
+  echo "  vite 未安装,执行 npm ci (npmmirror) ..."
   (cd "$PROJ_DIR/web" && env PATH="$(dirname "$NODE_BIN"):$PATH" \
     npm ci --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -20) || {
     echo -e "${RED}ERROR: npm ci 失败${NC}"
@@ -183,7 +183,7 @@ elif command -v gzip >/dev/null 2>&1; then
 fi
 
 # 携带后端兼容补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite。
-PATCH_NAME="qwenpaw-2.3.0.post1-base-path"
+PATCH_NAME="$(python3 "$PROJ_DIR/scripts/shipping_patch.py")" || exit 1
 if [ ! -f "$PROJ_DIR/patches/$PATCH_NAME/manifest.json" ]; then
   echo -e "${RED}ERROR: base-path 后端补丁清单缺失: $PATCH_NAME${NC}"
   exit 1

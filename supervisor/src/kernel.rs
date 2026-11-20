@@ -145,6 +145,7 @@ pub struct KernelManager {
     port: AtomicU16,
     log_level: Mutex<String>,
     state: Mutex<State>,
+    version_probe: Mutex<()>,
     /// 进程生命周期操作的序列化锁。
     ///
     /// API 侧的运维互斥锁(tokio Mutex)只能串行化 HTTP 处理器之间的操作;
@@ -160,16 +161,52 @@ struct State {
     shutdown: bool,
     tracked: i32,
     tracked_identity: Option<procfs::ProcessIdentity>,
+    native_proxy_identity: Option<procfs::ProcessIdentity>,
     pending_stop: Vec<procfs::ProcessIdentity>,
     last_stop_clean: bool,
     stop_diagnostics: Vec<String>,
     started_wall: Option<SystemTime>,
     cache_pid: i32,
     cache_at: Option<Instant>,
-    cache_cpu: f64,
+    last_ticks: Option<(i32, u64, Instant, u64)>,
+    cache_cpu: Option<f64>,
     cache_rss_kb: i64,
+    display_probe_pending: bool,
+    version_generation: u64,
     version_cache: String,
     version_cache_at: Option<Instant>,
+}
+
+impl State {
+    fn sample(&mut self, now: Instant) -> bool {
+        let Some(id) = self.tracked_identity.filter(|id| id.pid == self.tracked) else {
+            return false;
+        };
+        let Some(ticks) = procfs::cpu_ticks(id) else {
+            return false;
+        };
+        let previous = self
+            .last_ticks
+            .filter(|(pid, start, _, _)| (*pid, *start) == (id.pid, id.starttime));
+        if previous.is_some_and(|(_, _, at, _)| now.duration_since(at) < Duration::from_millis(250))
+        {
+            return true;
+        }
+        self.cache_cpu = previous.and_then(|(_, _, at, old)| {
+            let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            let delta = ticks.checked_sub(old)? as f64;
+            (hz > 0).then(|| {
+                (100.0 * delta / hz as f64 / now.duration_since(at).as_secs_f64() / cores as f64)
+                    .clamp(0.0, 100.0)
+            })
+        });
+        self.cache_rss_kb = procfs::rss_kb(id.pid);
+        self.last_ticks = Some((id.pid, id.starttime, now, ticks));
+        true
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -178,7 +215,7 @@ pub struct KernelStatus {
     pub running: bool,
     pub adopted: bool,
     pub started_at: Option<SystemTime>,
-    pub cpu_percent: f64,
+    pub cpu_percent: Option<f64>,
     pub rss_kb: i64,
     pub port: u16,
 }
@@ -191,7 +228,24 @@ impl KernelManager {
             port: AtomicU16::new(port),
             state: Mutex::new(State::default()),
             lifecycle: Mutex::new(()),
+            version_probe: Mutex::new(()),
         }
+    }
+
+    pub fn entry_identity(&self) -> Option<procfs::ProcessIdentity> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tracked_identity
+    }
+
+    pub fn supports_native_proxy(&self) -> bool {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.native_proxy_identity.is_some() && s.native_proxy_identity == s.tracked_identity
+    }
+
+    pub fn entry_record(&self) -> std::path::PathBuf {
+        crate::entry_login::path(Path::new(&self.cfg.pid_file))
     }
 
     pub fn port(&self) -> u16 {
@@ -225,8 +279,9 @@ impl KernelManager {
     }
 
     fn kernel_version_with_timeout(&self, timeout: Duration) -> String {
+        let _probe = self.version_probe.lock().unwrap_or_else(|e| e.into_inner());
         let log_level = self.log_level();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state
             .version_cache_at
             .map(|at| at.elapsed() < Duration::from_secs(60))
@@ -234,6 +289,8 @@ impl KernelManager {
         {
             return state.version_cache.clone();
         }
+        let generation = state.version_generation;
+        drop(state);
         let bin = format!("{}/bin/python3", self.cfg.venv_dir);
         let runtime = crate::runtime::RuntimeAdapter::new(
             &self.cfg.venv_dir,
@@ -250,20 +307,59 @@ impl KernelManager {
                 }
                 _ => String::new(),
             };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if generation != state.version_generation {
+            return String::new();
+        }
         state.version_cache = version.clone();
         state.version_cache_at = Some(Instant::now());
         version
     }
 
-    pub fn invalidate_version(&self) {
+    pub fn display_version(
+        self: &std::sync::Arc<Self>,
+        updated: impl FnOnce() + Send + 'static,
+    ) -> String {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.version_cache.clear();
-        state.version_cache_at = None;
+        let current = state.version_cache.clone();
+        if !state.display_probe_pending
+            && !state
+                .version_cache_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            state.display_probe_pending = true;
+            let kernel = self.clone();
+            let previous = current.clone();
+            let generation = state.version_generation;
+            if std::thread::Builder::new()
+                .name("status-version".into())
+                .spawn(move || {
+                    let version = kernel.kernel_version();
+                    let mut state = kernel.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.display_probe_pending = false;
+                    let invalidated = generation != state.version_generation;
+                    drop(state);
+                    if invalidated || previous != version {
+                        updated();
+                    }
+                })
+                .is_err()
+            {
+                state.display_probe_pending = false;
+            }
+        }
+        current
     }
 
     pub fn installed(&self) -> bool {
         Path::new(&self.cfg.venv_dir).join("bin/python3").exists()
-            || !self.kernel_version().is_empty()
+    }
+
+    pub fn invalidate_version(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.version_generation = state.version_generation.wrapping_add(1);
+        state.version_cache.clear();
+        state.version_cache_at = None;
     }
 
     pub fn prevent_start(&self) {
@@ -278,6 +374,11 @@ impl KernelManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .last_stop_clean
+    }
+
+    pub fn stop_verified_sync(&self) -> Result<(), String> {
+        self.stop_sync();
+        self.stop_verification_error().map_or(Ok(()), Err)
     }
 
     pub fn stop_verification_error(&self) -> Option<String> {
@@ -382,6 +483,12 @@ impl KernelManager {
         if crate::install::base_path_patch::active(Path::new(&self.cfg.venv_dir)) {
             cmd.env("QWENPAW_BASE_PATH", "/app/qwenpaw/web");
         }
+        cmd.env("QWENPAW_FNOS_ENTRY_RECORD", self.entry_record());
+        cmd.env("QWENPAW_FNOS_ENTRY_PARENT", std::process::id().to_string());
+        let compatible = crate::entry_login::compatible(Path::new(&self.cfg.venv_dir));
+        if crate::entry_login::selected(&self.entry_record()) && !compatible {
+            return Err("当前内核不支持已迁移的入口鉴权，拒绝回退启动".into());
+        }
         cmd.stdout(std::process::Stdio::from(
             log.try_clone()
                 .map_err(|e| format!("clone kernel log: {e}"))?,
@@ -410,6 +517,7 @@ impl KernelManager {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             st.tracked = pid;
             st.tracked_identity = procfs::process_identity(pid).ok().flatten();
+            st.native_proxy_identity = st.tracked_identity.filter(|_| compatible);
             st.started_wall = procfs::started_wall(pid);
             st.cache_pid = pid;
             st.cache_at = Some(Instant::now());
@@ -836,6 +944,15 @@ impl KernelManager {
         }
     }
 
+    pub fn metrics_now(&self) -> (i32, Option<SystemTime>, Option<f64>, i64) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.sample(Instant::now()) {
+            (st.tracked, st.started_wall, st.cache_cpu, st.cache_rss_kb)
+        } else {
+            (0, None, None, 0)
+        }
+    }
+
     /// 内核状态:受管 pid 失效时 /proc 重新发现并收养(结果缓存 2s)。
     pub fn status_now(&self) -> KernelStatus {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -845,7 +962,8 @@ impl KernelManager {
             .map(|t| now.duration_since(t) < Duration::from_secs(2))
             .unwrap_or(false)
             && st.cache_pid != 0
-            && procfs::process_alive(st.cache_pid);
+            && st.cache_pid == st.tracked
+            && st.sample(now);
         let mut adopted = false;
         let pid;
         if !cache_valid {
@@ -877,7 +995,9 @@ impl KernelManager {
                     (0, None)
                 }
             };
-            if best != st.tracked {
+            if best != st.tracked
+                || identity.map(|id| id.starttime) != st.tracked_identity.map(|id| id.starttime)
+            {
                 adopted = best > 0;
                 st.tracked = best;
                 st.tracked_identity = identity;
@@ -907,28 +1027,11 @@ impl KernelManager {
         }
         let running = pid > 0 && procfs::process_alive(pid);
         let started_wall = if running { st.started_wall } else { None };
-        // F5:提前释放状态互斥锁,避免 300ms 的 CPU 采样 sleep 阻塞并发请求
-        drop(st);
-        let (cpu, rss) = if running {
-            let (u1, s1) = procfs::cpu_ticks(pid);
-            std::thread::sleep(Duration::from_millis(300));
-            let (u2, s2) = procfs::cpu_ticks(pid);
-            let ncpu = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1) as f64;
-            let cpu = ((u2.saturating_sub(u1) + s2.saturating_sub(s1)) as f64 / 100.0) / 0.3
-                * 100.0
-                / ncpu;
-            (cpu.clamp(0.0, 100.0 * ncpu), procfs::rss_kb(pid))
+        let (cpu, rss) = if running && st.sample(now) {
+            (st.cache_cpu, st.cache_rss_kb)
         } else {
-            (0.0, 0)
+            (None, 0)
         };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.cache_pid == pid && state.cache_at == Some(now) {
-            state.cache_cpu = cpu;
-            state.cache_rss_kb = rss;
-        }
-        drop(state);
         KernelStatus {
             pid,
             running,
@@ -966,7 +1069,16 @@ mod tests {
             let mut state = kernel.state.lock().unwrap();
             state.cache_pid = pid;
             state.cache_at = Some(Instant::now());
-            state.cache_cpu = 42.0;
+            state.tracked = pid;
+            let id = procfs::process_identity(pid).unwrap().unwrap();
+            state.tracked_identity = Some(id);
+            state.last_ticks = Some((
+                pid,
+                id.starttime,
+                Instant::now(),
+                procfs::cpu_ticks(id).unwrap(),
+            ));
+            state.cache_cpu = Some(42.0);
             state.cache_rss_kb = 1024;
         }
 
@@ -975,9 +1087,74 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_millis(200));
         assert_eq!(status.pid, pid);
-        assert_eq!(status.cpu_percent, 42.0);
+        assert_eq!(status.cpu_percent, Some(42.0));
         assert_eq!(status.rss_kb, 1024);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn display_readers_share_one_probe_and_discard_the_invalidated_environment() {
+        use crate::api::test_support::{install_python, TestDir};
+        use std::{fs, sync::mpsc, time::Duration};
+        let dir = TestDir::new("display-version-change");
+        let state = dir.state(crate::api::test_support::free_port());
+        assert!(!state.kernel.installed());
+        assert!(state.kernel.state.lock().unwrap().version_cache_at.is_none());
+        let python = install_python(&dir, &state, "");
+        fs::write(&python, "#!/bin/sh\nd=$(dirname \"$0\"); v=$(cat \"$d/version\"); echo call >> \"$d/calls\"; while [ ! -f \"$d/release\" ]; do sleep .02; done; echo \"$v\"\n").unwrap();
+        let bin = python.parent().unwrap();
+        fs::write(bin.join("version"), "old").unwrap();
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..10 {
+            let tx = tx.clone();
+            assert_eq!(
+                state.kernel.display_version(move || tx.send(()).unwrap()),
+                ""
+            );
+        }
+        let start = Instant::now();
+        while !bin.join("calls").exists() {
+            assert!(start.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        state.kernel.invalidate_version();
+        fs::write(bin.join("version"), "new").unwrap();
+        fs::write(bin.join("release"), "1").unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            state.kernel.display_version(move || tx.send(()).unwrap()),
+            ""
+        );
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            state
+                .kernel
+                .display_version(|| panic!("unexpected extra probe")),
+            "new"
+        );
+        assert_eq!(
+            fs::read_to_string(bin.join("calls")).unwrap(),
+            "call\ncall\n"
+        );
+    }
+
+    #[test]
+    fn first_cpu_sample_and_mismatched_process_identity_are_not_reported_as_zero_load() {
+        let pid = std::process::id() as i32;
+        let id = procfs::process_identity(pid).unwrap().unwrap();
+        let now = Instant::now();
+        let mut s = State {
+            tracked: pid,
+            tracked_identity: Some(id),
+            ..Default::default()
+        };
+        assert!(s.sample(now));
+        assert!(s.cache_cpu.is_none());
+        assert!(s.cache_rss_kb > 0);
+        assert!(s.sample(now + Duration::from_secs(1)));
+        assert!(s.cache_cpu.is_some_and(|v| (0.0..=100.0).contains(&v)));
+        s.tracked_identity.as_mut().unwrap().starttime += 1;
+        assert!(!s.sample(now + Duration::from_secs(2)));
     }
 
     #[test]

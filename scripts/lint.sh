@@ -111,7 +111,7 @@ if [ -f "$WEB_DIR/src/main.ts" ] && [ -f "$WEB_DIR/src/index.html" ]; then
         PATH="$(dirname "$NODE_BIN"):$PATH"
         export PATH
     fi
-    if [ -n "$NODE_BIN" ] && [ -x "$WEB_DIR/node_modules/.bin/esbuild" ]; then
+    if [ -n "$NODE_BIN" ] && [ -x "$WEB_DIR/node_modules/.bin/vite" ]; then
         if "$NODE_BIN" --test "$WEB_DIR"/test/*.test.mjs; then
             echo "  [  OK ] 前端安装任务归属回归通过"
         else
@@ -119,18 +119,18 @@ if [ -f "$WEB_DIR/src/main.ts" ] && [ -f "$WEB_DIR/src/index.html" ]; then
             fail=1
         fi
         if (cd "$WEB_DIR" && BUILD_ID=lint "$NODE_BIN" build.mjs >/dev/null 2>&1); then
-            echo "  [  OK ] esbuild 编译通过(单文件产物 dist/index.html)"
+            echo "  [  OK ] vite 编译通过(单文件产物 dist/index.html)"
         else
-            echo "  [FAIL] esbuild 编译失败:"
+            echo "  [FAIL] vite 编译失败:"
             (cd "$WEB_DIR" && BUILD_ID=lint "$NODE_BIN" build.mjs)
             fail=1
         fi
     else
         if [ "${STRICT_CI:-0}" = "1" ]; then
-            echo "  [FAIL] STRICT_CI 模式下不允许跳过 esbuild 前端编译门禁"
+            echo "  [FAIL] STRICT_CI 模式下不允许跳过 vite 前端编译门禁"
             fail=1
         else
-            echo "  [SKIP] esbuild 不可用(缺 node 或 web/node_modules,先 npm install)"
+            echo "  [SKIP] vite 不可用(缺 node 或 web/node_modules,先 npm install)"
         fi
     fi
 else

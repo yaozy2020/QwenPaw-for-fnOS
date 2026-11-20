@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { buildPanel } from "../build-panel.mjs";
 import { chromium, expect } from "@playwright/test";
+
+async function pickVersion(page, version) {
+  await page.locator('#targetVersion').click();
+  await page.locator(`#versionOptions [data-version="${version}"]`).click();
+}
 
 const prefix = "/app/qwenpaw/";
 const origin = "http://qwenpaw.test";
@@ -31,14 +35,7 @@ const browserTest = (name, fn) => browserUnavailable
 before(async () => {
   if (browserUnavailable) return;
   await mkdir(screenshotDirectory, { recursive: true });
-  const [template, css, bundled] = await Promise.all([
-    readFile(new URL("../src/index.html", import.meta.url), "utf8"),
-    readFile(new URL("../src/style.css", import.meta.url), "utf8"),
-    build({ entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))], bundle: true,
-      write: false, format: "iife", target: "es2020", jsx: "automatic", jsxImportSource: "preact" }),
-  ]);
-  html = template.replace("/*__INLINE_CSS__*/", () => css)
-    .replace("//__INLINE_JS__", () => bundled.outputFiles[0].text.replace(/<\/script>/gi, "<\\/script>"));
+  ({ html } = await buildPanel('dev', { testHooks: true }));
   browser = await chromium.launch({ executablePath: chromiumExecutable, headless: true, args: ["--no-sandbox"] });
 });
 
@@ -49,7 +46,7 @@ async function fixture(t, options = {}) {
     status: { success: true, installed: false, running: false, install: { running: false } },
     proxy: { success: true, port: 43126, public: false },
     proxyStatus: 200,
-    versions: { success: true, latest_stable: "2.0.0", versions: [
+    versions: { success: true, latest_stable: "2.0.0", recommended_version: "2.0.0", versions: [
       { version: "2.1.0b1", is_beta: true }, { version: "2.0.0", is_beta: false }, { version: "1.9.0", is_beta: false },
     ] },
     install: { success: true, upgrading: false, running: false, seq: 0, instance: "worker-a", phase: "idle" },
@@ -63,6 +60,7 @@ async function fixture(t, options = {}) {
   t.after(() => context.close());
   await context.addCookies([{ name: "qwenpaw_csrf", value: "test-token", url: origin }]);
   const page = await context.newPage();
+  page.setDefaultTimeout(6000);
   if (options.initScript) await page.addInitScript(options.initScript, options.initScriptArgs);
   await page.route("**/*", async route => {
     const req = route.request();
@@ -70,18 +68,27 @@ async function fixture(t, options = {}) {
     if (url.pathname === prefix) return route.fulfill({ contentType: "text/html", body: html });
     if (url.pathname === `${prefix}web/`) return route.fulfill({ contentType: "text/html", body: "<html><body>QwenPaw Web</body></html>" });
     if (url.pathname === `${prefix}web/api/workspace/project-directory/dirs`) {
+      if (req.method() === "GET") state.projectReads = (state.projectReads || 0) + 1;
+      if (req.method() !== "GET") (state.projectWrites ??= []).push(req.method());
       if (req.method() === "PUT") state.projectDirs = req.postDataJSON().project_dirs;
+      if (req.method() === "DELETE") state.projectDirs = [];
       return route.fulfill({ json: { project_dirs: state.projectDirs || [] } });
     }
     if (!url.pathname.startsWith(`${prefix}api/`)) return route.abort();
     const path = url.pathname.slice(`${prefix}api/`.length);
     state.requestPaths.push({ method: req.method(), path });
     if (req.method() === "POST") {
-      state.posts.push({ path, body: req.postDataJSON(), csrf: req.headers()["x-csrf-token"] });
+      state.posts.push({ path, body: path === 'kernel/admin-password' ? null : req.postDataJSON(), csrf: req.headers()["x-csrf-token"] });
       if (path === "kernel/install") {
         state.install = { success: true, upgrading: true, running: true, seq: 42, instance: "worker-a", phase: "installing" };
         return route.fulfill({ json: { success: true, seq: 42, instance: "worker-a" } });
       }
+      if (path === 'stop' && state.controlHeld) await state.controlHeld;
+      if (path === "kernel/admin-password") {
+        if (state.resetHeld) await state.resetHeld;
+        if (state.resetReply) return route.fulfill(state.resetReply);
+      }
+      if (path === "authorized-dirs/check") return route.fulfill({ json: { success: true, readable: true, writable: true } });
       if (path === "logs/clear") {
         if (state.clearStatus === 200) state.logs = [];
         return route.fulfill({ status: state.clearStatus, json: { success: state.clearStatus === 200, message: "删除失败" } });
@@ -126,6 +133,61 @@ async function openInstall(page) {
   await page.locator("#modalConfirmBtn").click();
   await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
 }
+
+browserTest('homepage has one labeled version picker without expanding a detail view', async t => {
+  const {page, state} = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix);
+  const select = page.locator('#targetVersion');
+  await expect(select).toHaveAttribute('aria-haspopup', 'listbox');
+  await expect(select).toBeVisible();
+  await expect(select).toBeDisabled();
+  assert.equal(state.requestPaths.filter(r => r.path === 'kernel/versions').length, 0);
+  await page.getByRole('button', {name: '检查更新', exact: true }).click();
+  await select.click();
+  const rows = page.getByRole('option');
+  await expect(rows.locator('.history-version')).toHaveText(['v2.1.0b1', 'v2.0.0', 'v1.9.0']);
+  await expect(rows.nth(0)).toContainText('测试版');
+  await expect(rows.nth(1)).toContainText('正式版');
+  await expect(rows.nth(1)).toContainText('fnOS 已验证');
+  await expect(rows.nth(1)).toContainText('当前安装');
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(select).toBeFocused();
+  await select.click();
+  await page.locator('#versionTitle').click();
+  await expect(select).toHaveAttribute('aria-expanded', 'false');
+  await pickVersion(page, '1.9.0');
+  await expect(select).toBeFocused();
+  assert.equal(state.posts.filter(r => r.path === 'kernel/install').length, 0);
+  await expect(page.locator('#downgradeWarnBar')).toBeVisible();
+  await expect(page).toHaveURL(/#overview$/);
+});
+
+browserTest('maintenance controls mount on first visit and keep the open recovery guide on return', async t => {
+  const { page } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator('#overviewPid')).toHaveText('421');
+  assert.equal(await page.locator('#btnChangeServicePort, #authorizedDirsList').count(), 0);
+  await page.locator('[data-section="authorization"]').click();
+  await expect(page.locator('#authorizedDirsList')).toContainText('尚未绑定项目目录');
+  assert.equal(await page.locator('#btnChangeServicePort').count(), 0);
+  const guide = page.locator('#authorization details');
+  await guide.locator('summary').click();
+  await page.locator('[data-section="configuration"]').click();
+  await expect(page.locator('#valPort')).toHaveText('18088');
+  await page.goBack();
+  await expect(page.locator('#authorization')).toBeVisible();
+  await expect(guide).toHaveJSProperty('open', true);
+});
+
+browserTest('checking install protection submits one protected job after confirmation', async t => {
+  const {page, state} = await fixture(t);
+  await page.goto(origin + prefix);
+  const backup = page.getByLabel('安装前备份已有数据');
+  await expect(backup).not.toBeChecked(); await backup.check();
+  await openInstall(page);
+  assert.deepEqual(state.posts.filter(p => p.path === 'kernel/install').map(p => p.body), [{version:'2.0.0',mirror:'',backup:true}]);
+});
 
 async function pollNow(page, state) {
   const before = state.statusPolls;
@@ -187,9 +249,60 @@ async function emitSnapshot(page, snapshot, index = 0) {
   }, { snapshot, index });
 }
 
+browserTest("panel: mobile overview reads no logs and opens full history on demand", async t => {
+  const { page, state } = await fixture(t, { viewport: { width: 390, height: 844 }, status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#overviewLogPreview")).toHaveCount(0);
+  assert.deepEqual(state.liveLogQueries, []);
+  await expect(page.locator("#logTerminal .log-chunk")).toHaveCount(0);
+  await page.locator("#mobileSectionNav [href='#logs']").click();
+  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
+  assert.deepEqual(state.liveLogQueries, [2000]);
+  await page.locator("#mobileSectionNav [href='#configuration']").click();
+  await page.evaluate(() => window.fetchLogs());
+  assert.deepEqual(state.liveLogQueries, [2000]);
+});
+
+browserTest("panel: missing EventSource keeps navigation and fallback status updates", async t => {
+  const { page, state } = await fixture(t, { viewport: { width: 390, height: 844 }, status: runningStatus, initScript: () => { delete window.EventSource; } });
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto(origin + prefix);
+  await expect(page.locator("html")).toHaveAttribute("data-mobile-section", "overview");
+  state.status = { ...runningStatus, running: false };
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.locator("#statusCardMount .status-text")).toHaveText("已停止");
+  assert.deepEqual(errors, []);
+});
+
+browserTest("panel: recovery stays visible and blocks new lifecycle actions until cleared", async t => {
+  const { page, state } = await fixture(t, { status: { ...runningStatus, running: false, install: { running: false, recovery_required: true, recovery_error: "无法核验进程身份" } } });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#statusCardMount .status-text")).toHaveText("需要恢复");
+  await expect(page.locator("#statusCardMount")).toContainText("无法核验进程身份");
+  await expect(page.locator("#btnStartService")).not.toBeVisible();
+  await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
+  state.status = { ...runningStatus, running: false };
+  await page.evaluate(() => window.fetchStatus());
+  await expect(page.locator("#btnStartService")).toBeVisible();
+  await page.getByRole('button', {name:'检查更新', exact: true }).click();
+  await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+});
+
+browserTest("panel: destructive confirmation defaults to cancel", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix + "#version");
+  await page.locator("#btnUninstallKernel").click();
+  await expect(page.locator("#modalTitle")).toHaveText("仅卸载 QwenPaw 内核");
+  await expect(page.locator("#modalCancelBtn")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#btnUninstallKernel")).toBeFocused();
+  assert.deepEqual(state.posts, []);
+});
+
 browserTest("revealed notices keep the icon beside the message", async t => {
   const { page } = await fixture(t, { viewport: desktop, versions: { success: false, message: "mirror down" } });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#version");
   for (const selector of ["#kernelInstallTip", "#versionSourceStatus"]) {
     await expect(page.locator(selector)).toBeVisible();
     await expect(page.locator(selector)).toHaveCSS("display", "flex");
@@ -203,12 +316,12 @@ browserTest("revealed notices keep the icon beside the message", async t => {
 
 browserTest("downgrade warning and kernel removal keep their layouts when revealed", async t => {
   const { page } = await fixture(t, { viewport: desktop, status: runningStatus });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#version");
   await expect(page.locator("#btnUninstallKernel")).toBeVisible();
   const uninstallDisplay = await page.locator("#btnUninstallKernel").evaluate(el => getComputedStyle(el).display);
   assert.equal(uninstallDisplay, await page.locator("#btnUpgradeAction").evaluate(el => getComputedStyle(el).display));
   assert.notEqual(uninstallDisplay, "block");
-  await expect(page.locator("#versionCardsContainer")).toContainText("2.0.0");
+  await expect(page.locator("#targetVersion")).toContainText("2.0.0");
   await expect(page.locator("#downgradeWarnBar")).toBeHidden();
   await page.evaluate(() => window.pickVersion("1.9.0"));
   await expect(page.locator("#btnUpgradeAction")).toHaveText("降级至 v1.9.0");
@@ -223,70 +336,177 @@ browserTest("empty version responses never create selectable ghost cards or pin 
     viewport: desktop,
     versions: { success: true, latest_stable: "", versions: [] },
   });
-  await page.goto(origin + prefix);
-  await expect(page.locator("#versionCardsContainer [role=button]")).toHaveCount(0);
+  await page.goto(origin + prefix + "#version");
+  await expect(page.locator("#targetVersion")).toBeDisabled();
+  await expect(page.getByRole("option")).toHaveCount(0);
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
   await page.evaluate(() => window.pickVersion(""));
-  state.versions = { success: true, latest_stable: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
+  state.versions = { success: true, latest_stable: "2.0.0", recommended_version: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
   await page.evaluate(() => window.checkOnlineVersions());
-  await expect(page.locator("#versionCardsContainer")).toContainText("2.0.0");
-  await expect(page.locator("#versionCardsContainer [aria-pressed=true]")).toHaveCount(1);
+  await expect(page.locator("#targetVersion")).toContainText("2.0.0");
+  await page.locator("#targetVersion").click();
+  await expect(page.getByRole("option", {selected:true})).toContainText("2.0.0");
   await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+});
+
+browserTest("without a listed recommendation both install actions require an explicit pick", async t => {
+  const { page, state } = await fixture(t, { viewport: desktop, versions: {
+    success: true, latest_stable: "9.0.0", recommended_version: "8.0.0", versions: [{ version: "9.0.0", is_beta: false }],
+  } });
+  await page.goto(origin + prefix + "#version");
+  await expect(page.locator("#versionSourceStatus")).toContainText("未列出 fnOS 推荐版本");
+  await expect(page.locator("#overviewInstallButton")).toBeDisabled();
+  await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
+  await pickVersion(page, "9.0.0");
+  await page.locator("#btnUpgradeAction").click();
+  await expect(page.locator("#customModal")).toContainText("未经当前 fnOS 外壳验证");
+  assert.equal(state.posts.filter(x => x.path === "kernel/install").length, 0);
 });
 
 browserTest("a version refresh without beta removes the stale beta card", async t => {
   const { page, state } = await fixture(t, { viewport: desktop });
-  await page.goto(origin + prefix);
-  await expect(page.locator("#versionCardsContainer")).toContainText("2.1.0b1");
-  state.versions = { success: true, latest_stable: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
+  await page.goto(origin + prefix + "#version");
+  await page.locator("#targetVersion").click();
+  await expect(page.getByRole("listbox")).toContainText("2.1.0b1");
+  state.versions = { success: true, latest_stable: "2.0.0", recommended_version: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
   await page.evaluate(() => window.checkOnlineVersions());
-  await expect(page.locator("#versionCardsContainer")).not.toContainText("2.1.0b1");
-  await expect(page.locator("#versionCardsContainer [role=button]")).toHaveCount(1);
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  await page.locator("#targetVersion").click();
+  await expect(page.getByRole("listbox")).not.toContainText("2.1.0b1");
+  await expect(page.getByRole("option")).toHaveCount(1);
 });
 
-browserTest("desktop dashboard spans the overview and pairs version with configuration", async t => {
+browserTest("an App user can return from Web without the host back gesture", async t => {
+  const { page } = await fixture(t, { userAgent: 'Mobile FNAppType/iOS', status: runningStatus });
+  await page.goto(origin + prefix + '#overview');
+  await page.locator('#btnWebConsole').click();
+  const back = page.getByRole('button', { name: '返回控制台', exact: true });
+  await expect(back).toBeVisible();
+  await back.click();
+  await expect(page.locator('#webEntryOverlay')).toBeHidden();
+  await expect(page.locator('#btnWebConsole')).toBeFocused();
+  assert.equal(new URL(page.url()).hash, '#overview');
+});
+
+browserTest("a failed refresh keeps the last version list visible without permitting a stale install", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix + '#version');
+  await expect(page.locator('#targetVersion')).toContainText('2.0.0');
+  state.versions = { success: false, message: '镜像未响应' };
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  await expect(page.locator('#versionSourceStatus')).toContainText('镜像未响应');
+  await expect(page.locator('#targetVersion')).toContainText('2.0.0');
+  await expect(page.locator('#btnUpgradeAction')).toBeDisabled();
+});
+
+browserTest("DSH overview keeps service and deployment cards together in four existing sections", async t => {
+  for (const width of [390, 1440]) {
+    const { page, state } = await fixture(t, { viewport: {width, height: 844}, status: runningStatus });
+    await page.goto(origin + prefix);
+    const nav = page.getByRole("navigation", {name: "控制台分区"});
+    await expect(nav.getByRole("link")).toHaveText(["概览", "配置", "授权与备份", "日志"]);
+    await expect(page.locator("#version")).toBeVisible();
+    const service = await box(page.locator("#overview"));
+    const version = await box(page.locator("#version"));
+    const rail = await box(nav);
+    if (width > 768) {
+      assert.ok(rail.x + rail.width <= service.x && Math.abs(service.y - version.y) <= 1);
+      assert.ok(version.x >= service.x + service.width);
+    } else {
+      assert.equal(rail.x, 0);
+      assert.equal(rail.width, width);
+      assert.equal(rail.y + rail.height, 844);
+      assert.ok(version.y >= service.y + service.height);
+      for (const link of await nav.getByRole("link").all()) {
+        const icon = await box(link.locator("svg"));
+        const label = await box(link.locator("span"));
+        assert.ok(icon.y + icon.height <= label.y);
+      }
+    }
+    assert.ok(!state.requestPaths.some(({path}) => path === "kernel/versions"));
+    await page.getByRole('button', {name:'检查更新', exact: true }).click();
+    await expect(nav.locator('[aria-current="page"]')).toHaveText("概览");
+    await expect(page.locator("#overview")).toBeVisible();
+    await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+    await page.goto(origin + prefix + "#plugins");
+    await expect(nav.locator('[aria-current="page"]')).toHaveText("概览");
+    await expect(page).toHaveURL(/#overview$/);
+  }
+});
+
+browserTest("overview keeps the picker visible when returning from other sections", async t => {
   const { page } = await fixture(t, { viewport: desktop, status: runningStatus });
   await page.goto(origin + prefix);
-  await expect(page.locator("#statusCardMount .status-text")).toHaveText("运行中");
-  const grid = await box(page.locator(".grid"));
-  const overview = await box(page.locator("#overview"));
-  const version = await box(page.locator("#version"));
-  const configuration = await box(page.locator("#configuration"));
-  assert.ok(Math.abs(overview.width - grid.width) <= 1, "overview spans both columns");
-  assert.ok(version.y >= overview.y + overview.height, "version starts below the overview");
-  assert.ok(Math.abs(version.y - configuration.y) <= 1, "version and configuration share a row");
-  assert.ok(Math.abs(version.height - configuration.height) <= 1, "paired cards end on the same line");
-  assert.ok(version.x + version.width <= configuration.x, "version precedes configuration like the section navigation");
-  const order = await page.evaluate(() => [...document.querySelectorAll("[data-mobile-panel]")].map(el => el.dataset.mobilePanel));
-  assert.deepEqual(order, ["overview", "overview", "configuration", "authorization", "logs"]);
+  await expect(page.locator('#btnUpgradeAction')).toBeVisible();
+  await page.locator('[data-section="logs"]').click();
+  await expect(page.locator('#targetVersion')).toBeHidden();
+  await page.goBack();
+  await expect(page.locator('#targetVersion')).toBeVisible();
 });
 
-browserTest("loaded version cards remove the loading placeholder", async t => {
-  const { page } = await fixture(t, { viewport: desktop });
-  await page.goto(origin + prefix);
-  await expect(page.locator("#versionCardsContainer [role=button]")).toHaveCount(2);
-  await expect(page.locator("#versionCardsContainer .log-empty")).toHaveCount(0);
+browserTest("keyboard browsing commits only after Enter and returns focus", async t => {
+  const { page } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix + '#version');
+  const select = page.locator('#targetVersion');
+  await expect(select).toContainText('2.0.0');
+  await select.press('Enter');
+  await page.keyboard.press('ArrowUp');
+  await expect(page.getByRole('option').first()).toBeFocused();
+  await expect(select).toContainText('2.0.0');
+  await page.keyboard.press('Enter');
+  await expect(select).toContainText('2.1.0b1');
+  await expect(select).toBeFocused();
+  await expect(page.locator('#btnUpgradeAction')).toContainText('2.1.0b1');
 });
 
-browserTest("desktop uses a complete single page without section navigation", async t => {
-  const { page } = await fixture(t, { viewport: desktop, status: runningStatus });
+browserTest("healthy overview defers all unrelated maintenance reads on desktop and mobile", async t => {
+  for (const width of [390, 1440]) {
+    const {page, state} = await fixture(t, {viewport: {width, height: 900}, status: runningStatus});
+    await page.goto(origin + prefix);
+    await expect(page.locator("#version #valVersion")).toHaveText("2.0.0");
+    await expect(page.locator("#mobileSectionNav")).toBeVisible();
+    assert.deepEqual(state.liveLogQueries, []);
+    await page.screenshot({path: join(screenshotDirectory, `overview-${width}.png`)});
+    assert.equal(state.projectReads || 0, 0);
+    assert.ok(!state.requestPaths.some(({path}) => ["kernel/versions", "mirror", "web-proxy/port"].includes(path)));
+    await page.locator('[data-section="authorization"]').click();
+    await expect(page.locator("#authorizedDirsList")).toContainText("尚未绑定项目目录");
+    assert.equal(state.projectReads, 1);
+    await page.screenshot({path: join(screenshotDirectory, `authorization-${width}.png`)});
+    await page.locator('[data-section="configuration"]').click();
+    await expect(page.locator("#valWebProxyPort")).toHaveText("43126");
+    assert.equal(state.requestPaths.filter(({path}) => path === "web-proxy/port").length, 1);
+    await page.screenshot({path: join(screenshotDirectory, `configuration-${width}.png`)});
+    await page.locator('[data-section="overview"]').click();
+    await page.getByRole('button', {name:'检查更新', exact: true }).click();
+    await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
+    await page.goBack(); await page.goForward();
+    await expect(page.locator("#version")).toBeVisible();
+    assert.equal(state.requestPaths.filter(({path}) => path === "kernel/versions").length, 1);
+  }
+});
+
+browserTest("overview attaches to an existing install without fetching versions or posting an install", async t => {
+  const {page, state} = await fixture(t, {
+    status: {success: true, installed: false, running: false, install: {running: true}},
+    install: {success: true, upgrading: true, seq: 7, instance: "other-device", phase: "installing"},
+  });
   await page.goto(origin + prefix);
-  assert.equal(await page.evaluate(() => scrollY), 0);
-  const headerBox = await box(page.locator("header"));
-  assert.ok(headerBox.y >= 0);
-  await expect(page.locator("#mobileSectionNav")).toBeHidden();
-  await expect(page.locator("#configuration")).toBeVisible();
-  await expect(page.locator("#authorization")).toBeVisible();
-  await expect(page.locator("#logs")).toBeVisible();
+  await expect(page.locator("#overviewInstaller")).toBeHidden();
+  await page.locator("#overviewRunningInstall").click();
+  await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
+  await expect.poll(() => state.logQueries).toContainEqual({seq: "7", instance: "other-device"});
+  assert.equal(state.posts.length, 0);
+  assert.ok(!state.requestPaths.some(({path}) => path === "kernel/versions"));
 });
 
 browserTest("mobile running overview presents a labelled conversation action and compact metrics", async t => {
   const { page } = await fixture(t, { viewport: { width: 360, height: 800 }, status: runningStatus });
   await page.goto(origin + prefix);
-  const entry = page.locator("#overviewWebConsole");
-  await expect(entry).toBeVisible();
-  await expect(entry).toHaveText("进入 Web 对话");
   const headerEntry = page.locator("#btnWebConsole");
+  const entry = page.getByRole("link", { name: "进入 Web 对话" });
+  await expect(entry).toHaveCount(1);
+  await expect(entry).toBeVisible();
   await expect(headerEntry.locator("#webConsoleText")).toHaveText("进入 Web 对话");
   await expect(headerEntry.locator("#webConsoleMobileText")).toHaveText("对话");
   await expect(headerEntry.locator("#webConsoleMobileText")).toBeVisible();
@@ -301,7 +521,7 @@ browserTest("mobile running overview presents a labelled conversation action and
   await expect(page.locator("#statusCardMount .stat")).toHaveCount(4);
   await expect(page.locator("#statusCardMount .stat-label")).toHaveText(["CPU 使用率", "内存占用", "进程 PID", "运行时间"]);
   await expect(page.locator(".overview-details")).toBeHidden();
-  await expect(page.locator(".overview-log-preview")).toBeHidden();
+  await expect(page.locator(".overview-log-preview")).toHaveCount(0);
   const stop = await box(page.locator("#btnStopService"));
   const restart = await box(page.locator("#btnRestartService"));
   assert.ok(Math.abs(stop.y - restart.y) <= 1, "stop and restart share the primary action row");
@@ -349,16 +569,39 @@ browserTest("install steps follow only the owned task and mark where it stopped"
   await expect(step("installing")).toHaveAttribute("data-status", "done");
 });
 
+browserTest('stop waits for confirmation from the service, prevents duplicate clicks and refreshes immediately', async t => {
+  let release;
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost,
+    controlHeld: new Promise(resolve => { release = resolve; }) });
+  await page.goto(origin + prefix);
+  const stop = page.locator('#btnStopService');
+  await stop.click();
+  await page.locator('#modalConfirmBtn').click();
+  try {
+    await expect(stop).toBeDisabled();
+    await expect(page.locator('#statusCheckedAt')).toContainText('正在停止服务');
+    await expect(page.locator('#statusCardMount .status-text')).toHaveText('运行中');
+    await stop.evaluate(el => el.click());
+    assert.deepEqual(state.posts.map(p => p.path), ['stop']);
+    state.status = { ...runningStatus, running: false, pid: '0', startAt: 0 };
+  } finally { release(); }
+  await expect(page.locator('#btnStartService')).toBeEnabled({ timeout: 1000 });
+  await expect(page.locator('#statusCardMount .status-text')).toHaveText('已停止', { timeout: 1000 });
+});
+
 browserTest("running uptime ticks locally without another status request", async t => {
   const { page, state } = await fixture(t, {
-    status: { ...runningStatus, startAt: Math.floor(Date.now() / 1000) - 65 },
+    status: { ...runningStatus, startAt: Math.floor(Date.now() / 1000) - 3665 },
+    initScript: installStatusEventHost,
   });
   await page.goto(origin + prefix);
   const uptime = page.locator("#statusUptime");
   await expect(uptime).toContainText("已运行");
-  const initial = await uptime.innerText();
+  const metric = page.locator('#statusCardMount .stat').filter({hasText:'运行时间'}).locator('.stat-value');
+  const initial = await metric.innerText();
   const requests = state.statusRequests;
-  await expect.poll(() => uptime.innerText(), { timeout: 3000 }).not.toBe(initial);
+  await expect.poll(() => metric.innerText(), { timeout: 3000 }).not.toBe(initial);
+  await expect(uptime).toContainText(await metric.innerText());
   assert.equal(state.statusRequests, requests, "local ticking must not add a network request");
 });
 
@@ -392,7 +635,7 @@ browserTest("mobile log terminal fills the page and preserves manual scrolling",
 browserTest("unchanged log windows preserve DOM nodes, selection and manual scroll without mutations", async t => {
   const logs = Array.from({ length: 160 }, (_, index) => index % 2 ? `日志 ${index + 1}` : { message: `日志 ${index + 1}` });
   const { page, state } = await fixture(t, { viewport: desktop, logs });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#logs");
   const terminal = page.locator("#logTerminal");
   await expect(terminal).toContainText("日志 160");
   await terminal.evaluate(element => {
@@ -407,7 +650,6 @@ browserTest("unchanged log windows preserve DOM nodes, selection and manual scro
     window.logMutations = [];
     window.logObserver = new MutationObserver(records => window.logMutations.push(...records.map(record => record.type)));
     window.logObserver.observe(element, { subtree: true, childList: true, characterData: true });
-    window.logObserver.observe(document.getElementById("overviewLogPreview"), { subtree: true, childList: true, characterData: true });
   });
   state.logs = structuredClone(logs.slice(-100));
   await page.evaluate(async () => { for (let index = 0; index < 3; index++) await window.fetchLogs(); });
@@ -436,7 +678,7 @@ browserTest("unchanged log windows preserve DOM nodes, selection and manual scro
 browserTest("log windows remain bounded and rotation replaces unrelated history", async t => {
   const logs = Array.from({ length: 2000 }, (_, index) => `行 ${index + 1}`);
   const { page, state } = await fixture(t, { viewport: desktop, logs });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#logs");
   const terminal = page.locator("#logTerminal");
   await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
   state.logs = [...logs.slice(-99), "行 2001"];
@@ -453,7 +695,7 @@ browserTest("log windows remain bounded and rotation replaces unrelated history"
 browserTest("offscreen log chunks skip rendering work without discarding history", async t => {
   const logs = Array.from({ length: 2000 }, (_, index) => `行 ${index + 1}`);
   const { page } = await fixture(t, { viewport: desktop, logs });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#logs");
   const terminal = page.locator("#logTerminal");
   await expect(terminal.locator(".log-chunk")).toHaveCount(40);
   await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
@@ -464,11 +706,12 @@ browserTest("offscreen log chunks skip rendering work without discarding history
   });
   assert.equal(rendering.contentVisibility, "auto");
   assert.match(rendering.intrinsicSize, /auto/);
+  await expect(terminal.locator('.log-chunk').last()).toHaveCSS('content-visibility', 'visible');
 });
 
 browserTest("log clear discards held pre-clear responses, preserves failed clears and fetches a fresh window", async t => {
   const { page, state } = await fixture(t, { viewport: desktop });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#logs");
   const terminal = page.locator("#logTerminal");
   await expect(terminal).toContainText("原始服务日志");
   state.clearStatus = 503;
@@ -493,7 +736,7 @@ browserTest("log clear discards held pre-clear responses, preserves failed clear
   state.logsHeld = null;
   await page.evaluate(() => window.pendingLogs);
   await expect(terminal).not.toContainText("清空前的慢响应");
-  await expect(page.locator("#overviewLogPreview")).toHaveText("暂无日志");
+  await expect(page.locator("#overviewLogPreview")).toHaveCount(0);
   state.logs = ["清空后的新日志"];
   await page.evaluate(() => window.fetchLogs());
   await expect(terminal).toHaveText("清空后的新日志");
@@ -502,7 +745,7 @@ browserTest("log clear discards held pre-clear responses, preserves failed clear
 
 browserTest("slow log polling coalesces ticks and foreground recovery without parallel reads", async t => {
   const { page, state } = await fixture(t, { viewport: desktop, initScript: installStatusEventHost });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#logs");
   await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
   let release;
   state.logsHeld = new Promise(resolve => { release = resolve; });
@@ -541,7 +784,7 @@ browserTest("log export downloads the complete visible history window", async t 
 
 browserTest("long logs scroll inside a bounded terminal that follows the newest line", async t => {
   const { page } = await fixture(t, { viewport: desktop, logs: Array.from({ length: 100 }, (_, index) => `日志 ${index + 1}`) });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#logs");
   const terminal = page.locator("#logTerminal");
   await expect(terminal).toContainText("日志 100");
   const metrics = await terminal.evaluate(el => ({ client: el.clientHeight, scroll: el.scrollHeight, top: el.scrollTop }));
@@ -555,12 +798,14 @@ browserTest("desktop secondary controls keep comfortable pointer targets", async
   const { page } = await fixture(t, { viewport: desktop });
   await page.goto(origin + prefix);
   for (const name of ["修改端口", "修改反代端口", "检查更新"]) {
+    await page.goto(origin + prefix + (name === "检查更新" ? "#version" : "#configuration"));
     const bounds = await box(page.getByRole("button", { name, exact: true }));
     assert.ok(bounds.height >= 28, `${name} height ${bounds.height}`);
   }
-  const archive = await box(page.locator(".history-versions-toggle"));
+  const archive = await box(page.locator("#targetVersion"));
   assert.ok(archive.height >= 28 && archive.width >= 64, `archive toggle ${archive.width}x${archive.height}`);
   for (const selector of ["#webProxyPublic", "#autoScrollCheck", "#autoRefreshCheck"]) {
+    await page.goto(origin + prefix + (selector === "#webProxyPublic" ? "#configuration" : "#logs"));
     const bounds = await box(page.locator(selector));
     assert.ok(bounds.width >= 16 && bounds.height >= 16, `${selector} ${bounds.width}x${bounds.height}`);
   }
@@ -575,6 +820,49 @@ browserTest("theme toggle names the current mode and the action it performs", as
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator("#themeText")).toHaveText("白天");
   await expect(toggle).toHaveAttribute("aria-label", "白天模式，切换到暗夜模式");
+});
+
+browserTest("theme: unavailable matchMedia does not prevent the dashboard mounting", async t => {
+  const { page } = await fixture(t, { status: runningStatus, initScript: () => { delete window.matchMedia; } });
+  await page.goto(origin + prefix);
+  await expect(page.locator('#statusBadge')).toContainText('运行中');
+  await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('#themeIconMoon')).toBeVisible();
+});
+
+browserTest("theme: a manual choice survives system changes when storage is blocked", async t => {
+  const { page } = await fixture(t, { initScript: () => {
+    Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('Blocked', 'SecurityError'); } });
+    window.systemThemeEvents = 0;
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => window.systemThemeEvents++);
+  } });
+  await page.emulateMedia({colorScheme:'light'});
+  await page.goto(origin + prefix);
+  await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('#themeText')).toHaveText('暗夜');
+  await page.emulateMedia({colorScheme:'dark'});
+  await page.waitForFunction(() => window.systemThemeEvents === 1);
+  await page.emulateMedia({colorScheme:'light'});
+  await page.waitForFunction(() => window.systemThemeEvents === 2);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('#themeToggleBtn')).toHaveAccessibleName('暗夜模式，切换到白天模式');
+});
+
+browserTest("theme: changing or clearing the preference in another tab updates the open panel", async t => {
+  const { page } = await fixture(t);
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto(origin + prefix);
+  const other = await page.context().newPage();
+  await other.route(origin + prefix, route => route.fulfill({ contentType: 'text/html', body: '<title>Settings</title>' }));
+  await other.goto(origin + prefix);
+  await other.evaluate(() => localStorage.setItem('qwenpaw_theme_v2', 'dark'));
+  await expect(page.locator('#themeIconMoon')).toBeVisible();
+  await other.evaluate(() => localStorage.removeItem('qwenpaw_theme_v2'));
+  await expect(page.locator('#themeIconSun')).toBeVisible();
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('#themeIconMoon')).toBeVisible();
+  assert.equal(await page.evaluate(() => localStorage.getItem('qwenpaw_theme_v2')), null);
 });
 
 browserTest("about dialog exposes troubleshooting and official links with native focus handling", async t => {
@@ -613,7 +901,7 @@ browserTest("mobile header keeps visible actions within a compact, non-overlappi
   await expect(page.locator("#themeToggleBtn")).toHaveAttribute("aria-label", /.+/);
   await expect(page.locator("#aboutButton")).toHaveAttribute("aria-label", "关于与常见问题");
   await page.locator('#mobileSectionNav a[data-section="overview"]').click();
-  await openInstall(page);
+  await page.locator('#installRunningTip').click();
   await page.locator("#btnUpMinimize").click();
   await expect(page.locator("#taskCenterButton")).toBeVisible();
   const header = await box(page.locator("header"));
@@ -663,10 +951,7 @@ for (const width of [360, 375, 390, 414]) {
     await expect(page.locator("#webConsoleMobileText")).toBeVisible();
     await expect(page.locator("#webConsoleMobileText")).toHaveText("对话");
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    assert.equal(
-      await page.locator(".brand-info h1").evaluate(element => getComputedStyle(element, "::before").content),
-      width <= 400 ? '"QwenPaw"' : "none",
-    );
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("概览");
   });
 }
 
@@ -788,9 +1073,6 @@ browserTest("brand title and header navigation remain readable at 200 percent te
       const size = Number.parseFloat(getComputedStyle(element).fontSize);
       if (Number.isFinite(size) && size > 0) element.style.setProperty("font-size", `${size * 2}px`, "important");
     }
-    const scale = document.createElement("style");
-    scale.textContent = ".brand-info h1::before { font-size: 32px !important; }";
-    document.head.append(scale);
   });
 
   const title = await box(page.locator(".brand-info h1"));
@@ -799,9 +1081,9 @@ browserTest("brand title and header navigation remain readable at 200 percent te
     scrollWidth: element.scrollWidth,
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,
-    generatedTitle: getComputedStyle(element, "::before").content,
+    fontSize: parseFloat(getComputedStyle(element).fontSize),
   }));
-  assert.equal(titleMetrics.generatedTitle, '"QwenPaw"');
+  assert.ok(titleMetrics.fontSize >= 32, "the actual section title scales with user text size");
   assert.ok(titleMetrics.scrollWidth <= titleMetrics.clientWidth, `brand title clips horizontally (${titleMetrics.scrollWidth}px > ${titleMetrics.clientWidth}px)`);
   assert.ok(titleMetrics.scrollHeight <= titleMetrics.clientHeight, `brand title clips vertically (${titleMetrics.scrollHeight}px > ${titleMetrics.clientHeight}px)`);
   const selectors = ["#themeToggleBtn", "#aboutButton", "#btnWebConsole"];
@@ -835,9 +1117,9 @@ browserTest("uninstalled overview provides the first-run guide and homepage inst
   await expect(page.locator("#overviewAuth")).toHaveText("无法确认");
   await expect(page.locator("#overviewGuide")).toBeVisible();
   await expect(page.locator("#overviewGuide li")).toHaveCount(3);
-  await expect(page.locator("#overviewLogPreview")).toContainText("原始服务日志");
+  await expect(page.locator("#overviewLogPreview")).toHaveCount(0);
   await expect(page.locator("#overviewInstaller")).toBeVisible();
-  await expect(page.locator("#overviewInstallVersion")).toHaveText("v2.0.0");
+  await expect(page.locator("#overviewInstallVersion")).toHaveText("v2.0.0 · fnOS 已验证");
   await expect(page.locator("#releaseNotesDialog")).toHaveCount(0);
   await page.locator("#overviewInstallButton").click();
   await page.locator("#modalConfirmBtn").click();
@@ -852,7 +1134,7 @@ browserTest("running overview provides direct console access and hides installat
     version: "2.0.0", authStatus: "protected", install: { running: false },
   } });
   await page.goto(origin + prefix);
-  await expect(page.locator("#statusCardMount .status-description")).toContainText("服务已就绪");
+  await expect(page.locator("#statusCardMount .status-description")).toContainText("内核进程正在运行");
   await expect(page.locator("#btnWebConsole")).toHaveAttribute("href", "/app/qwenpaw/web/");
   await expect(page.locator("#webConsoleText")).toHaveText("进入 Web 对话");
   await expect(page.locator("#webConsoleMobileText")).toHaveText("对话");
@@ -865,7 +1147,7 @@ browserTest("running overview provides direct console access and hides installat
   await expect(page.locator("#overviewPort")).toHaveText("18088");
   await expect(page.locator("#overviewAuth")).toHaveText("已开启（需要密码）");
   await expect(page.locator("#overviewGuide")).toBeHidden();
-  await expect(page.locator("#overviewLogPreview")).toContainText("原始服务日志");
+  await expect(page.locator("#overviewLogPreview")).toHaveCount(0);
 });
 
 browserTest("PC browser opens QwenPaw Web in a new tab", async t => {
@@ -898,18 +1180,18 @@ browserTest("fnOS App opens QwenPaw Web in a full-screen overlay and closes it b
   await expect(page.locator("#overview")).toBeVisible();
 });
 
-browserTest("manual refresh exposes busy state until status and logs finish", async t => {
+browserTest("manual refresh exposes busy state until status finishes without loading logs", async t => {
   const { page, state } = await fixture(t);
   await page.goto(origin + prefix);
-  await expect(page.locator("#logTerminal")).toContainText("原始服务日志");
+  await expect(page.locator("#overviewInstaller")).toBeVisible();
   let release;
-  state.logsHeld = new Promise(resolve => { release = resolve; });
+  state.statusHeld = new Promise(resolve => { release = resolve; });
   t.after(() => release());
   await page.locator("#refreshDashboardBtn").click();
   await expect(page.locator("#refreshDashboardBtn")).toBeDisabled();
   await expect(page.locator("#refreshDashboardBtn")).toHaveAttribute("aria-busy", "true");
   release();
-  state.logsHeld = null;
+  assert.deepEqual(state.liveLogQueries, []);
   await expect(page.locator("#refreshDashboardBtn")).toBeEnabled();
   await expect(page.locator("#refreshDashboardBtn")).not.toHaveAttribute("aria-busy");
 });
@@ -958,6 +1240,7 @@ browserTest("mobile navigation exposes four pages and synchronizes hash and hist
   assert.equal(await page.evaluate(() => location.hash), "#overview");
   await expect(page.locator("#overview")).toBeVisible();
   await expect(page.locator("#version")).toBeVisible();
+  await expect(page.locator("#btnUpgradeAction")).toBeVisible();
   await expect(page.locator("#configuration")).toBeHidden();
   await expect(page.locator("#authorization")).toBeHidden();
   await expect(page.locator("#logs")).toBeHidden();
@@ -1001,10 +1284,10 @@ for (const width of [360, 390, 768, 1440]) {
         assert.ok(size && size.width >= 40 && size.height >= 44);
       }
     } else {
-      await expect(nav).toBeHidden();
-      await expect(page.locator("body")).toHaveCSS("display", "block");
-      for (const section of ["overview", "configuration", "authorization", "logs"]) {
-        await expect(page.locator(`#${section}`)).toBeVisible();
+      await expect(nav).toBeVisible();
+      await expect(nav).toHaveCSS("position", "sticky");
+      for (const section of ["configuration", "authorization", "logs"]) {
+        await expect(page.locator(`#${section}`)).toBeHidden();
       }
     }
   });
@@ -1015,7 +1298,7 @@ browserTest("mobile configuration is grouped as its own section", async t => {
   await page.goto(origin + prefix);
   await page.locator('#mobileSectionNav [data-section="configuration"]').click();
   await expect(page.locator("#configuration")).toBeVisible();
-  for (const selector of ["#valPort", "#valWebProxyPort", "#webProxyPublic", "#valAuthStatus", '[onclick="resetAuth()"]']) {
+  for (const selector of ["#valPort", "#valWebProxyPort", "#webProxyPublic", "#valAuthStatus", "#resetAuthBtn"]) {
     await expect(page.locator(selector)).toBeVisible();
     assert.equal(await page.locator(`#configuration ${selector}`).count(), 1);
   }
@@ -1083,10 +1366,12 @@ browserTest("console reconstruction displays the directory and opens it in the n
     },
     initScriptArgs: { state, search },
   });
-  await page.goto(origin + prefix + "#authorization");
-  await expect(page.locator("#authorizedDirsList")).toContainText("/vol1/work");
+  await page.goto(origin + prefix);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("qwenpaw.auth-result.v1"))).toBeNull();
   assert.deepEqual(fixtureState.projectDirs, [{ path: "/vol1/work" }]);
-  assert.equal(await page.evaluate(() => localStorage.getItem("qwenpaw.auth-result.v1")), null);
+  await expect(page.locator("#authorizedDirsList")).toHaveCount(0);
+  await page.locator('[data-section="authorization"]').click();
+  await expect(page.locator("#authorizedDirsList")).toContainText("/vol1/work");
   await page.getByRole("button", { name: "打开目录", exact: true }).click();
   const opened = await page.evaluate(() => window.__openedNativeDirs);
   assert.deepEqual(opened.map(call => ({ methodName: call.methodName, args: call.args })), [
@@ -1204,15 +1489,60 @@ browserTest("mobile directory open reports host appMessage when platform config 
   ]);
 });
 
-browserTest("legacy version deep links select the combined overview page", async t => {
+browserTest("legacy version deep links open deployment inside overview", async t => {
   const { page } = await fixture(t, { viewport: { width: 375, height: 812 } });
   await page.goto(origin + prefix + "#version");
   await expect(page.locator("#overview")).toBeVisible();
-  await expect(page.locator("#version")).toBeVisible();
+  await expect(page.locator("#btnUpgradeAction")).toBeVisible();
   await expect(page.locator("#configuration")).toBeHidden();
   await expect(page.locator("#authorization")).toBeHidden();
   await expect(page.locator('#mobileSectionNav [data-section="overview"]')).toHaveAttribute("aria-current", "page");
   assert.equal(await page.evaluate(() => location.hash), "#version");
+});
+
+browserTest('history failing after entering logs releases the subscription and shows the single-page fallback', async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(origin + prefix + '#logs');
+  await expect(page.locator('#logTerminal')).toContainText('原始服务日志');
+  await page.evaluate(() => {
+    history.replaceState = () => { throw new Error('blocked history'); };
+    location.hash = '#unknown';
+  });
+  await expect(page.locator('#overview')).toBeVisible();
+  await expect(page.locator('#logs')).toBeVisible();
+  await expect(page.locator('#btnChangeServicePort')).toBeVisible();
+  await expect(page.locator('#authorizedDirsList')).toBeVisible();
+  await expect(page.locator('#mobileSectionNav [aria-current]')).toHaveCount(0);
+  assert.equal(await page.evaluate(() => window.EventSource.instances.filter(s => !s.closed && s.url.includes('watch=logs')).length), 0);
+  assert.deepEqual(state.liveLogQueries, [2000]);
+  assert.deepEqual(errors, []);
+});
+
+browserTest('version and log history keep title, active link, focus and reads in sync', async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+  await page.goto(origin + prefix + '#version');
+  const active = page.locator('#mobileSectionNav a[aria-current="page"]');
+  await expect(active).toHaveText('概览');
+  await expect(page.locator('#sectionTitle')).toHaveText('概览');
+  assert.deepEqual(state.liveLogQueries, []);
+  await page.getByRole('link', {name:'日志', exact:true}).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#logs')).toBeFocused();
+  await expect(page.locator('#sectionTitle')).toHaveText('日志');
+  await expect(active).toHaveText('日志');
+  await expect(page.locator('#logTerminal')).toContainText('原始服务日志');
+  await page.goBack();
+  await expect(page.locator('#version')).toBeFocused();
+  await expect(active).toHaveText('概览');
+  await expect(page.locator('#sectionTitle')).toHaveText('概览');
+  assert.deepEqual(state.liveLogQueries, [2000]);
+  await page.goForward();
+  await expect(page.locator('#logs')).toBeFocused();
+  await expect(active).toHaveText('日志');
+  await expect.poll(() => state.liveLogQueries).toEqual([2000,100]);
+  assert.equal(state.requestPaths.filter(r => r.path === 'kernel/versions').length, 1);
 });
 
 browserTest("mobile section deep links and hash changes select the matching panel", async t => {
@@ -1234,14 +1564,16 @@ browserTest("section selection keeps desktop content available after resizing", 
   const { page } = await fixture(t, { viewport: { width: 375, height: 812 } });
   await page.goto(origin + prefix + "#version");
   await page.setViewportSize({ width: 1200, height: 800 });
-  await expect(page.locator("#mobileSectionNav")).toBeHidden();
-  for (const section of ["overview", "configuration", "authorization", "logs"]) {
-    await expect(page.locator(`#${section}`)).toBeVisible();
+  await expect(page.locator("#mobileSectionNav")).toBeVisible();
+  await expect(page.locator("#overview")).toBeVisible();
+  await expect(page.locator("#btnUpgradeAction")).toBeVisible();
+  for (const section of ["configuration", "authorization", "logs"]) {
+    await expect(page.locator(`#${section}`)).toBeHidden();
   }
   await page.setViewportSize({ width: 375, height: 812 });
   await expect(page.locator("#mobileSectionNav")).toBeVisible();
   await expect(page.locator("#overview")).toBeVisible();
-  await expect(page.locator("#version")).toBeVisible();
+  await expect(page.locator("#btnUpgradeAction")).toBeVisible();
   await expect(page.locator("#configuration")).toBeHidden();
   await expect(page.locator('#mobileSectionNav [data-section="overview"]')).toHaveAttribute("aria-current", "page");
 });
@@ -1268,7 +1600,7 @@ for (const [name, options] of [
   });
 }
 
-browserTest("mobile section switches do not fetch or restart an active install poll", async t => {
+browserTest("mobile section switches preserve the active install poll and never resubmit", async t => {
   const { page, state } = await fixture(t, {
     viewport: { width: 390, height: 844 },
     initScript: () => {
@@ -1306,8 +1638,9 @@ browserTest("mobile section switches do not fetch or restart an active install p
     };
   });
   assert.ok(result.activePoll);
-  assert.equal(result.fetches, 0);
-  assert.deepEqual(result.timers, []);
+  await expect(page.locator("#overview")).toBeVisible();
+  assert.deepEqual(result.timers.map(e => [e.action, e.delay]), [["set", 15000], ["clear", undefined]]);
+  assert.equal(result.timers[0].id, result.timers[1].id);
   assert.equal(result.historyEntries, 4);
   const polls = state.statusPolls;
   await expect.poll(() => state.statusPolls).toBeGreaterThan(polls);
@@ -1318,8 +1651,9 @@ browserTest("previously retired service ports pass validation and submit", async
   const { page, state } = await fixture(t, { viewport: desktop, status: runningStatus });
   await page.goto(origin + prefix);
   await expect(page.locator("#statusCardMount .status-text")).toHaveText("运行中");
+  await page.locator('[data-section="configuration"]').click();
   for (const port of [19090, 19091]) {
-    await page.evaluate(() => { void window.changeServicePort(); });
+    await page.locator("#btnChangeServicePort").click();
     await page.locator("#customModal.active #modalInput").fill(String(port));
     await page.locator("#customModal.active #modalConfirmBtn").click();
     await page.locator("#customModal.active #modalTitle").filter({ hasText: "修改服务端口确认" }).waitFor();
@@ -1343,11 +1677,12 @@ browserTest("unreachable status clears stale overview values until a fresh snaps
   for (const selector of ["#overviewPid", "#overviewVersion", "#overviewPort", "#overviewAuth"]) {
     await expect(page.locator(selector)).toHaveText("—");
   }
+  await page.locator('[data-section="configuration"]').click();
   await expect(page.locator("#valPort")).toHaveText("无法获取");
   await expect(page.locator("#valAdminStatus")).toHaveText("无法获取");
   await expect(page.locator("#statusCardMount .status-description")).toContainText("HTTP 503");
   await expect(page.locator("#btnChangeServicePort")).toBeDisabled();
-  await page.evaluate(() => window.changeServicePort());
+  await page.locator("#btnChangeServicePort").dispatchEvent("click");
   await expect(page.locator("#customModal")).not.toHaveClass(/active/);
   await expect(page.locator("#toast")).toContainText("服务状态尚未同步");
   assert.equal(state.posts.filter(post => post.path === "port").length, 0);
@@ -1365,12 +1700,12 @@ browserTest("unreachable status stays disabled across delayed version loads and 
   const versionsHeld = new Promise(resolve => { release = resolve; });
   const { page, state } = await fixture(t, { statusCode: 503, versionsHeld });
   t.after(() => release());
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#version");
   await expect(page.locator("#statusBadge")).toContainText("状态不可达");
   release();
-  await expect(page.locator("#versionCardsContainer")).toContainText("2.0.0");
+  await expect(page.locator("#targetVersion")).toContainText("2.0.0");
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
-  await page.locator("#versionCardsContainer .ver-card-item").first().click();
+  await pickVersion(page, "2.0.0");
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
   state.statusCode = 200;
   await page.evaluate(() => window.fetchStatus());
@@ -1385,11 +1720,11 @@ browserTest("unreachable status stays disabled across delayed version loads and 
 
 browserTest("unknown proxy scope cannot be silently sent as private when changing the port", async t => {
   const { page, state } = await fixture(t, { proxy: { port: 43126 }, proxyStatus: 200 });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#configuration");
   await expect(page.locator("#valWebProxyPort")).toHaveText("43126");
   await expect(page.locator("#webProxyPublic")).toBeDisabled();
   assert.equal(await page.locator("#webProxyPublic").evaluate(el => el.indeterminate), true);
-  await page.evaluate(() => window.changeWebProxyPort());
+  await page.getByRole("button", {name: "修改反代端口"}).click();
   await expect(page.locator("#customModal")).not.toHaveClass(/active/);
   assert.equal(state.posts.length, 0);
   state.proxy = { port: 43126, public: true };
@@ -1408,7 +1743,7 @@ browserTest("unknown proxy scope cannot be silently sent as private when changin
 
 browserTest("unknown proxy port disables scope changes instead of requesting automatic reassignment", async t => {
   const { page, state } = await fixture(t, { proxy: { success: true, port: 0, public: false } });
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#configuration");
   await expect(page.locator("#valWebProxyPort")).toHaveText("自动分配");
   await expect(page.locator("#webProxyPublic")).toBeDisabled();
   await expect(page.locator("#webProxyPublic")).toHaveJSProperty("indeterminate", true);
@@ -1455,19 +1790,11 @@ browserTest("version, archive, mirror and running-task controls work with keyboa
   const { page, state } = await fixture(t);
   state.status.install.running = true;
   state.install = { success: true, upgrading: true, running: true, seq: 42, instance: "worker-a", phase: "installing" };
-  await page.goto(origin + prefix);
-  const card = page.locator("#versionCardsContainer .ver-card-item").first();
-  await expect(card).toHaveAttribute("tabindex", "0");
-  await card.focus();
-  await page.keyboard.press("Enter");
-  await expect(card).toHaveAttribute("aria-pressed", "true");
-  const archive = page.locator(".history-versions-toggle");
-  await archive.focus();
-  await page.keyboard.press("Enter");
-  const historic = page.locator("#historyDropdown .history-item").first();
-  await expect(historic).toBeVisible();
-  await historic.focus();
-  await page.keyboard.press("Space");
+  await page.goto(origin + prefix + "#version");
+  const picker = page.locator('#targetVersion');
+  await expect(picker).toBeEnabled();
+  await picker.focus(); await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End'); await page.keyboard.press('Enter');
   await expect(page.locator("#btnUpgradeAction")).toContainText("1.9.0");
   await page.locator("#mirrorToggleBtn").click();
   const mirror = page.locator("#mirrorDropdown .history-item").first();
@@ -1521,7 +1848,32 @@ browserTest("terminal completion replaces the running fallback when no install l
   await expect(page.locator("#upTerminal")).toContainText("未获取到日志输出");
 });
 
-browserTest("terminal completion clears a stale running placeholder even after logs were rendered", async t => {
+browserTest("after a version change the same target is a reinstall, not the old list's upgrade", async t => {
+  const { page, state } = await fixture(t, {status: {...runningStatus}});
+  state.versions.versions[0].action = 'upgrade';
+  state.versions.versions[1].action = 'reinstall';
+  await page.goto(origin + prefix + '#version');
+  await pickVersion(page, '2.1.0b1');
+  await expect(page.locator('#btnUpgradeAction')).toHaveText('执行更新至 v2.1.0b1');
+  state.status = {...runningStatus, version: '2.1.0b1'};
+  await page.evaluate(() => window.fetchStatus());
+  await expect(page.locator('#btnUpgradeAction')).toHaveText('重新安装 v2.1.0b1');
+  await pickVersion(page, '2.0.0');
+  await expect(page.locator('#btnUpgradeAction')).toHaveText('降级至 v2.0.0');
+});
+
+browserTest("an owned terminal task updates the overview without waiting for SSE or closing the dialog", async t => {
+  const { page, state } = await fixture(t);
+  await page.goto(origin + prefix);
+  await openInstall(page);
+  state.status = { ...runningStatus };
+  state.install = { success: true, upgrading: false, seq: 42, instance: 'worker-a', phase: 'done' };
+  await expect(page.locator('#upTitle')).toContainText('顺利完成');
+  await expect(page.locator('#statusCardMount .status-text')).toHaveText('运行中', {timeout: 4000});
+  await expect(page.locator('#upgradeModal')).toHaveClass(/active/);
+});
+
+browserTest("terminal completion preserves received task output when the final log read is empty", async t => {
   const { page, state } = await fixture(t, { viewport: { width: 390, height: 844 } });
   await page.goto(origin + prefix);
   await page.locator('#mobileSectionNav a[data-section="overview"]').click();
@@ -1529,12 +1881,13 @@ browserTest("terminal completion clears a stale running placeholder even after l
   await page.locator("#btnUpMinimize").click();
   await page.locator("#taskCenterButton").click();
   await expect(page.locator("#upTerminal")).toContainText("本任务日志");
-  await page.locator("#upTerminal").evaluate(element => { element.innerText = "正在安装内核..."; });
+  // 此用例验证没有最终日志时的回退；非空的最新任务日志应优先显示。
+  state.installLogs = [];
   state.install = { success: true, upgrading: false, running: false, seq: 42, instance: "worker-a", phase: "done" };
   await pollNow(page, state);
   await expect(page.locator("#upTitle")).toContainText("顺利完成");
   await expect(page.locator("#upTerminal")).not.toContainText("正在安装内核");
-  await expect(page.locator("#upTerminal")).toContainText("安装任务已完成");
+  await expect(page.locator("#upTerminal")).toContainText("本任务日志");
 });
 
 browserTest("navigation initialization failure preserves working management controls", async t => {
@@ -1587,38 +1940,61 @@ browserTest("late status success and failure cannot overwrite a newer snapshot",
   state.statusCode = 503;
   state.statusHeld = new Promise(resolve => { releaseFailure = resolve; });
   let requests = state.statusRequests;
-  void page.evaluate(() => window.fetchStatus());
+  const staleFailure = page.evaluate(() => window.fetchStatus());
   await expect.poll(() => state.statusRequests).toBeGreaterThan(requests);
   state.statusCode = 200;
   state.status = { ...runningStatus, pid: 777 };
   await page.evaluate(() => window.fetchStatus());
   await expect(page.locator("#overviewPid")).toHaveText("777");
   releaseFailure();
-  await expect.poll(() => page.locator("#overviewPid").innerText()).toBe("777");
+  await staleFailure;
+  await expect(page.locator("#overviewPid")).toHaveText("777");
   await expect(page.locator("#statusBadge")).toContainText("运行中");
 
   let releaseSuccess;
   state.status = { ...runningStatus, running: false, pid: 111 };
   state.statusHeld = new Promise(resolve => { releaseSuccess = resolve; });
   requests = state.statusRequests;
-  void page.evaluate(() => window.fetchStatus());
+  const staleSuccess = page.evaluate(() => window.fetchStatus());
   await expect.poll(() => state.statusRequests).toBeGreaterThan(requests);
   state.status = { ...runningStatus, pid: 888 };
   await page.evaluate(() => window.fetchStatus());
   await expect(page.locator("#overviewPid")).toHaveText("888");
   releaseSuccess();
+  await staleSuccess;
   await expect(page.locator("#overviewPid")).toHaveText("888");
   await expect(page.locator("#statusBadge")).toContainText("运行中");
+});
+
+browserTest("only the visible live log view subscribes to file changes and fetches the new tail", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+  await page.goto(origin + prefix + '#logs');
+  await expect(page.locator('#logTerminal')).toContainText('原始服务日志');
+  assert.equal(await page.evaluate(() => window.EventSource.instances.at(-1).url), '/app/qwenpaw/api/events?watch=logs');
+  state.logs.push('新增服务日志');
+  await page.evaluate(() => window.EventSource.instances.at(-1).emit('log-change', ''));
+  await expect(page.locator('#logTerminal')).toContainText('新增服务日志');
+  await page.locator('#autoRefreshCheck').uncheck();
+  assert.equal(await page.evaluate(() => window.EventSource.instances.at(-1).url), '/app/qwenpaw/api/events');
+  const before = state.liveLogQueries.length;
+  await page.evaluate(() => window.EventSource.instances.find(s => s.url.endsWith('watch=logs')).emit('log-change', ''));
+  assert.equal(state.liveLogQueries.length, before);
 });
 
 browserTest("initial and later SSE snapshots update the dashboard without another status GET", async t => {
   const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
   await page.goto(origin + prefix);
   await expect(page.locator("#statusBadge")).toContainText("运行中");
-  assert.equal(await page.evaluate(() => window.EventSource.instances[0].url), "/app/qwenpaw/api/events");
+  assert.equal(await page.evaluate(() => window.EventSource.instances[0].url), "/app/qwenpaw/api/events?watch=metrics");
   assert.equal(state.statusRequests, 1, "keep the initial status GET");
   await emitSnapshot(page, { ...runningStatus, pid: "777" });
   await expect(page.locator("#overviewPid")).toHaveText("777");
+  const cpu = page.locator('#statusCardMount .stat-value').first();
+  const sample = { pid:777, startAt:runningStatus.startAt, cpu:17.3, memKB:2048 };
+  await page.evaluate(m => window.EventSource.instances[0].emit('metrics', JSON.stringify(m)), sample);
+  await expect(cpu).toHaveText('17.3%');
+  await page.evaluate(m => window.EventSource.instances[0].emit('metrics', JSON.stringify(m)), {...sample, startAt:1, cpu:99});
+  await expect(cpu).toHaveText('17.3%');
   const stopped = { ...runningStatus, running: false, pid: "0", startAt: 0, cpu: 0, memKB: 0 };
   await emitSnapshot(page, stopped);
   await expect(page.locator("#statusBadge")).toContainText("已停止", { timeout: 500 });
@@ -1723,7 +2099,7 @@ browserTest("SSE disconnect and foreground resume recover while closed-stream ca
 
 browserTest("install submits the version confirmed before an asynchronous selection change", async t => {
   const { page, state } = await fixture(t);
-  await page.goto(origin + prefix);
+  await page.goto(origin + prefix + "#version");
   await expect(page.locator("#btnUpgradeAction")).toBeEnabled();
   await page.locator("#btnUpgradeAction").click();
   await expect(page.locator("#modalMessage")).toContainText("2.0.0");
@@ -1745,8 +2121,145 @@ browserTest("polling uses low-frequency fallbacks and never requests release not
   } });
   await page.goto(origin + prefix);
   const delays = await page.evaluate(() => window.pollingDelays);
-  assert.ok(delays.includes(15000), `missing 15-second log refresh: ${delays}`);
+  assert.ok(!delays.includes(15000), "overview must not poll logs");
+  await page.locator("#mobileSectionNav [href='#logs']").click();
+  await expect.poll(() => page.evaluate(() => window.pollingDelays.includes(15000))).toBe(true);
   assert.ok(delays.includes(30000), `missing 30-second status fallback: ${delays}`);
   assert.ok(!delays.includes(3500) && !delays.includes(5000), `legacy high-frequency polling remains: ${delays}`);
   assert.equal(state.requestPaths.some(request => request.path === "kernel/release-notes"), false);
+});
+
+browserTest("settings actions: two activations produce one confirmed reset and cancellation writes nothing", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, proxy: { success: true, port: 43126, public: false, entryLogin: true } });
+  await page.goto(origin + prefix + "#configuration");
+  const reset = page.getByRole("button", { name: "重置 QwenPaw 管理员密码" });
+  await reset.focus();
+  await reset.evaluate(el => { el.click(); el.click(); });
+  await page.getByLabel('新密码', {exact:true}).fill('fixture-one');
+  await page.keyboard.press("Escape");
+  await expect(reset).toBeFocused();
+  assert.deepEqual(state.posts, []);
+  let release;
+  state.resetHeld = new Promise(resolve => { release = resolve; });
+  try {
+    await reset.evaluate(el => { el.click(); el.click(); });
+    const first = page.getByLabel('新密码', {exact:true});
+    await expect(first).toHaveValue('');
+    await first.fill('fixture-two');
+    const repeat = page.getByLabel('确认新密码');
+    await repeat.fill('mismatch');
+    await page.getByRole('button', {name:'保存新密码'}).click();
+    assert.equal(await repeat.evaluate(el => el.validity.customError), true);
+    assert.deepEqual(state.posts, []);
+    await repeat.fill('fixture-two');
+    await page.getByRole('button', {name:'保存新密码'}).dblclick();
+    await expect.poll(() => state.posts.length).toBe(1);
+    await expect(reset).toBeDisabled();
+    await reset.dispatchEvent("click");
+    await expect(page.locator("#customModal")).not.toHaveClass(/active/);
+  } finally { release(); }
+  await expect(reset).toBeEnabled();
+  await expect(page.locator("#toast")).toContainText("密码已重置");
+  assert.deepEqual(state.posts.map(p => p.path), ["kernel/admin-password"]);
+});
+
+browserTest("password recovery never confirms an HTTP refusal or a missing acknowledgement", async t => {
+  const { page, state } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix + '#configuration');
+  for (const [status, success] of [[403, true], [503, false], [200, undefined]]) {
+    state.resetReply = { status, json: {success} };
+    await page.locator('#resetAuthBtn').click();
+    const password = page.getByLabel('新密码', {exact: true});
+    await expect(password).toHaveValue('');
+    await password.fill('fixture');
+    await page.getByLabel('确认新密码').fill('fixture');
+    await page.getByRole('button', {name:'保存新密码'}).click();
+    await expect(page.locator('#toast')).toContainText('密码重置未确认');
+    await expect(page.locator('#resetAuthBtn')).toBeEnabled();
+  }
+  assert.deepEqual(state.posts.map(p => p.path), Array(3).fill('kernel/admin-password'));
+});
+
+browserTest("settings actions: reauthorization locks row actions and checks once without rewriting directories", async t => {
+  const path = "/vol1/work";
+  const { page, state } = await fixture(t, { status: runningStatus, projectDirs: [{path}], initScript: () => {
+    window.authUrls = [];
+    window.open = () => ({closed: false, close() {}, location: {replace: url => window.authUrls.push(url)}});
+  } });
+  await page.goto(origin + prefix + "#authorization");
+  const reauth = page.getByRole("button", {name: "重新授权"});
+  await reauth.evaluate(el => { el.click(); el.click(); });
+  await expect(page.getByRole("button", {name: "移除绑定"})).toBeDisabled();
+  await expect(page.locator("#refreshAuthorizedDirsBtn")).toBeDisabled();
+  const urls = await page.evaluate(() => window.authUrls);
+  assert.equal(urls.length, 1);
+  const query = new URL(urls[0]).searchParams;
+  assert.equal(query.get("path"), path);
+  await page.evaluate(state => window.dispatchEvent(new MessageEvent("message", {origin: location.origin,
+    data: {state, result: {state, status: "success", method: "authorizeUserFile"}}})), query.get("state"));
+  await expect(reauth).toBeEnabled();
+  await expect(page.locator("#toast")).toContainText("目录已重新授权，可读写");
+  assert.deepEqual(state.posts, [{ path: "authorized-dirs/check", body: {path}, csrf: "test-token" }]);
+  assert.deepEqual(state.projectWrites ?? [], []);
+});
+
+browserTest("settings actions: cancelling public access restores the private toggle without a write", async t => {
+  const { page, state } = await fixture(t, {status: runningStatus});
+  await page.goto(origin + prefix + "#configuration");
+  const scope = page.locator("#webProxyPublic");
+  await scope.check();
+  await page.keyboard.press("Escape");
+  await expect(scope).not.toBeChecked();
+  await expect(scope).toBeFocused();
+  assert.deepEqual(state.posts, []);
+});
+
+browserTest("settings actions: double removal keeps confirmation focus and only unbinds the selected directory", async t => {
+  const keep = {path: "/vol1/keep", label: "保留"};
+  const { page, state } = await fixture(t, {projectDirs: [keep, {path: "/vol1/old"}]});
+  await page.goto(origin + prefix + "#authorization");
+  const row = page.locator("#authorizedDirsList .info-row").filter({hasText: "/vol1/old"});
+  const remove = row.getByRole("button", {name: "移除绑定"});
+  await remove.focus();
+  await remove.evaluate(el => { el.click(); el.click(); });
+  await page.keyboard.press("Escape");
+  await expect(remove).toBeFocused();
+  assert.deepEqual(state.projectWrites ?? [], []);
+  await remove.evaluate(el => { el.click(); el.click(); });
+  await page.locator("#modalConfirmBtn").click();
+  await expect(row).toHaveCount(0);
+  assert.deepEqual(state.projectWrites, ["PUT"]);
+  assert.deepEqual(state.projectDirs, [keep]);
+});
+
+browserTest('fresh and unknown proxy state never offer shell password or migration', async t => {
+  const {page, state} = await fixture(t, {proxy: {port:43126, public:false, passwordConfigured:false}});
+  for (const status of [false, null]) {
+    state.proxy.passwordConfigured = status;
+    await page.goto(origin + prefix + '#configuration'); await page.reload();
+    await expect(page.locator('#proxyPasswordState')).toHaveText(status === false ? 'QwenPaw 原生账号' : '无法确认');
+    await expect(page.getByRole('button', {name:/设置反代密码|更换反代密码|切换为原生登录/})).toHaveCount(0);
+  }
+  assert.deepEqual(state.posts, []);
+});
+
+browserTest('legacy proxy migration is explicit, cancellable, and only sends the native password once', async t => {
+  const {page, state} = await fixture(t, {proxy:{port:43126, public:false, passwordConfigured:true}, viewport:{width:375,height:812}});
+  await page.goto(origin + prefix + '#configuration');
+  const open = page.getByRole('button', {name:'切换为原生登录'});
+  await open.click();
+  const dialog = page.getByRole('dialog', {name:'切换为原生登录'});
+  await expect(dialog.getByRole('button', {name:'取消'})).toBeFocused();
+  await dialog.getByLabel('QwenPaw 密码').fill('discarded');
+  await page.keyboard.press('Escape'); await expect(open).toBeFocused();
+  assert.deepEqual(state.posts, []);
+  await open.click();
+  const password = dialog.getByLabel('QwenPaw 密码');
+  await expect(password).toHaveValue(''); await expect(password).toHaveAttribute('autocomplete','current-password');
+  const value = ' native fixture 🔒 ';
+  await dialog.getByLabel('QwenPaw 用户名').fill('owner'); await password.fill(value);
+  await dialog.getByRole('button',{name:'验证并切换'}).click();
+  await expect(page.locator('#proxyPasswordState')).toHaveText('QwenPaw 原生账号');
+  assert.deepEqual(state.posts,[{path:'web-proxy/use-native-login',body:{confirm:true,username:'owner',password:value},csrf:'test-token'}]);
+  await expect(open).toHaveCount(0);
 });

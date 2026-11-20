@@ -783,6 +783,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware that checks Bearer token on protected routes."""
 
     async def dispatch(self, request: Request, call_next):
+        from .fnos_entry import intercept
+        entry = await intercept(request, call_next)
+        if entry is not None:
+            return entry
         if self._should_skip_auth(request):
             return await call_next(request)
 
@@ -809,7 +813,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
     def _should_skip_auth(  # pylint: disable=too-many-return-statements
         request: Request,
     ) -> bool:
-        if not is_auth_enabled() or not has_registered_users():
+        if not is_auth_enabled():
+            return True
+        if not request.scope.get('fnos_native_proxy') and not has_registered_users():
             return True
 
         path = get_route_path(request.scope)
@@ -825,6 +831,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         ):
             return True
 
+        if request.scope.get('fnos_native_proxy'):
+            return False  # A forwarded visitor is not the local supervisor.
         cfg, _ = _get_config_cached()
         allowed = cfg.security.allow_no_auth_hosts
         client_ip = resolve_client_ip(request)

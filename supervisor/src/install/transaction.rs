@@ -364,7 +364,7 @@ impl VenvTransaction {
         let parent = self.record.active.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "venv 缺少父目录")
         })?;
-        rollback_record(&self.record, parent, &self.record.pin_path, None)?;
+        rollback_record(&self.record, parent)?;
         self.record.phase = TxPhase::RolledBack;
         write_tx_record(&self.tx_file, &self.record)?;
         remove_file(&self.tx_file)?;
@@ -481,12 +481,7 @@ pub(super) fn remove_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
-pub(super) fn rollback_record(
-    record: &VenvTxRecord,
-    parent: &Path,
-    pin_path: &Path,
-    _log: Option<&dyn Fn(&str)>,
-) -> std::io::Result<()> {
+pub(super) fn rollback_record(record: &VenvTxRecord, parent: &Path) -> std::io::Result<()> {
     if record.phase == TxPhase::Committed {
         return Err(std::io::Error::other("已提交事务只能完成恢复清理,不得回滚"));
     }
@@ -497,18 +492,15 @@ pub(super) fn rollback_record(
         return Err(std::io::Error::other("旧环境备份缺失,无法确认活动环境归属"));
     }
     remove_tree(&record.staged)?;
+    // The retained pin and the existence of an active venv are independent.
+    restore_previous_pin(record)?;
     if record.had_active {
-        restore_previous_pin(record)?;
         if record.backup.exists() {
             remove_tree(&record.active)?;
             std::fs::rename(&record.backup, &record.active)?;
         }
     } else {
         remove_tree(&record.active)?;
-        remove_file(&record.pin_path)?;
-        if record.pin_path != pin_path {
-            remove_file(pin_path)?;
-        }
     }
     sync_dir(parent)?;
     if let Some(parent) = record.pin_path.parent() {
@@ -564,11 +556,17 @@ pub(super) fn pending_transactions(venv_dir: &Path) -> std::io::Result<Vec<Strin
     Ok(pending)
 }
 
+fn stop_before_recovery(stop: &dyn Fn() -> Result<(), String>) -> std::io::Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop))
+        .map_err(|_| std::io::Error::other("停止内核回调异常，保留现场"))?
+        .map_err(std::io::Error::other)
+}
+
 pub fn recover_pending_transactions(
     venv_dir: &Path,
     pin_path: &Path,
     log: Option<&dyn Fn(&str)>,
-    stop_kernel: Option<&dyn Fn()>,
+    stop_kernel: &dyn Fn() -> Result<(), String>,
 ) -> std::io::Result<RecoveryReport> {
     let mut report = RecoveryReport::default();
     let tx_files = pending_transactions(venv_dir)?;
@@ -580,10 +578,7 @@ pub fn recover_pending_transactions(
             if !tx_files.is_empty() {
                 return Err(std::io::Error::other("安装与卸载记录同时存在，保留待检查"));
             }
-            if let Some(stop) = stop_kernel {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop))
-                    .map_err(|_| std::io::Error::other("停止内核失败，未恢复卸载"))?;
-            }
+            stop_before_recovery(stop_kernel)?;
             super::removal::recover(parent, var)?;
         }
     }
@@ -634,6 +629,14 @@ pub fn recover_pending_transactions(
         let result = (|| -> std::io::Result<()> {
             match record.phase {
                 TxPhase::Prepared => {
+                    if !record.had_active
+                        && !record.staged.try_exists()?
+                        && record.active.try_exists()?
+                    {
+                        return Err(std::io::Error::other(
+                            "Prepared 事务活动环境归属不明，保留现场",
+                        ));
+                    }
                     if record.had_active && !record.active.exists() && !record.backup.exists() {
                         return Err(std::io::Error::other("旧环境与备份均缺失"));
                     }
@@ -646,11 +649,8 @@ pub fn recover_pending_transactions(
                     }
                 }
                 TxPhase::BackedUp | TxPhase::Activated | TxPhase::HealthChecked => {
-                    if let Some(stop) = stop_kernel {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(stop))
-                            .map_err(|_| std::io::Error::other("停止内核回调异常,未回滚磁盘"))?;
-                    }
-                    rollback_record(record, parent, pin_path, log)?;
+                    stop_before_recovery(stop_kernel)?;
+                    rollback_record(record, parent)?;
                 }
                 TxPhase::Committed => {
                     if !record.active.join("bin/python3").exists() {

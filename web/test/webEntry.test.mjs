@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const [html, main, desktopConfig] = await Promise.all([
-  readFile(new URL("../src/index.html", import.meta.url), "utf8"),
+  readFile(new URL("../src/views/PanelHeader.vue", import.meta.url), "utf8"),
   readFile(new URL("../src/main.ts", import.meta.url), "utf8"),
   readFile(new URL("../../app/ui/config", import.meta.url), "utf8").then(JSON.parse),
 ]);
@@ -14,7 +14,8 @@ const webEntryPath = `${gatewayPrefix}/web/`;
 test("console entry stays same-origin and does not open a port-based popup", () => {
   const button = html.match(/<a\b[^>]*\bid="btnWebConsole"[^>]*>/)?.[0];
   assert.ok(button, "Web console entry anchor exists");
-  assert.match(button, /href="#overview"/);
+  assert.match(button, /:href="entry\[0\]"/);
+  assert.match(html, /\['#overview',/);
   assert.ok(main.includes(`"${webEntryPath}"`), "running services use the same-origin Gateway entry");
   assert.doesNotMatch(button, /\btarget=/);
   assert.doesNotMatch(main, /btnConsole\.href\s*=\s*`http:\/\/\$\{host\}:\$\{activePort\}`/);
