@@ -169,6 +169,21 @@ test('overview exposes a single in-panel release picker and offline recovery ins
   const picker = page.locator('#targetVersion');
   await expect(picker).toBeVisible();
   await expect(page.locator('#btnChangeServicePort, #authorizedDirsList')).toHaveCount(0);
+  for (const width of [390, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    await picker.click();
+    const list = page.getByRole('listbox', { name: '目标版本' });
+    const bounds = await list.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+    expect(await list.getByRole('option').first().evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+    if (process.env.QWENPAW_UI_ARTIFACT_DIR) {
+      await page.locator('#version').screenshot({path: join(process.env.QWENPAW_UI_ARTIFACT_DIR, `release-picker-${width}.png`)});
+    }
+    await page.keyboard.press('Escape');
+    await expect(picker).toBeFocused();
+  }
   await pickVersion(page, '2.1.0b1');
   await expect(picker).toContainText('测试版');
   await expect(page.locator('#versionOrder')).toHaveText('按发布时间从新到旧');
@@ -791,7 +806,8 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   failedRequests.length = 0;
 
   await page.locator('[data-section="overview"]').click();
-  await expect(page.locator('#targetVersion')).toBeVisible();
+  await expect(page.locator('#targetVersion')).toBeDisabled();
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
   await pickVersion(page, "2.1.0b1");
   await expect(page.locator("#btnUpgradeAction")).toHaveText("重新安装 v2.1.0b1");
   await writeFile(slowPip, "hold task after dropping the acceptance receipt\n");
