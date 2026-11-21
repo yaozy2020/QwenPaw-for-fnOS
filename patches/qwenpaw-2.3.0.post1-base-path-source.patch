@@ -2005,12 +2005,13 @@ index 0000000..0cab0d9
  
  import aiohttp
  from multidict import CIMultiDict
-@@ -543,13 +543,21 @@
+@@ -543,13 +543,22 @@
          host = reference.loopback_host
          if ":" in host:
              host = "[" + host + "]"
 +        target = self._raw_target(request)
 +        if request.scope.get("root_path"):
++            # The worker owns the application route, not its public mount.
 +            _, separator, query = target.partition("?")
 +            target = (
 +                quote(get_route_path(request.scope), safe="/")
@@ -2325,3 +2326,259 @@ index 98f5b70d..dad01f1f 100644
          tree.add(
              f"[dim]Address:[/dim] [blue underline]{url}[/blue underline]",
          )
+diff --git a/plugins/channel/voice/README.md b/plugins/channel/voice/README.md
+index c1c2b5c5..a0fdb990 100644
+--- a/plugins/channel/voice/README.md
++++ b/plugins/channel/voice/README.md
+@@ -16,8 +16,9 @@ aiohttp and Twilio. No SDK or tunnel starts on import or disabled start.
+ The paths remain `/voice/incoming`, `/voice/ws` and `/voice/status-callback`.
+ The child registers its real listener with Core and requires the frozen A3
+ `forwarding` binding in the register ACK: route_query_key, route_selector,
+-host_port, three paths and bridge_token. Missing binding raises
+-`VOICE_HOST_FORWARDING_UNAVAILABLE` **before tunnel creation or webhook apply**.
++host_port, three paths, bridge_token and the runtime base_path (omitted at the
++root). Missing binding raises `VOICE_HOST_FORWARDING_UNAVAILABLE` **before
++tunnel creation or webhook apply**.
+ A1 endpoint ACK alone is insufficient. The tunnel targets the supplied host API
+ port, never the child listener or a remembered/default API port.
+ 
+diff --git a/plugins/channel/voice/qwenpaw_channel_voice/platform.py b/plugins/channel/voice/qwenpaw_channel_voice/platform.py
+index 7098e448..700c89c5 100644
+--- a/plugins/channel/voice/qwenpaw_channel_voice/platform.py
++++ b/plugins/channel/voice/qwenpaw_channel_voice/platform.py
+@@ -912,9 +912,24 @@ class VoicePlatform:  # pylint: disable=too-many-instance-attributes
+             "bridge_token",
+         }
+         paths = {"/voice/incoming", "/voice/ws", "/voice/status-callback"}
++        base_path = (
++            value.get("base_path", "") if isinstance(value, dict) else ""
++        )
+         if (
+             not isinstance(value, dict)
+-            or set(value) != fields
++            or set(value) not in (fields, fields | {"base_path"})
++            or not isinstance(base_path, str)
++            or base_path
++            and (
++                not base_path.startswith("/")
++                or base_path.startswith("//")
++                or base_path.endswith("/")
++                or any(char in base_path for char in "?#\\%")
++                or any(
++                    segment in {"", ".", ".."}
++                    for segment in base_path.split("/")[1:]
++                )
++            )
+             or value.get("route_query_key") != "_qp_endpoint"
+             or type(value.get("host_port")) is not int
+             or not 1 <= value["host_port"] <= 65535
+@@ -938,6 +953,7 @@ class VoicePlatform:  # pylint: disable=too-many-instance-attributes
+             raise VoicePlatformError("VOICE_HOST_FORWARDING_UNAVAILABLE")
+         return (
+             base
++            + quote(binding.get("base_path", ""), safe="/")
+             + path
+             + "?"
+             + binding["route_query_key"]
+@@ -968,9 +984,15 @@ class VoicePlatform:  # pylint: disable=too-many-instance-attributes
+             or parsed.fragment
+         ):
+             return None
+-        raw_target = parsed.path + ("?" + parsed.query if parsed.query else "")
++        prefix = quote(binding.get("base_path", ""), safe="/")
++        route_path = parsed.path
++        if prefix:
++            if not route_path.startswith(prefix + "/"):
++                return None
++            route_path = route_path[len(prefix) :]
++        raw_target = route_path + ("?" + parsed.query if parsed.query else "")
+         if (
+-            parsed.path not in binding["paths"]
++            route_path not in binding["paths"]
+             or raw_target != request.raw_path
+         ):
+             return None
+diff --git a/src/qwenpaw/app/_app.py b/src/qwenpaw/app/_app.py
+index c8da2378..86fcaff7 100644
+--- a/src/qwenpaw/app/_app.py
++++ b/src/qwenpaw/app/_app.py
+@@ -570,6 +570,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
+                 plugin_loader.registry,
+                 host_port=server_port(app),
+                 trusted_proxy=is_trusted_proxy,
++                base_path=_BASE_PATH,
+             )
+             plugin_loader.registry.channel_ingress_service = (
+                 app.state.channel_ingress
+diff --git a/src/qwenpaw/app/channels/ingress.py b/src/qwenpaw/app/channels/ingress.py
+index b46d07a3..ccedb135 100644
+--- a/src/qwenpaw/app/channels/ingress.py
++++ b/src/qwenpaw/app/channels/ingress.py
+@@ -170,6 +170,7 @@ class ChannelIngressService:
+         routes=None,
+         trusted_proxy=None,
+         limits=None,
++        base_path="",
+     ):
+         if host_port is not None and (
+             type(host_port) is not int or not 1 <= host_port <= 65535
+@@ -177,6 +178,7 @@ class ChannelIngressService:
+             raise ValueError("HOST_INGRESS_PORT_INVALID")
+         self.registry = registry
+         self.host_port = host_port
++        self.base_path = base_path
+         self.limits = limits or IngressLimits()
+         self.trusted_proxy = trusted_proxy or (lambda request: False)
+         self.routes = {}
+@@ -209,6 +211,7 @@ class ChannelIngressService:
+                         "host_port": 1,
+                         "paths": [path],
+                         "bridge_token": "validation",
++                        "base_path": self.base_path,
+                     },
+                 )
+             if not values or len(set(values)) != len(values):
+@@ -315,11 +318,12 @@ class ChannelIngressService:
+                 reference,
+                 routes,
+                 HostForwardingBinding(
+-                    "_qp_endpoint",
+-                    secrets.token_urlsafe(24),
+-                    self.host_port,
+-                    paths,
+-                    secrets.token_urlsafe(32),
++                    route_query_key="_qp_endpoint",
++                    route_selector=secrets.token_urlsafe(24),
++                    host_port=self.host_port,
++                    paths=paths,
++                    bridge_token=secrets.token_urlsafe(32),
++                    base_path=self.base_path,
+                 ),
+             )
+             self._bindings[service] = binding
+diff --git a/src/qwenpaw/channel_protocol/models.py b/src/qwenpaw/channel_protocol/models.py
+index f70e573e..d2a03aed 100644
+--- a/src/qwenpaw/channel_protocol/models.py
++++ b/src/qwenpaw/channel_protocol/models.py
+@@ -346,6 +346,7 @@ class HostForwardingBinding:
+     host_port: int
+     paths: tuple[str, ...]
+     bridge_token: str = field(repr=False)
++    base_path: str = ""
+ 
+     @classmethod
+     def from_mapping(cls, value: object) -> "HostForwardingBinding":
+@@ -358,6 +359,7 @@ class HostForwardingBinding:
+                 "host_port",
+                 "paths",
+                 "bridge_token",
++                "base_path",
+             },
+         )
+         key = _string(data.get("route_query_key"), "route_query_key")
+@@ -380,22 +382,42 @@ class HostForwardingBinding:
+             for path in paths
+         ):
+             raise _error("invalid forwarding path")
++        base_path = data.get("base_path", "")
++        if (
++            not isinstance(base_path, str)
++            or base_path
++            and (
++                not base_path.startswith("/")
++                or base_path.startswith("//")
++                or base_path.endswith("/")
++                or any(char in base_path for char in "?#\\%")
++                or any(
++                    segment in {"", ".", ".."}
++                    for segment in base_path.split("/")[1:]
++                )
++            )
++        ):
++            raise _error("invalid forwarding base path")
+         return cls(
+             key,
+             selector,
+             port,
+             paths,
+             _string(data.get("bridge_token"), "bridge_token"),
++            base_path,
+         )
+ 
+     def to_mapping(self) -> dict[str, Any]:
+-        return {
++        result = {
+             "route_query_key": self.route_query_key,
+             "route_selector": self.route_selector,
+             "host_port": self.host_port,
+             "paths": list(self.paths),
+             "bridge_token": self.bridge_token,
+         }
++        if self.base_path:
++            result["base_path"] = self.base_path
++        return result
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/src/qwenpaw/cli/desktop_cmd.py b/src/qwenpaw/cli/desktop_cmd.py
+index 1570db7d..33e4232b 100644
+--- a/src/qwenpaw/cli/desktop_cmd.py
++++ b/src/qwenpaw/cli/desktop_cmd.py
+@@ -253,6 +253,7 @@ def desktop_cmd(
+     logger.info("Server subprocess starting...")
+ 
+     env = os.environ.copy()
++    env.pop("QWENPAW_BASE_PATH", None)
+     env[LOG_LEVEL_ENV] = log_level
+ 
+     if "SSL_CERT_FILE" in env:
+diff --git a/src/qwenpaw/cli/env_cmd.py b/src/qwenpaw/cli/env_cmd.py
+index 849cdcf1..1f79b1e9 100644
+--- a/src/qwenpaw/cli/env_cmd.py
++++ b/src/qwenpaw/cli/env_cmd.py
+@@ -8,6 +8,7 @@ from urllib.parse import quote
+ import click
+ import httpx
+ 
++from ..app.base_path import normalize_base_path
+ from ..envs import delete_env_var, load_envs, set_env_var
+ from ..envs.registry import (
+     ENV_VAR_SPECS_BY_KEY,
+@@ -29,6 +30,7 @@ def _managed_envs(
+     if endpoint is None:
+         raise click.ClickException("Managed runtime endpoint is unavailable")
+     host, port = endpoint
++    base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
+     path = "/api/envs"
+     if method == "DELETE":
+         path = f"{path}/{quote(key or '', safe='')}"
+@@ -36,7 +38,7 @@ def _managed_envs(
+             method = "POST"
+             path = f"{path}/reset"
+     try:
+-        with api_client(f"http://{host}:{port}") as client:
++        with api_client(f"http://{host}:{port}{base_path}") as client:
+             response = client.request(
+                 method,
+                 path,
+diff --git a/src/qwenpaw/pawapp/deps.py b/src/qwenpaw/pawapp/deps.py
+index c1ff6182..1eb4d41c 100644
+--- a/src/qwenpaw/pawapp/deps.py
++++ b/src/qwenpaw/pawapp/deps.py
+@@ -20,6 +20,7 @@ import logging
+ from typing import Any, Optional
+ 
+ from fastapi import HTTPException, Request
++from starlette.routing import get_route_path
+ 
+ from .context import PawAppContext
+ 
+@@ -51,7 +52,7 @@ def _extract_app_id_from_request(request: Request) -> str:
+ 
+     # Priority 3: parse URL path /api/{app_id}/...
+     # Real PawApp routes registered by PawApp.register() are /api/{app_id}/...
+-    parts = request.url.path.split("/")
++    parts = get_route_path(request.scope).split("/")
+     if len(parts) >= 3 and parts[1] == "api" and parts[2]:
+         return parts[2]
+ 

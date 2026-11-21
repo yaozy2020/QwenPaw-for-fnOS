@@ -2,7 +2,16 @@
 import { useTemplateRef } from 'vue';
 const dialog = useTemplateRef<HTMLDialogElement>('dialog');
 function open() {
-  if (dialog.value && !dialog.value.open) dialog.value.showModal();
+  const el = dialog.value;
+  if (!el || el.open) return;
+  if (typeof el.showModal === 'function') el.showModal();
+  else el.setAttribute('open', '');
+}
+function close() {
+  const el = dialog.value;
+  if (!el) return;
+  if (typeof el.close === 'function') el.close();
+  else el.removeAttribute('open');
 }
 defineExpose({ open });
 </script>
@@ -40,7 +49,7 @@ defineExpose({ open });
         <p>保留日志和用户数据，不要手工删除 venv 或共享目录。记录错误时间与提示，到项目 Issues 附上日志反馈。</p>
       </details>
     </section>
-    <form method="dialog" class="about-actions">
+    <form method="dialog" class="about-actions" @submit="close">
       <button type="submit" class="btn-primary" autofocus>关闭</button>
     </form>
   </dialog>

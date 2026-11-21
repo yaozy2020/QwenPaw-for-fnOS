@@ -773,13 +773,23 @@ def check_generation(paths, env, root, expected_version, kernel_port, probe_whee
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as error:
         check(False, f"{label}: actual managed kernel health request succeeded: {error}")
 
-    try:
+    def status_matches():
         status, snapshot, _ = http_json(base + "/status", token=TOKEN)
-        check(
+        return (
             status == 200 and isinstance(snapshot, dict)
             and snapshot.get("installed") is True
             and snapshot.get("running") is True
-            and snapshot.get("version") == expected_version,
+            and snapshot.get("version") == expected_version
+        )
+
+    try:
+        wait_for(
+            status_matches,
+            timeout=10,
+            description=f"{label}: waiting for supervisor /status version {expected_version}",
+        )
+        check(
+            True,
             f"{label}: supervisor HTTP /status agrees with live kernel version {expected_version}",
         )
     except (OSError, URLError, TimeoutError) as error:

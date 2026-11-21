@@ -22,8 +22,21 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
     reachable: null as boolean | null, recovery: '', data: null as StatusData | null,
     version: '—', busyInstall: false, checked: '等待首次同步', uptime: '',
   });
+  let uptimeTimer: ReturnType<typeof setInterval> | null = null;
+  function syncUptimeTimer(): void {
+    const running = !!view.data?.startAt;
+    if (running && uptimeTimer === null) {
+      uptimeTimer = window.setInterval(() => {
+        if (!document.hidden) updateUptime();
+      }, 1000);
+    } else if (!running && uptimeTimer !== null) {
+      window.clearInterval(uptimeTimer);
+      uptimeTimer = null;
+    }
+  }
   function updateUptime(): void {
     view.uptime = view.data?.startAt ? formatUptime(Math.max(0, Math.floor(Date.now() / 1000) - view.data.startAt)) : '';
+    syncUptimeTimer();
   }
 
   async function fetchStatus(snapshot?: StatusResponse): Promise<void> {
@@ -95,10 +108,6 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
     return recoverInvalidEvent();
   }
 
-  window.setInterval(() => {
-    if (!document.hidden) updateUptime();
-  }, 1000);
-
   return {
     refresh: fetchStatus,
     consumeSnapshot,
@@ -115,6 +124,12 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
       } catch { /* A partial resource frame never changes process or action state. */ }
     },
     recoverEvents: recoverInvalidEvent,
+    destroy: () => {
+      if (uptimeTimer !== null) {
+        window.clearInterval(uptimeTimer);
+        uptimeTimer = null;
+      }
+    },
     view, reachable: () => view.reachable,
     recoveryReason: () => view.recovery,
   };

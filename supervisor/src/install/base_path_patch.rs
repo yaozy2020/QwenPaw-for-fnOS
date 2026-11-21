@@ -316,10 +316,13 @@ fn insert_manifest_path(paths: &mut BTreeSet<String>, value: &str) -> Result<(),
 fn relative_payload_path(value: &str) -> Result<&Path, String> {
     let path = Path::new(value);
     let mut components = path.components();
-    let valid_root = matches!(components.next(), Some(Component::Normal(root)) if root == "app" || root == "browser" || root == "cli" || root == "console");
+    let valid_root = matches!(components.next(), Some(Component::Normal(root)) if root == "app" || root == "browser" || root == "cli" || root == "console" || root == "pawapp");
     let extra_client = matches!(
         value,
-        "agents/tools/agent_management.py" | "utils/startup_display.py"
+        "agents/tools/agent_management.py"
+            | "utils/startup_display.py"
+            | "channel_protocol/models.py"
+            | "official_channels/voice-0.1.0.zip"
     );
     if !(valid_root || extra_client)
         || !value.contains('/')
@@ -879,6 +882,9 @@ mod tests {
             "cli/http.py",
             "agents/tools/agent_management.py",
             "utils/startup_display.py",
+            "channel_protocol/models.py",
+            "official_channels/voice-0.1.0.zip",
+            "pawapp/deps.py",
             "console/index.html",
         ] {
             assert_eq!(
@@ -890,6 +896,8 @@ mod tests {
             "tests/unit/app/test_base_path.py",
             "utils/other.py",
             "agents/tools/other.py",
+            "channel_protocol/other.py",
+            "official_channels/other.zip",
         ] {
             assert!(relative_payload_path(other).is_err());
         }

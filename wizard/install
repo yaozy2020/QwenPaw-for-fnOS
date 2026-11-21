@@ -4,7 +4,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "<strong>QwenPaw for fnOS</strong> 是专为飞牛 NAS 打包维护的轻量级个人 AI 智能助理。<br/><br/>• <strong>原生极简架构</strong>：内置纯净 DSH 运维控制面板，支持白天/暗夜模式与动态端口管理。<br/>• <strong>多端智能交互</strong>：支持 QQ 机器人、多通道通信、多 Agent 协作与自动化运维工具链。<br/>• <strong>安全本地化</strong>：数据与模型凭据全在本地，绝无第三方云端托管。"
+                "helpText": "<strong>QwenPaw for fnOS</strong> 是用于安装和管理 QwenPaw 内核的第三方应用。首次使用时，打开飞牛桌面的「QwenPaw 控制台」，在「概览 → 部署版本」选择并安装内核。"
             },
             {
                 "type": "tips",
@@ -17,7 +17,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "选择 PyPI 安装源，国内网络推荐选择阿里云源（兼容各类家庭网络与云服务器机房 IP）。"
+                "helpText": "选择 NAS 下载 QwenPaw 内核时使用的源。安装后可在控制台更换。"
             },
             {
                 "type": "select",
@@ -26,7 +26,7 @@
                 "initValue": "aliyun",
                 "options": [
                     {
-                        "label": "阿里云镜像源 (推荐 - 兼容公网与云服务器)",
+                        "label": "阿里云镜像源",
                         "value": "aliyun"
                     },
                     {
@@ -38,7 +38,7 @@
                         "value": "ustc"
                     },
                     {
-                        "label": "PyPI 官方源 (国内较慢)",
+                        "label": "PyPI 官方源",
                         "value": "official"
                     }
                 ],
@@ -87,7 +87,7 @@
                 "initValue": "info",
                 "options": [
                     {
-                        "label": "Info - 常规信息 (推荐)",
+                        "label": "Info - 常规信息",
                         "value": "info"
                     },
                     {

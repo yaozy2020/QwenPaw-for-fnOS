@@ -493,9 +493,9 @@ def callback_layout_self_test():
         ("uninstall_callback", "uninstall", ". ./lib.sh\n", "sources files"),
         ("upgrade_callback", "upgrade", "source ./helper.sh\n", "sources files"),
         ("install_callback", "install", 'case "$1" in install) : ;; esac\n', "case business logic"),
-        ("upgrade_callback", "upgrade", 'exec "$candidate" platform install\n', "single cmd supervisor"),
-        ("uninstall_callback", "uninstall", 'candidate="$TRIM_PKGVAR/qwenpaw-supervisor-helper"\n', "single cmd supervisor"),
-        ("upgrade_callback", "upgrade", 'true\n', "single cmd supervisor"),
+        ("upgrade_callback", "upgrade", 'exec "$candidate" platform install\n', "packaged cmd supervisor"),
+        ("uninstall_callback", "uninstall", 'candidate="$TRIM_PKGVAR/qwenpaw-supervisor-helper"\n', "packaged cmd supervisor"),
+        ("upgrade_callback", "upgrade", 'true\n', "packaged cmd supervisor"),
     ]
     for entry, subcommand, injected, expected in callback_violations:
         with tempfile.TemporaryDirectory(prefix="management-p3-callback-negative-") as temp:

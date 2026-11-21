@@ -3,18 +3,20 @@
   "base_version": "2.3.0.post1",
   "upstream_pr": 8719,
   "upstream_commit": "ee58cb1a64f2b21e825c525f73dc44bc7941edea",
-  "source_patch_sha256": "3cb051db72b16e106d9c1b8e2d420e451d892ad9475c73323abea01f24a082f4",
+  "source_patch_sha256": "9111b49874a421f8e5a60496f3c85b5ca45701dbeb6c5013a1bf03074243cd8a",
   "official_wheel_sha256": "dffb8d4cd548eeea0e91fe9abaf761b8162bb94c95556659b4b91688409727ac",
   "console_complete": true,
   "files": [
     {
       "path": "app/_app.py",
       "original_sha256": "8c3b4f00caec9c551e9b4b1eb67960ecdafd0b82591f92c4e0393c4ca72657a3",
-      "sha256": "55380d5f98697f75c8196827bc50c7c6f6ffa9fa50388b93f1409960350b71dc",
+      "sha256": "489b2445d8d5478beced6b3d044ee86095c7d0386ea808b5d8bf417c040587c5",
       "previous_sha256": [
         "38541ce134eb38f7ec64a82125365400cc2f3ca69ea5aef86b6f1ba42500877c",
+        "489b2445d8d5478beced6b3d044ee86095c7d0386ea808b5d8bf417c040587c5",
         "55380d5f98697f75c8196827bc50c7c6f6ffa9fa50388b93f1409960350b71dc",
         "7ece0ddadd212020165b840fd300271afa91e776494aa5e5a138904f0f047d0c",
+        "8c3b4f00caec9c551e9b4b1eb67960ecdafd0b82591f92c4e0393c4ca72657a3",
         "a8bfa47e71172a3593675b6ee4840075769a0e965797c02a6fa7bc8a89d9d144"
       ]
     },
@@ -50,10 +52,12 @@
     {
       "path": "app/channels/ingress.py",
       "original_sha256": "2bfa63fa9ddbedb73d439eda14e2d64567c6628b57879bfd8bfa3b534e732fee",
-      "sha256": "2dfe17fd78509b9c2915ecf47d9276edc95608b0445bbe523e403fc028ca0e94",
+      "sha256": "fe24d8ba1fd74a820833ec07bfb745871a0251c1ab8e25d668f67be2d3f733ba",
       "previous_sha256": [
+        "2bfa63fa9ddbedb73d439eda14e2d64567c6628b57879bfd8bfa3b534e732fee",
         "2dfe17fd78509b9c2915ecf47d9276edc95608b0445bbe523e403fc028ca0e94",
-        "c54e0297300f464a7f1f33df03d2b175247185b2d5a0b885fdbab85c4e7d0acb"
+        "c54e0297300f464a7f1f33df03d2b175247185b2d5a0b885fdbab85c4e7d0acb",
+        "fe24d8ba1fd74a820833ec07bfb745871a0251c1ab8e25d668f67be2d3f733ba"
       ]
     },
     {
@@ -85,6 +89,7 @@
       "original_sha256": "9e84d618f70a88e1c61e53518442588f481571e533b779c50f65676d30549e8f",
       "sha256": "1e66dad07c0f04233e00aded6bc773c897485eb5f4cf89a653ac90e532c32795",
       "previous_sha256": [
+        "1e66dad07c0f04233e00aded6bc773c897485eb5f4cf89a653ac90e532c32795",
         "2a955500b90879892e7501bbf59a1c683fcc6bc0a27df0869a5d3b839c12e684"
       ]
     },
@@ -95,6 +100,39 @@
       "previous_sha256": [
         "71fea864fbc1e06c2867a6cf80ed2aa000b1975b697bb7cc7a1a2f1baaa02eaf"
       ]
+    },
+    {
+      "path": "cli/desktop_cmd.py",
+      "original_sha256": "8ce555578e124bc7a979481efdcf6a4726a5ac653e67aa167369b80d1823d77e",
+      "sha256": "9d7551e7a3418a79c078724663f0a92442a9afc3b19e5e9187fcef764db57b84"
+    },
+    {
+      "path": "cli/env_cmd.py",
+      "original_sha256": "c175f0ceefb21611fa128acb32a4bbb09fd9f6abf3f6f132ff9211d3c1cb160f",
+      "sha256": "cbbbe2eb98199fe327cbb7117ab9dbba0506560a0ee6fbc98568f01180d44490"
+    },
+    {
+      "path": "channel_protocol/models.py",
+      "original_sha256": "d3daa961a887d1490622c415b2495bfa0eada1236428552dc2628d09acf536c9",
+      "sha256": "e7cb20f86d7b4a37a2d568ff640a58aaa3be8306d348157d1f383296435ce8e4",
+      "previous_sha256": [
+        "d3daa961a887d1490622c415b2495bfa0eada1236428552dc2628d09acf536c9",
+        "e7cb20f86d7b4a37a2d568ff640a58aaa3be8306d348157d1f383296435ce8e4"
+      ]
+    },
+    {
+      "path": "official_channels/voice-0.1.0.zip",
+      "original_sha256": "02a194a815d56cf9643f4b6dfe4704cc610e4ef37bfbe90267440a364a408d73",
+      "sha256": "e2035f1b94dd7d0fa2b900f9e580c90c1a39f8811ad76c912a429c248c21c47f",
+      "previous_sha256": [
+        "02a194a815d56cf9643f4b6dfe4704cc610e4ef37bfbe90267440a364a408d73",
+        "e2035f1b94dd7d0fa2b900f9e580c90c1a39f8811ad76c912a429c248c21c47f"
+      ]
+    },
+    {
+      "path": "pawapp/deps.py",
+      "original_sha256": "e5c12f8997f55b4d13c3fca1b0c10f27e2a7f2e894e3062d5ca53e5a1d4d692c",
+      "sha256": "4b017f6c1be2702c0b7d1be13ade2110997a7ea31bcdf14cab6d67fb7ac86d20"
     },
     {
       "path": "app/fnos_entry.py",
@@ -109,37 +147,58 @@
     {
       "path": "cli/auto.py",
       "original_sha256": "7ec54661ef674e0562b99f616d13a663858ccd2735fb23a7b450bce82b734de6",
-      "sha256": "da53a5e6c87d8a27e2196f07be16c5897209535289627411c1555d8bc6bea7fa"
+      "sha256": "da53a5e6c87d8a27e2196f07be16c5897209535289627411c1555d8bc6bea7fa",
+      "previous_sha256": [
+        "da53a5e6c87d8a27e2196f07be16c5897209535289627411c1555d8bc6bea7fa"
+      ]
     },
     {
       "path": "cli/cron_cmd.py",
       "original_sha256": "1a16f3bb8536965449d75cc1058f89d0675843ec1e5c3dd0540c14e8e506a35e",
-      "sha256": "8c1a34279a37c109aa637a62c399ce1317e9b6cfc4c717b3341ddeb6d4e871bb"
+      "sha256": "8c1a34279a37c109aa637a62c399ce1317e9b6cfc4c717b3341ddeb6d4e871bb",
+      "previous_sha256": [
+        "8c1a34279a37c109aa637a62c399ce1317e9b6cfc4c717b3341ddeb6d4e871bb"
+      ]
     },
     {
       "path": "cli/doctor_checks.py",
       "original_sha256": "1a337a0275a13ccb1f519c5c95a6cd3fec8109a7be512941cf15c174ad6b1878",
-      "sha256": "152f6cca30b7383d8a5d3a687e264c868df8a265617d6b35e350bcb91f20a5f4"
+      "sha256": "152f6cca30b7383d8a5d3a687e264c868df8a265617d6b35e350bcb91f20a5f4",
+      "previous_sha256": [
+        "152f6cca30b7383d8a5d3a687e264c868df8a265617d6b35e350bcb91f20a5f4"
+      ]
     },
     {
       "path": "cli/plugin_commands.py",
       "original_sha256": "f49c5225da48292322080651ab4ab95213b39d3ab4e27ea39f0ceb64998c1e52",
-      "sha256": "04254e763f8a88d331229b47a1249e5fdff75710e6d36338fba95c40b89ac507"
+      "sha256": "04254e763f8a88d331229b47a1249e5fdff75710e6d36338fba95c40b89ac507",
+      "previous_sha256": [
+        "04254e763f8a88d331229b47a1249e5fdff75710e6d36338fba95c40b89ac507"
+      ]
     },
     {
       "path": "cli/process_utils.py",
       "original_sha256": "5ae36f76b219e5b658ef4672fd0fec1e5169d0ebae015d920017d2eb70720971",
-      "sha256": "2b505e656652e4161d4d33adebd04f61927ca71632097c03c499e079daa0ff59"
+      "sha256": "2b505e656652e4161d4d33adebd04f61927ca71632097c03c499e079daa0ff59",
+      "previous_sha256": [
+        "2b505e656652e4161d4d33adebd04f61927ca71632097c03c499e079daa0ff59"
+      ]
     },
     {
       "path": "agents/tools/agent_management.py",
       "original_sha256": "729d76f59ce8f0ea45daa3121b9bb1c0b697af174592f1344f557aabd46199fa",
-      "sha256": "ca3c5b5dfbc875f9a573de079122c848a2caf85ebaf43143260c7e3ffc473b94"
+      "sha256": "ca3c5b5dfbc875f9a573de079122c848a2caf85ebaf43143260c7e3ffc473b94",
+      "previous_sha256": [
+        "ca3c5b5dfbc875f9a573de079122c848a2caf85ebaf43143260c7e3ffc473b94"
+      ]
     },
     {
       "path": "utils/startup_display.py",
       "original_sha256": "46b429613b03750c2e4ec10f5085719b40011482ec2867ae7e0fb5eb15e46a50",
-      "sha256": "3b5a763ef903fe7adf06ada5a15bbd9ea8ce93f5fcc7ea64828be4fd2f6b1ed0"
+      "sha256": "3b5a763ef903fe7adf06ada5a15bbd9ea8ce93f5fcc7ea64828be4fd2f6b1ed0",
+      "previous_sha256": [
+        "3b5a763ef903fe7adf06ada5a15bbd9ea8ce93f5fcc7ea64828be4fd2f6b1ed0"
+      ]
     },
     {
       "path": "console/.vite/manifest.json",

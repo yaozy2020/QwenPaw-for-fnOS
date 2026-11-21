@@ -6,10 +6,20 @@ const emit = defineEmits<{ servicePort: []; proxyPort: []; useNative: [username:
 const proxyKnown = computed(() => props.state.proxyPort !== null && props.state.proxyPublic !== null);
 const migration = ref<HTMLDialogElement>();
 const form = ref<HTMLFormElement>();
+function openDialog(el?: HTMLDialogElement) {
+  if (!el || el.open) return;
+  if (typeof el.showModal === 'function') el.showModal();
+  else el.setAttribute('open', '');
+}
+function closeDialog(el?: HTMLDialogElement) {
+  if (!el) return;
+  if (typeof el.close === 'function') el.close();
+  else el.removeAttribute('open');
+}
 function submitNative() {
   if (!form.value || props.state.pending || props.state.proxyPasswordConfigured !== true) return;
   const fields = new FormData(form.value);
-  migration.value?.close();
+  closeDialog(migration.value);
   form.value.reset();
   emit('useNative', String(fields.get('username')), String(fields.get('password')));
 }
@@ -25,7 +35,7 @@ function submitReset() {
     invalid.reportValidity();
     return;
   }
-  recovery.value?.close();
+  closeDialog(recovery.value);
   emit('reset', password.value);
 }
 function clearRecovery() {
@@ -59,14 +69,14 @@ function changeScope(event: Event) {
       <div class="row-inline">
         <span id="proxyPasswordState" class="info-val" aria-live="polite">{{ state.proxyPasswordConfigured === true ? '旧反代密码保护中' : state.proxyPasswordConfigured === false ? 'QwenPaw 原生账号' : '无法确认' }}</span>
         <template v-if="state.proxyPasswordConfigured === true">
-          <button type="button" class="btn-outline btn-xs" :disabled="state.pending" @click="migration?.showModal()">切换为原生登录</button>
+          <button type="button" class="btn-outline btn-xs" :disabled="state.pending" @click="openDialog(migration)">切换为原生登录</button>
           <dialog ref="migration" class="about-dialog native-login-dialog" aria-labelledby="nativeLoginTitle" aria-describedby="nativeLoginHint" @close="form?.reset()">
             <form ref="form" method="dialog" @submit.prevent="submitNative">
               <h3 id="nativeLoginTitle" class="modal-title">切换为原生登录</h3>
               <p id="nativeLoginHint" class="modal-msg">请输入 QwenPaw 原账号，不是飞牛账号。验证成功才停用旧反代密码，已登录反代的设备需要重新登录。</p>
               <label class="modal-field modal-label">QwenPaw 用户名<input class="modal-input" name="username" autocomplete="username" required></label>
               <label class="modal-field modal-label">QwenPaw 密码<input class="modal-input" name="password" type="password" autocomplete="current-password" required></label>
-              <div class="modal-actions"><button type="button" class="btn-outline" autofocus @click="migration?.close()">取消</button><button type="submit" class="btn btn-primary">验证并切换</button></div>
+              <div class="modal-actions"><button type="button" class="btn-outline" autofocus @click="closeDialog(migration)">取消</button><button type="submit" class="btn btn-primary">验证并切换</button></div>
             </form>
           </dialog>
         </template>
@@ -89,14 +99,14 @@ function changeScope(event: Event) {
   </div>
   <div class="card-actions">
     <button type="button" class="btn-outline btn-sm btn-block" :disabled="state.entryLogin !== false || state.saving" :aria-disabled="state.pending" @click="emit('migrate')">{{ state.entryLogin ? '已切换为入口登录' : '迁移旧账号到入口登录' }}</button>
-    <button id="resetAuthBtn" type="button" class="btn-outline btn-sm btn-block" :disabled="state.pending" @click="!state.pending && recovery?.showModal()">重置 QwenPaw 管理员密码</button>
+    <button id="resetAuthBtn" type="button" class="btn-outline btn-sm btn-block" :disabled="state.pending" @click="!state.pending && openDialog(recovery)">重置 QwenPaw 管理员密码</button>
     <dialog ref="recovery" class="about-dialog native-login-dialog" aria-labelledby="recoveryTitle" aria-describedby="recoveryHint" @close="clearRecovery">
       <form method="dialog" @submit.prevent="submitReset">
         <h3 id="recoveryTitle" class="modal-title">重置 QwenPaw 管理员密码</h3>
         <p id="recoveryHint" class="modal-msg">不需要旧密码。保存后请用原用户名和新密码登录，已有的 QwenPaw 原生登录会话将失效。飞牛账号和聊天记录不受影响。</p>
         <label for="newAdminPassword" class="modal-field modal-label">新密码<input id="newAdminPassword" ref="passwordField" class="modal-input" name="password" type="password" autocomplete="new-password" required autofocus @input="passwordField?.setCustomValidity(''); confirmation?.setCustomValidity('')"></label>
         <label for="confirmAdminPassword" class="modal-field modal-label">确认新密码<input id="confirmAdminPassword" ref="confirmation" class="modal-input" name="confirmation" type="password" autocomplete="new-password" required @input="confirmation?.setCustomValidity('')"></label>
-        <div class="modal-actions"><button type="button" class="btn-outline" @click="recovery?.close()">取消</button><button type="submit" class="btn btn-primary">保存新密码</button></div>
+        <div class="modal-actions"><button type="button" class="btn-outline" @click="closeDialog(recovery)">取消</button><button type="submit" class="btn btn-primary">保存新密码</button></div>
       </form>
     </dialog>
   </div>

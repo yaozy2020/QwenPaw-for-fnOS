@@ -131,6 +131,7 @@ export function createInstallProgressPanel({
     box.setAttribute("tabindex", "-1");
     box.setAttribute("aria-describedby", "upSubTitle");
     view.open = true;
+    document.documentElement.classList.add("upgrade-modal-open");
 
     updateTaskCenterButton();
     modal.addEventListener("click", upgradeDialogBackdrop);
@@ -151,6 +152,7 @@ export function createInstallProgressPanel({
     const modal = document.getElementById("upgradeModal");
     if (!modal || !view.open) return;
     view.open = false;
+    document.documentElement.classList.remove("upgrade-modal-open");
 
     updateTaskCenterButton();
     modal.removeEventListener("click", upgradeDialogBackdrop);

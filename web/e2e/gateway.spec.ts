@@ -10,6 +10,11 @@ async function pickVersion(page: Page, version: string) {
   await page.locator(`#versionOptions [data-version="${version}"]`).click();
 }
 
+async function openLogTools(page: Page) {
+  const tools = page.locator('#logTools');
+  if (!await tools.evaluate(element => (element as HTMLDetailsElement).open)) await tools.locator('summary').click();
+}
+
 const prefix = "/app/qwenpaw/";
 const api = `${prefix}api/`;
 
@@ -173,6 +178,7 @@ test('overview exposes a single in-panel release picker and offline recovery ins
     await page.setViewportSize({ width, height: 844 });
     await picker.click();
     const list = page.getByRole('listbox', { name: '目标版本' });
+    await expect(list).not.toContainText(/推荐|fnOS 已验证|官方认证/);
     const bounds = await list.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
@@ -219,6 +225,7 @@ test("packaged panel uses Vue handlers and follows a real log append before fall
   await appendFile(fixture.files.kernelLog, `\n${line}\n`);
   await expect(page.locator('#logTerminal')).toContainText(line, { timeout: 7000 });
   const statusOnly = page.waitForRequest(r => r.url().endsWith(`${api}events`));
+  await openLogTools(page);
   await page.locator('#autoRefreshCheck').uncheck();
   await statusOnly;
 });
@@ -589,6 +596,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   let reloadPageErrors: string[] | null = null;
   const consoleErrors: Array<{ text: string; url: string }> = [];
   const failedRequests: Array<{ method: string; url: string; errorText: string }> = [];
+  const establishedEventStreams = new Set<string>();
   const browserRequests: string[] = [];
   const installStatusRequests: number[] = [];
   const installLogUrls: string[] = [];
@@ -609,6 +617,12 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   page.on("response", response => {
     const attempt = installAttemptResults.get(response.request());
     if (attempt) attempt.responseStatus = response.status();
+    const url = new URL(response.url());
+    if (response.request().method() === "GET" && response.status() === 200
+      && url.pathname === `${api}events`
+      && response.headers()["content-type"]?.startsWith("text/event-stream")) {
+      establishedEventStreams.add(response.url());
+    }
   });
   page.on("request", request => {
     browserRequests.push(request.url());
@@ -852,6 +866,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   await page.locator("#btnUpClose").click();
 
   await page.locator('[data-section="logs"]').click();
+  await openLogTools(page);
   await page.getByRole("button", { name: "清空日志", exact: true }).click();
   await expect(page.locator("#modalTitle")).toHaveText("删除服务日志");
   await page.locator("#modalConfirmBtn").click();
@@ -906,7 +921,14 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
   expect(consoleErrors).toEqual([{ text: expectedConsoleText, url: `${origin}${api}kernel/install` }]);
   expect([...installAttemptResults.values()].map(attempt => attempt.responseStatus)).toEqual([200, 200, undefined]);
   expect([...installAttemptResults.values()].map(attempt => attempt.failed)).toEqual([false, false, true]);
-  expect(failedRequests).toEqual([{ method: "POST", url: `${origin}${api}kernel/install`, errorText: expect.stringMatching(/\S/) }]);
+  const unexpectedFailedRequests = failedRequests.filter(({ method, url, errorText }) => {
+    const parsed = new URL(url);
+    const closedEventStream = method === "GET" && parsed.origin === origin
+      && parsed.pathname === `${api}events` && establishedEventStreams.has(url)
+      && /abort|cancel|terminated unexpectedly/i.test(errorText);
+    return !closedEventStream;
+  });
+  expect(unexpectedFailedRequests).toEqual([{ method: "POST", url: `${origin}${api}kernel/install`, errorText: expect.stringMatching(/\S/) }]);
 });
 
 test("sessionStorage unavailable: a pending install-log request does not block owned install progress or resubmission", async ({ page, request }) => {

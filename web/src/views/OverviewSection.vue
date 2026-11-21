@@ -57,13 +57,13 @@ async function refreshDashboard() {
       <div class="installer-summary">
         <div>
           <span>目标版本</span>
-          <strong id="overviewInstallVersion">{{ target ? `v${target} · ${panel.versions.isRecommended() ? 'fnOS 已验证' : '未验证'}` : '请选择版本' }}</strong>
+          <strong id="overviewInstallVersion">{{ target ? `v${target}${panel.versions.isRecommended() ? ' · 随包适配补丁' : ''}` : '请选择版本' }}</strong>
         </div>
       </div>
       <div class="installer-actions">
         <button type="button" class="btn-primary" id="overviewInstallButton" :disabled="!target || !status.reachable || !!status.recovery || panel.settings.mirror.saving" @click="panel.checkOrUpgrade()">开始安装</button>
       </div>
-      <p class="card-note">首次建议使用 fnOS 已验证版本。选择其他版本请打开版本管理。</p>
+      <p class="card-note">可在「部署版本」更换目标版本。</p>
     </div>
     <button type="button" id="overviewRunningInstall" class="btn-outline" :hidden="!status.busyInstall || panel.progress.view.open" aria-haspopup="dialog" @click="panel.attachRunningInstall()">安装任务进行中 · 查看进度</button>
     <div class="overview-footer">
@@ -77,7 +77,7 @@ async function refreshDashboard() {
     <div class="overview-guide" id="overviewGuide" :hidden="!panel.needsInstaller()">
       <h3>首次使用</h3>
       <ol>
-        <li>在版本管理选择 fnOS 已验证版本</li>
+        <li>在「部署版本」选择目标版本并确认安装</li>
         <li>等待下载安装与启动检查完成</li>
         <li>进入 Web 对话开始使用</li>
       </ol>

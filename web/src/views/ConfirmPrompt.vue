@@ -12,11 +12,21 @@ let opened = 0;
 watch(() => prompt.state.options, async options => {
   invalid.value = false;
   value.value = options?.input?.value || '';
-  if (!options) { dialog.value?.close(); return; }
+  const el = dialog.value;
+  if (!options) {
+    if (el) {
+      if (typeof el.close === 'function') el.close();
+      else el.removeAttribute('open');
+    }
+    return;
+  }
   await nextTick();
   if (prompt.state.options !== options) return;
   opened = Date.now();
-  dialog.value?.showModal();
+  if (el) {
+    if (typeof el.showModal === 'function') el.showModal();
+    else el.setAttribute('open', '');
+  }
   if (options.input) { input.value?.focus(); input.value?.select(); }
   else (options.type === 'danger' ? cancelButton : confirmButton).value?.focus();
 }, {flush:'post'});

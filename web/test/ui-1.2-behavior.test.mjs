@@ -11,6 +11,11 @@ async function pickVersion(page, version) {
   await page.locator(`#versionOptions [data-version="${version}"]`).click();
 }
 
+async function openLogTools(page) {
+  const tools = page.locator('#logTools');
+  if (!await tools.evaluate(element => element.open)) await tools.locator('summary').click();
+}
+
 const prefix = "/app/qwenpaw/";
 const origin = "http://qwenpaw.test";
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
@@ -148,7 +153,7 @@ browserTest('homepage has one labeled version picker without expanding a detail 
   await expect(rows.locator('.history-version')).toHaveText(['v2.1.0b1', 'v2.0.0', 'v1.9.0']);
   await expect(rows.nth(0)).toContainText('测试版');
   await expect(rows.nth(1)).toContainText('正式版');
-  await expect(rows.nth(1)).toContainText('fnOS 已验证');
+  await expect(rows.nth(1)).toContainText('随包适配补丁');
   await expect(rows.nth(1)).toContainText('当前安装');
   await expect(rows.nth(1)).toBeFocused();
   await page.keyboard.press('Escape');
@@ -339,6 +344,7 @@ browserTest("empty version responses never create selectable ghost cards or pin 
   await page.goto(origin + prefix + "#version");
   await expect(page.locator("#targetVersion")).toBeDisabled();
   await expect(page.getByRole("option")).toHaveCount(0);
+  await expect(page.locator('#versionSourceStatus')).toContainText('当前下载源没有可选版本');
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
   await page.evaluate(() => window.pickVersion(""));
   state.versions = { success: true, latest_stable: "2.0.0", recommended_version: "2.0.0", versions: [{ version: "2.0.0", is_beta: false }] };
@@ -354,12 +360,12 @@ browserTest("without a listed recommendation both install actions require an exp
     success: true, latest_stable: "9.0.0", recommended_version: "8.0.0", versions: [{ version: "9.0.0", is_beta: false }],
   } });
   await page.goto(origin + prefix + "#version");
-  await expect(page.locator("#versionSourceStatus")).toContainText("未列出 fnOS 推荐版本");
+  await expect(page.locator("#versionSourceStatus")).toContainText("当前下载源未列出本安装包带有适配补丁的版本");
   await expect(page.locator("#overviewInstallButton")).toBeDisabled();
   await expect(page.locator("#btnUpgradeAction")).toBeDisabled();
   await pickVersion(page, "9.0.0");
   await page.locator("#btnUpgradeAction").click();
-  await expect(page.locator("#customModal")).toContainText("未经当前 fnOS 外壳验证");
+  await expect(page.locator("#customModal")).toContainText("本安装包没有此版本的适配补丁");
   assert.equal(state.posts.filter(x => x.path === "kernel/install").length, 0);
 });
 
@@ -615,6 +621,10 @@ browserTest("mobile log terminal fills the page and preserves manual scrolling",
   const terminal = page.locator("#logTerminal");
   await expect(terminal).toContainText("日志 160");
   await expect(page.locator(".terminal-footer")).toHaveCount(0);
+  await expect(page.locator('#logTools')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#exportLogsBtn')).toBeVisible();
+  await expect(page.locator('#autoScrollCheck')).toBeVisible();
+  await expect(terminal).toHaveCSS('background-color', 'rgb(252, 251, 248)');
   const metrics = await terminal.evaluate(element => ({
     client: element.clientHeight,
     scroll: element.scrollHeight,
@@ -623,12 +633,17 @@ browserTest("mobile log terminal fills the page and preserves manual scrolling",
   assert.ok(metrics.client > 420, `terminal should use the available mobile space, got ${metrics.client}px`);
   assert.ok(metrics.scroll > metrics.client, "all log lines share one scrolling window");
   assert.ok(metrics.top + metrics.client >= metrics.scroll - 2, `latest logs start in view: ${JSON.stringify(metrics)}`);
+  await openLogTools(page);
+  await expect(page.getByLabel("关键字筛选")).toHaveAttribute("name", "log-query");
+  const targetHeights = await page.locator(".terminal-controls .btn-sm, .log-level-btn, .log-search-input").evaluateAll(elements => elements.map(element => element.getBoundingClientRect().height));
+  assert.ok(targetHeights.every(height => height + 0.01 >= 44), `mobile controls need 44px targets: ${targetHeights}`);
 
   await terminal.evaluate(element => { element.scrollTop = 0; });
   state.logs = [...state.logs, "日志 161"];
   await page.evaluate(() => window.fetchLogs());
   await expect(terminal).toContainText("日志 161");
   assert.equal(await terminal.evaluate(element => element.scrollTop), 0, "reading older logs must not jump to the bottom");
+  await page.locator('#logTools summary').click();
   await page.screenshot({ path: join(screenshotDirectory, "qwenpaw-mobile-log-final.png"), fullPage: true });
 });
 
@@ -806,6 +821,7 @@ browserTest("desktop secondary controls keep comfortable pointer targets", async
   assert.ok(archive.height >= 28 && archive.width >= 64, `archive toggle ${archive.width}x${archive.height}`);
   for (const selector of ["#webProxyPublic", "#autoScrollCheck", "#autoRefreshCheck"]) {
     await page.goto(origin + prefix + (selector === "#webProxyPublic" ? "#configuration" : "#logs"));
+    if (selector === "#autoRefreshCheck") await openLogTools(page);
     const bounds = await box(page.locator(selector));
     assert.ok(bounds.width >= 16 && bounds.height >= 16, `${selector} ${bounds.width}x${bounds.height}`);
   }
@@ -1119,7 +1135,7 @@ browserTest("uninstalled overview provides the first-run guide and homepage inst
   await expect(page.locator("#overviewGuide li")).toHaveCount(3);
   await expect(page.locator("#overviewLogPreview")).toHaveCount(0);
   await expect(page.locator("#overviewInstaller")).toBeVisible();
-  await expect(page.locator("#overviewInstallVersion")).toHaveText("v2.0.0 · fnOS 已验证");
+  await expect(page.locator("#overviewInstallVersion")).toHaveText("v2.0.0 · 随包适配补丁");
   await expect(page.locator("#releaseNotesDialog")).toHaveCount(0);
   await page.locator("#overviewInstallButton").click();
   await page.locator("#modalConfirmBtn").click();
@@ -1974,6 +1990,7 @@ browserTest("only the visible live log view subscribes to file changes and fetch
   state.logs.push('新增服务日志');
   await page.evaluate(() => window.EventSource.instances.at(-1).emit('log-change', ''));
   await expect(page.locator('#logTerminal')).toContainText('新增服务日志');
+  await openLogTools(page);
   await page.locator('#autoRefreshCheck').uncheck();
   assert.equal(await page.evaluate(() => window.EventSource.instances.at(-1).url), '/app/qwenpaw/api/events');
   const before = state.liveLogQueries.length;
@@ -2262,4 +2279,61 @@ browserTest('legacy proxy migration is explicit, cancellable, and only sends the
   await expect(page.locator('#proxyPasswordState')).toHaveText('QwenPaw 原生账号');
   assert.deepEqual(state.posts,[{path:'web-proxy/use-native-login',body:{confirm:true,username:'owner',password:value},csrf:'test-token'}]);
   await expect(open).toHaveCount(0);
+});
+
+browserTest('log panel filters by level and keyword without extra requests and copies filtered lines', async t => {
+  const { page, state } = await fixture(t, {
+    logs: [
+      'INFO boot completed',
+      'WARN slow mirror response',
+      'ERROR gateway timeout on /api/status',
+      'INFO heartbeat ok',
+    ],
+  });
+  await page.addInitScript(() => {
+    window.__copiedLogs = null;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async text => { window.__copiedLogs = text; } },
+    });
+  });
+  await page.goto(origin + prefix + '#logs');
+  const terminal = page.locator('#logTerminal');
+  await expect(terminal).toContainText('INFO heartbeat ok');
+  const beforeReads = state.logRequests;
+
+  await openLogTools(page);
+  await page.locator('.log-level-btn[data-level="warn"]').click();
+  await expect(terminal).toContainText('WARN slow mirror response');
+  await expect(terminal).toContainText('ERROR gateway timeout');
+  await expect(terminal).not.toContainText('INFO boot completed');
+  await expect(page.locator('#logFilterCount')).toHaveText('显示 2 / 4 行');
+
+  await page.locator('#logSearchInput').fill('gateway');
+  await expect(terminal).toContainText('ERROR gateway timeout');
+  await expect(terminal).not.toContainText('WARN slow mirror response');
+  await expect(page.locator('#logFilterCount')).toHaveText('显示 1 / 4 行');
+
+  await page.locator('#copyLogsBtn').click();
+  await expect(page.locator('#toast')).toContainText('已复制 1 行日志');
+  assert.equal(await page.evaluate(() => window.__copiedLogs), 'ERROR gateway timeout on /api/status');
+
+  await page.locator('#clearLogFilterBtn').click();
+  await expect(terminal).toContainText('INFO boot completed');
+  await expect(page.locator('#logFilterCount')).toHaveCount(0);
+  assert.equal(state.logRequests, beforeReads);
+});
+
+browserTest('mirror dropdown supports keyboard navigation and restores focus on Escape', async t => {
+  const { page } = await fixture(t, { status: runningStatus });
+  await page.goto(origin + prefix);
+  const trigger = page.locator('#mirrorToggleBtn');
+  await trigger.focus();
+  await page.keyboard.press('ArrowDown');
+  const dropdown = page.locator('#mirrorDropdown');
+  await expect(dropdown).toHaveClass(/show/);
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Escape');
+  await expect(dropdown).not.toHaveClass(/show/);
+  await expect(trigger).toBeFocused();
 });

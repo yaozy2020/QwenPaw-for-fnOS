@@ -63,7 +63,7 @@ watch(() => disabled.value || panel.navigation.hides('overview'), hidden => { if
     </button>
     <div v-if="open" ref="list" id="versionOptions" class="history-dropdown show release-options" role="listbox" aria-labelledby="targetVersionLabel" @keydown="move">
       <button v-for="(item, i) in v.list" :key="item.version" type="button" role="option" class="history-item" :tabindex="active === i ? 0 : -1" :aria-selected="item.version === v.selected" :data-version="item.version" @click="pick(item.version)">
-        <span class="history-version">v{{ item.version }}</span><span class="release-tags"><span class="ver-tag-pill" :class="item.is_beta ? 'beta' : 'stable'">{{ item.is_beta ? '测试版' : '正式版' }}</span><span v-if="item.version === v.recommended">fnOS 已验证</span><span v-if="item.version === v.current">当前安装</span></span><span class="release-check" aria-hidden="true">{{ item.version === v.selected ? '✓' : '' }}</span>
+        <span class="history-version">v{{ item.version }}</span><span class="release-tags"><span class="ver-tag-pill" :class="item.is_beta ? 'beta' : 'stable'">{{ item.is_beta ? '测试版' : '正式版' }}</span><span v-if="item.version === v.recommended">随包适配补丁</span><span v-if="item.version === v.current">当前安装</span></span><span class="release-check" aria-hidden="true">{{ item.version === v.selected ? '✓' : '' }}</span>
       </button>
     </div>
     <slot />

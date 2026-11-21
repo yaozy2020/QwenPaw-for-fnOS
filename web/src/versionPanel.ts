@@ -100,7 +100,7 @@ export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
         view.recommended = listed(data.recommended_version);
         view.manual = !!listed(manual);
         view.selected = view.manual ? manual : view.recommended;
-        view.error = view.recommended ? '' : '当前源未列出 fnOS 推荐版本。可更换下载源，或手动选择未经验证的版本。';
+        view.error = view.recommended ? '' : view.list.length ? '当前下载源未列出本安装包带有适配补丁的版本。可从列表中选择其他版本，或更换下载源。' : '当前下载源没有可选版本。请更换下载源或稍后重试。';
         view.fresh = true;
         return true;
       }
@@ -115,7 +115,7 @@ export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
   async function checkOnlineVersions(): Promise<void> {
     showToast("正在在线检查 PyPI 最新版本...");
     if (await fetchVersionList()) {
-      showToast(`检查完成！最新稳定: ${view.stable || '无'}，最新测试: ${view.beta || '无'}`);
+      showToast(`当前下载源列出 ${view.list.length} 个版本。`);
     }
   }
 

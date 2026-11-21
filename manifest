@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.4.7-1
+version                    = 1.5.1
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS 是第三方打包的部署外壳，与 QwenPaw 上游团队无隶属关系。</p><p>提供内核安装、版本选择、运行状态、日志、端口、授权目录与下载源管理。内核仍从所选 PyPI 镜像安装；FPK 携带后端兼容补丁与预构建 Console，安装无需源码构建。</p>`
 platform                   = x86
@@ -15,4 +15,4 @@ micro_app                  = true
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "v1.4.7-1: 首页目标版本改为面板内选择，与下载源风格一致。补齐 2.3.0.post1 本地客户端子路径适配，修正 Chrome 桥接地址中空格、中文等字符的编码。"
+changelog                  = "v1.5.1: 按 DSH 阅读布局优化移动端日志页，导出与自动滚底直接可见，筛选、复制、实时刷新与清空按需展开。浅色主题改用轻底日志区并保留日志级别语义色。"

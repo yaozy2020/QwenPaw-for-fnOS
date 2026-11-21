@@ -10,6 +10,8 @@ import InstallDialog from "./views/InstallDialog.vue";
 import AboutDialog from "./views/AboutDialog.vue";
 import WebOverlay from "./views/WebOverlay.vue";
 import { useTemplateRef } from 'vue';
+import { usePanel } from "./panelContext";
+const panel = usePanel();
 const about = useTemplateRef<InstanceType<typeof AboutDialog>>('about');
 </script>
 
@@ -24,7 +26,7 @@ const about = useTemplateRef<InstanceType<typeof AboutDialog>>('about');
     </div>
     <LogsSection />
   </main>
-  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="toast" role="status" aria-live="polite" :class="{ show: panel.toast.visible }">{{ panel.toast.message }}</div>
   <ConfirmPrompt />
   <InstallDialog />
   <AboutDialog ref="about" />

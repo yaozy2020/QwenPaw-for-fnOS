@@ -5,11 +5,11 @@ import type { ManagementState } from "./managementState";
 import type { ShowModal } from "./modal";
 
 const MIRRORS = [
-  { value: "https://mirrors.aliyun.com/pypi/simple/", label: "阿里云镜像源（推荐 - 兼容公网/云机）" },
+  { value: "https://mirrors.aliyun.com/pypi/simple/", label: "阿里云镜像源" },
   { value: "https://pypi.tuna.tsinghua.edu.cn/simple", label: "清华大学镜像源" },
   { value: "https://pypi.mirrors.ustc.edu.cn/simple/", label: "中科大镜像源" },
   { value: "https://mirrors.cloud.tencent.com/pypi/simple", label: "腾讯云镜像源" },
-  { value: "", label: "官方 PyPI（国内较慢）" },
+  { value: "", label: "PyPI 官方源" },
 ];
 
 interface SettingsPanelOptions {
@@ -274,17 +274,6 @@ export function createSettingsPanel({
     } catch { if (request === mirrorRead) mirror.ready = false; }
   }
 
-  function closeMirrorDropdown(event: MouseEvent): void {
-    const drop = document.getElementById("mirrorDropdown");
-    const button = document.getElementById("mirrorToggleBtn");
-    if (drop && drop.classList.contains("show") && event.target instanceof Node
-      && !drop.contains(event.target) && !(button && button.contains(event.target))) {
-      mirror.open = false;
-    }
-  }
-
-  document.addEventListener("click", closeMirrorDropdown);
-
   return {
     changeServicePort: () => runAction(changeServicePort),
     fetchWebProxyPort: () => state.saving ? Promise.resolve() : fetchWebProxyPort(),
@@ -298,6 +287,5 @@ export function createSettingsPanel({
     toggleMirrorDropdown: () => { mirror.open = !mirror.open; if (mirror.open && !mirror.ready) void loadMirror(); },
     pickMirror,
     currentMirror: () => mirror.value,
-    destroy: () => document.removeEventListener("click", closeMirrorDropdown),
   };
 }

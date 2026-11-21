@@ -14,25 +14,59 @@ interface LogPanelOptions {
   visible(): boolean;
 }
 
-function sameLogEntry(left: LogEntry, right: LogEntry): boolean {
-  return left === right || JSON.stringify(left) === JSON.stringify(right);
+function logKey(entry: LogEntry): string {
+  return typeof entry === "string" ? `s:${entry}` : `o:${JSON.stringify(entry)}`;
 }
 
+function sameLogEntry(left: LogEntry, right: LogEntry): boolean {
+  return left === right || logKey(left) === logKey(right);
+}
+
+// KMP O(n) 最长后缀-前缀重叠匹配，避免满窗口轮换时 O(n^2) 切片与序列化
 function mergeLogWindow(existing: LogEntry[], incoming: LogEntry[]): LogEntry[] {
   if (!existing.length) return incoming.slice(-LOG_WINDOW_MAX);
-  let overlap = Math.min(existing.length, incoming.length);
-  while (overlap > 0) {
-    const matches = existing.slice(-overlap).every((entry, index) => sameLogEntry(entry, incoming[index]));
-    if (matches) break;
-    overlap -= 1;
+  if (!incoming.length) return existing;
+  const maxOverlap = Math.min(existing.length, incoming.length);
+  const pattern = new Array<string>(maxOverlap);
+  for (let i = 0; i < maxOverlap; i += 1) pattern[i] = logKey(incoming[i]);
+
+  const lps = new Int32Array(maxOverlap);
+  for (let i = 1, len = 0; i < maxOverlap;) {
+    if (pattern[i] === pattern[len]) {
+      lps[i++] = ++len;
+    } else if (len > 0) {
+      len = lps[len - 1];
+    } else {
+      lps[i++] = 0;
+    }
   }
-  if (overlap === 0) return incoming.slice(-LOG_WINDOW_MAX);
-  if (overlap === incoming.length) return existing;
-  return [...existing, ...incoming.slice(overlap)].slice(-LOG_WINDOW_MAX);
+
+  let matched = 0;
+  const start = existing.length - maxOverlap;
+  for (let i = start; i < existing.length; i += 1) {
+    const key = logKey(existing[i]);
+    while (matched > 0 && pattern[matched] !== key) matched = lps[matched - 1];
+    if (pattern[matched] === key) matched += 1;
+  }
+
+  if (matched === 0) return incoming.slice(-LOG_WINDOW_MAX);
+  if (matched === incoming.length) return existing;
+  return [...existing, ...incoming.slice(matched)].slice(-LOG_WINDOW_MAX);
 }
 
-function logText(entry: LogEntry): string {
+export type LogLevelFilter = "all" | "warn" | "error";
+
+export function logEntryText(entry: LogEntry): string {
   return typeof entry === "string" ? entry : entry.message || JSON.stringify(entry);
+}
+
+export function matchesLogFilter(entry: LogEntry, level: LogLevelFilter, query: string, normalized = false): boolean {
+  const text = logEntryText(entry);
+  if (level === "error" && !/ERROR|Error|failed|失败/.test(text)) return false;
+  if (level === "warn" && !/ERROR|Error|failed|失败|WARN|Warning/.test(text)) return false;
+  const keyword = normalized ? query : query.trim().toLowerCase();
+  if (keyword && !text.toLowerCase().includes(keyword)) return false;
+  return true;
 }
 
 export function createLogPanel({ api, showToast, confirm, errorMessage, visible }: LogPanelOptions) {
@@ -41,7 +75,14 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
   let logClearGeneration = 0;
   let liveLogFetchSeq = 0;
   let followLatest = true;
-  const view = shallowReactive({ lines: [] as LogEntry[], exportBusy: false, error: '' });
+  let disconnectDom: (() => void) | null = null;
+  const view = shallowReactive({
+    lines: [] as LogEntry[],
+    exportBusy: false,
+    error: '',
+    level: 'all' as LogLevelFilter,
+    query: '',
+  });
 
   let inLogs: boolean | undefined;
   let autoRefresh = true;
@@ -107,7 +148,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
       if (!result.ok || !result.data.success || !Array.isArray(result.data.logs)) {
         throw new Error(result.data.message || `读取日志失败 (${result.status})`);
       }
-      const content = result.data.logs.map(logText).join("\n") + "\n";
+      const content = result.data.logs.map(logEntryText).join("\n") + "\n";
       const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
       const link = document.createElement("a");
       link.href = url;
@@ -143,26 +184,68 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     else polling.stop();
   }
 
+  async function copyLogs(entries?: LogEntry[]): Promise<void> {
+    const source = entries ?? (
+      view.level === "all" && !view.query.trim()
+        ? view.lines
+        : view.lines.filter(entry => matchesLogFilter(entry, view.level, view.query))
+    );
+    if (!source.length) {
+      showToast("当前无日志可复制");
+      return;
+    }
+    const text = source.map(logEntryText).join("\n");
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand("copy");
+        area.remove();
+        if (!copied) throw new Error("浏览器不支持剪贴板写入");
+      }
+      showToast(`已复制 ${source.length} 行日志`);
+    } catch (error) {
+      showToast(`复制日志失败: ${errorMessage(error)}`);
+    }
+  }
+
   function connect(): void {
+    disconnectDom?.();
     const terminal = document.getElementById("logTerminal");
-    terminal?.addEventListener("scroll", () => {
+    const onScroll = () => {
+      if (!terminal) return;
       followLatest = terminal.scrollHeight - terminal.clientHeight - terminal.scrollTop <= 24;
-    }, { passive: true });
+    };
+    terminal?.addEventListener("scroll", onScroll, { passive: true });
     const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
-    autoScroll?.addEventListener("change", () => {
-      if (autoScroll.checked && terminal) {
+    const onAutoScrollChange = () => {
+      if (autoScroll?.checked && terminal) {
         followLatest = true;
         terminal.scrollTop = terminal.scrollHeight;
       }
-    });
+    };
+    autoScroll?.addEventListener("change", onAutoScrollChange);
+    let observer: ResizeObserver | null = null;
     if (terminal && typeof ResizeObserver === "function") {
-      const observer = new ResizeObserver(() => {
+      observer = new ResizeObserver(() => {
         if (followLatest && autoScroll?.checked && terminal.clientHeight > 0) {
           terminal.scrollTop = terminal.scrollHeight;
         }
       });
       observer.observe(terminal);
     }
+    disconnectDom = () => {
+      terminal?.removeEventListener("scroll", onScroll);
+      autoScroll?.removeEventListener("change", onAutoScrollChange);
+      observer?.disconnect();
+    };
   }
   return {
     view, connect, refresh,
@@ -170,8 +253,13 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     notifyChange: () => { if (autoRefresh && visible() && !document.hidden) void polling.refresh(); },
     viewChanged,
     clear,
-    destroy: polling.destroy,
+    destroy: () => {
+      disconnectDom?.();
+      disconnectDom = null;
+      polling.destroy();
+    },
     setAutoRefresh,
     exportLogs,
+    copyLogs,
   };
 }

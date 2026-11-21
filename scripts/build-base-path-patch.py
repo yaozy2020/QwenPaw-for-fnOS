@@ -19,6 +19,11 @@ BACKEND_FILES = (
     "app/routers/voice.py",
     "browser/control_link/chrome/ws_handler.py",
     "cli/http.py",
+    "cli/desktop_cmd.py",
+    "cli/env_cmd.py",
+    "channel_protocol/models.py",
+    "official_channels/voice-0.1.0.zip",
+    "pawapp/deps.py",
 )
 EXTRA_CLIENTS = ("agents/tools/agent_management.py", "utils/startup_display.py")
 POST1_FILES = ("app/fnos_entry.py", "cli/auto.py", "cli/cron_cmd.py", "cli/doctor_checks.py",
@@ -29,7 +34,7 @@ SOURCE_COMMITS = {
 }
 SOURCE_PATCH_SHA256 = {
     "2.3.0": "c65666afb8f7c90e22d457b90f3d9a7e4be070e1b6e6c77d3c4b1710e46b3b20",
-    "2.3.0.post1": "3cb051db72b16e106d9c1b8e2d420e451d892ad9475c73323abea01f24a082f4",
+    "2.3.0.post1": "9111b49874a421f8e5a60496f3c85b5ca45701dbeb6c5013a1bf03074243cd8a",
 }
 PREVIOUS_SHA256 = {
     "app/_app.py": ["38541ce134eb38f7ec64a82125365400cc2f3ca69ea5aef86b6f1ba42500877c"],
@@ -45,7 +50,15 @@ def safe_relative(value, console_only=False):
     if not isinstance(value, str):
         raise ValueError("patch path must be a string")
     parts = value.split("/")
-    allowed_roots = ("console",) if console_only else ("app", "browser", "cli", "console")
+    allowed_roots = (
+        "app",
+        "browser",
+        "channel_protocol",
+        "cli",
+        "console",
+        "official_channels",
+        "pawapp",
+    )
     if (
         len(value) > 4096
         or len(parts) < 2

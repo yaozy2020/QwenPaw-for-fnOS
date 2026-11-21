@@ -26,15 +26,14 @@ const showModal = prompt.show;
 // 定时器必须单例:每次 showToast 都新建 setTimeout 会让先前那条的计时器
 // 继续跑,在后一条刚显示时把它移除 —— 连续提示(如"正在保存…"→"已保存")
 // 会出现闪一下就消失。改为始终重置同一个计时器。
+const toast = reactive({ message: "", visible: false });
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 function showToast(msg: string) {
-  const t = document.getElementById("toast");
-  if (!t) return;
-  t.innerText = msg;
-  t.classList.add("show");
+  toast.message = msg;
+  toast.visible = true;
   if (toastTimer !== null) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
-    t.classList.remove("show");
+    toast.visible = false;
     toastTimer = null;
   }, 2500);
 }
@@ -165,15 +164,14 @@ function toggleAutoRefresh(enabled: boolean): void {
 
 
 
+const webEntry = reactive({ open: false, url: "about:blank" });
 let webEntryHistoryPushed = false;
 let webTrigger: HTMLElement | null = null;
 function closeWebEntryOverlay(): void {
-  const overlay = document.getElementById("webEntryOverlay");
-  if (!overlay || overlay.hidden) return;
-  overlay.hidden = true;
+  if (!webEntry.open) return;
+  webEntry.open = false;
+  webEntry.url = "about:blank";
   document.documentElement.classList.remove("web-entry-open");
-  const frame = document.getElementById("webEntryFrame");
-  if (frame instanceof HTMLIFrameElement) frame.src = "about:blank";
   webEntryHistoryPushed = false;
   const trigger = webTrigger;
   webTrigger = null;
@@ -189,18 +187,16 @@ function openWebPage(url: string, trigger: HTMLElement | null): void {
     window.open(url, "_blank", "noopener");
     return;
   }
-  const overlay = document.getElementById("webEntryOverlay");
-  const frame = document.getElementById("webEntryFrame");
-  if (!overlay || !(frame instanceof HTMLIFrameElement)) return;
   webTrigger = trigger;
-  frame.src = url;
-  overlay.hidden = false;
+  if (!webEntry.open) {
+    try {
+      history.pushState({ ...history.state, qwenpawWebEntry: true }, "", location.href);
+      webEntryHistoryPushed = true;
+    } catch { webEntryHistoryPushed = false; }
+  }
+  webEntry.url = url;
+  webEntry.open = true;
   document.documentElement.classList.add("web-entry-open");
-  document.getElementById("webEntryBack")?.focus();
-  try {
-    history.pushState({ ...history.state, qwenpawWebEntry: true }, "", location.href);
-    webEntryHistoryPushed = true;
-  } catch { webEntryHistoryPushed = false; }
 }
 function openConsole(event: MouseEvent): void {
   const link = event.currentTarget;
@@ -208,10 +204,11 @@ function openConsole(event: MouseEvent): void {
   event.preventDefault();
   openWebPage("/app/qwenpaw/web/", link);
 }
+function handleOverlayKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && webEntry.open) dismissWeb();
+}
 window.addEventListener("popstate", closeWebEntryOverlay);
-document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && document.documentElement.classList.contains("web-entry-open")) dismissWeb();
-});
+document.addEventListener("keydown", handleOverlayKeydown);
 let statusEvents: EventSource | null = null;
 let eventQuery = '';
 
@@ -252,17 +249,33 @@ const statusPolling = createPollingLifecycle({ refresh: fetchStatus, intervalMs:
 
 const visited = reactive({ configuration: false, authorization: false });
 const panel = {
+  toast, webEntry,
   navigation, visited, prompt, management, settings: settingsPanel, dirs: authorizedDirsPanel, status: statusPanel,
   versions: versionPanel, logs: logPanel, progress: installProgress,
   showTaskDetails, serviceControl, controlService, checkOrUpgrade,
   checkOnlineVersions, needsInstaller, toggleMirrorDropdown, attachRunningInstall,
   closeUpgradeModal, minimizeUpgradeModal, toggleAutoRefresh, clearTerminalLogs, uninstallKernel,
   openConsole, dismissWeb, openBackup: () => openWebPage("/app/qwenpaw/web/backups", document.getElementById("openBackupBtn")),
-  exportLogs: logPanel.exportLogs,
+  exportLogs: logPanel.exportLogs, copyLogs: logPanel.copyLogs,
 };
 export type PanelContext = typeof panel;
 const app = createApp(App).provide(panelKey, panel);
-app.onUnmount(navigation.stop);
+app.onUnmount(() => {
+  navigation.stop();
+  statusPolling.destroy();
+  statusPanel.destroy();
+  logPanel.destroy();
+  statusEvents?.close();
+  statusEvents = null;
+  if (toastTimer !== null) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  window.removeEventListener("popstate", closeWebEntryOverlay);
+  document.removeEventListener("keydown", handleOverlayKeydown);
+  document.removeEventListener("visibilitychange", resumeVisiblePage);
+  window.removeEventListener("pageshow", resumeVisiblePage);
+});
 app.mount('#consoleRoot');
 logPanel.connect();
 updateTaskCenterButton();
