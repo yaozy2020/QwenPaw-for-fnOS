@@ -50,8 +50,8 @@
 ### QwenPaw 2.3.0.post1
 
 - 上游 PR：`#8719`（临时下游兼容，不表示上游已合并）
-- 后端及预构建 Console 差异文件：1159 个，原始数据 54,770,128 字节
-- manifest SHA256：`881a275204cf4c257eff4c51d4fb4bf050b2faca6d54ee656d963ba72e04e206`
+- 后端及预构建 Console 差异文件：1150 个，原始数据 54,628,598 字节
+- manifest SHA256：`cba3e5b5427ce7fc395a4cbf5abd8c4e920a66fd867e023a964ea8d3cd6b8012`
 
 - FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite
 
