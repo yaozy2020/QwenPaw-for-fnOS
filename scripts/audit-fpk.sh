@@ -40,7 +40,7 @@ def report(condition, success, failure):
 def validate_patch_counts(files, delete_files):
     if not isinstance(files, list) or not files or len(files) > 2048:
         raise ValueError("base-path patch file count exceeds the allowed payload limit")
-    if not isinstance(delete_files, list) or len(delete_files) > 4096:
+    if not isinstance(delete_files, list) or len(delete_files) > 8192:
         raise ValueError("base-path patch delete list is invalid")
 
 
@@ -504,8 +504,8 @@ def test_patch_console_compression():
 
 
 if fpk_path == "--self-test":
-    validate_patch_counts([None] * 2048, [None] * 4096)
-    for files, deletes in (([], []), ([None] * 2049, []), ([None], [None] * 4097), ([None], None)):
+    validate_patch_counts([None] * 2048, [None] * 8192)
+    for files, deletes in (([], []), ([None] * 2049, []), ([None], [None] * 8193), ([None], None)):
         try:
             validate_patch_counts(files, deletes)
         except ValueError:

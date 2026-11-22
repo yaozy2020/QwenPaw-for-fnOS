@@ -183,6 +183,24 @@ fn err_json(code: StatusCode, msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+pub(super) fn err_json_code(status: StatusCode, code: &str, msg: &str) -> axum::response::Response {
+    (
+        status,
+        Json(json!({"ok": false, "success": false, "code": code, "error": msg, "message": msg})),
+    )
+        .into_response()
+}
+
+pub(crate) fn management_error_code(error: &ManagementError) -> &'static str {
+    match error {
+        ManagementError::OperationInProgress => "operation_in_progress",
+        ManagementError::RecoveryPending(_) => "recovery_pending",
+        ManagementError::InstallBusy => "install_busy",
+        ManagementError::InvalidSettings(_) => "invalid_settings",
+        ManagementError::OperationFailed(_) => "operation_failed",
+    }
+}
+
 pub(crate) fn management_error_status(error: &ManagementError) -> StatusCode {
     match error {
         ManagementError::OperationInProgress
@@ -194,7 +212,11 @@ pub(crate) fn management_error_status(error: &ManagementError) -> StatusCode {
 }
 
 pub(super) fn management_error_response(error: ManagementError) -> axum::response::Response {
-    err_json(management_error_status(&error), &error.to_string())
+    err_json_code(
+        management_error_status(&error),
+        management_error_code(&error),
+        &error.to_string(),
+    )
 }
 
 type OperationResult = Result<OperationGuard, Box<axum::response::Response>>;

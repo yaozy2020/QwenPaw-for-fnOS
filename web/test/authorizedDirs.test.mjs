@@ -402,3 +402,59 @@ test("callback reports result publication failure and stays open", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("callback renders English copy and tracks system theme changes dynamically", async () => {
+  const html = await readFile(new URL("../src/auth-callback.html", import.meta.url), "utf8");
+  const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+  const originalFetch = globalThis.fetch;
+  const elements = Object.fromEntries(["title", "message", "path", "close"].map(id => [id, {
+    textContent: "", hidden: true, addEventListener() {},
+  }]));
+  const rootAttrs = {};
+  const metaAttrs = {};
+  let onMediaChange = null;
+  const media = {
+    matches: false,
+    addEventListener(type, cb) { if (type === "change") onMediaChange = cb; },
+  };
+  const win = {
+    location: { search: "?status=success&method=authorizeUserFile&state=en-1", origin: "https://nas.example" },
+    navigator: { language: "en-US", languages: ["en-US"] },
+    localStorage: { getItem() { return null; }, setItem() {} },
+    matchMedia: () => media,
+    addEventListener() {},
+    opener: null,
+    closed: false,
+    close() { this.closed = true; },
+    setTimeout() {},
+  };
+  win.parent = win;
+  const doc = {
+    title: "",
+    cookie: "",
+    documentElement: { lang: "", setAttribute(k, v) { rootAttrs[k] = v; } },
+    querySelector(sel) {
+      return sel === 'meta[name="theme-color"]' ? { setAttribute(k, v) { metaAttrs[k] = v; } } : null;
+    },
+    getElementById: id => elements[id],
+  };
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  try {
+    new Function("window", "document", "location", source)(win, doc, win.location);
+    assert.equal(doc.documentElement.lang, "en");
+    assert.equal(doc.title, "fnOS Folder Authorization");
+    assert.equal(elements.title.textContent, "Folder Authorized");
+    assert.equal(elements.close.textContent, "Close");
+    assert.equal(rootAttrs["data-theme"], "light");
+    assert.equal(metaAttrs.content, "#f2f1ed");
+
+    media.matches = true;
+    assert.equal(typeof onMediaChange, "function");
+    onMediaChange();
+    assert.equal(rootAttrs["data-theme"], "dark");
+    assert.equal(metaAttrs.content, "#141414");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -1,3 +1,5 @@
+import { t } from "./i18n.ts";
+
 export interface ProjectDirEntry {
   path: string;
   label?: string;
@@ -24,21 +26,21 @@ export function buildAuthorizationUrl(origin: string, state: string, redirectUri
 export function parseAuthCallback(search: string, expectedState: string): AuthResult {
   const params = new URLSearchParams(search);
   const state = params.get("state") || "";
-  if (!expectedState || state !== expectedState) throw new Error("授权回调状态不匹配");
+  if (!expectedState || state !== expectedState) throw new Error(t("authz.err.stateMismatch"));
   const status = params.get("status") || "";
   const error = params.get("error") || "";
   const method = params.get("method") || "";
-  if (status !== "success") throw new Error(error || "已取消授权");
+  if (status !== "success") throw new Error(error || t("authz.err.cancelled"));
   const raw = params.get("path");
   if (!raw && (method === "authorizeUserFile" || method === "authorizeSharedFile")) {
     return { status, error, method, state, paths: [] };
   }
-  if (!raw) throw new Error("授权回调缺少目录");
+  if (!raw) throw new Error(t("authz.err.missingDir"));
   let decoded: unknown;
-  try { decoded = JSON.parse(raw); } catch { throw new Error("授权目录格式无效"); }
-  if (!Array.isArray(decoded)) throw new Error("授权目录格式无效");
+  try { decoded = JSON.parse(raw); } catch { throw new Error(t("authz.err.invalidFormat")); }
+  if (!Array.isArray(decoded)) throw new Error(t("authz.err.invalidFormat"));
   const paths = decoded.filter((path): path is string => typeof path === "string").map(normalizeProjectDir);
-  if (!paths.length) throw new Error("授权回调缺少有效目录");
+  if (!paths.length) throw new Error(t("authz.err.missingValidDir"));
   return { status, error, method, state, paths };
 }
 
@@ -46,16 +48,16 @@ type StructuredAuthResult = Partial<Omit<AuthResult, "paths">> & { path?: unknow
 
 function parseStructuredAuthResult(result: StructuredAuthResult | undefined, expectedState: string, fallbackState = ""): AuthResult {
   const state = result?.state || fallbackState;
-  if (!expectedState || state !== expectedState) throw new Error("授权回调状态不匹配");
+  if (!expectedState || state !== expectedState) throw new Error(t("authz.err.stateMismatch"));
   const status = result?.status || "";
   const error = result?.error || "";
   const method = result?.method || "";
-  if (status !== "success") throw new Error(error || "已取消授权");
+  if (status !== "success") throw new Error(error || t("authz.err.cancelled"));
   const paths = Array.isArray(result?.path)
     ? result.path.filter((path): path is string => typeof path === "string").map(normalizeProjectDir)
     : [];
   if (!paths.length && method !== "authorizeUserFile" && method !== "authorizeSharedFile") {
-    throw new Error("授权回调缺少有效目录");
+    throw new Error(t("authz.err.missingValidDir"));
   }
   return { status, error, method, state, paths };
 }
@@ -63,10 +65,10 @@ function parseStructuredAuthResult(result: StructuredAuthResult | undefined, exp
 function normalizeProjectDir(path: string): string {
   const trimmed = path.trim();
   if (!trimmed.startsWith("/") || trimmed.includes("\\") || trimmed.includes("\0")) {
-    throw new Error("目录必须是绝对路径");
+    throw new Error(t("authz.err.absoluteRequired"));
   }
   const normalized = trimmed.replace(/\/+$/, "") || "/";
-  if (normalized.split("/").some((part) => part === "..")) throw new Error("目录包含非法路径段");
+  if (normalized.split("/").some((part) => part === "..")) throw new Error(t("authz.err.invalidSegment"));
   return normalized;
 }
 
@@ -124,7 +126,7 @@ function upstreamError(data: { detail?: unknown; message?: unknown }, fallback: 
 export async function loadProjectDirs(): Promise<ProjectDirEntry[]> {
   const response = await upstreamRequest("/workspace/project-directory/dirs");
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw upstreamError(data, `读取工作区目录失败 (${response.status})`);
+  if (!response.ok) throw upstreamError(data, t("authz.err.loadFailed", { status: response.status }));
   return Array.isArray(data.project_dirs) ? data.project_dirs : [];
 }
 
@@ -139,7 +141,7 @@ async function saveProjectDirs(entries: ProjectDirEntry[]): Promise<void> {
     }) : undefined,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw upstreamError(data, `保存工作区目录失败 (${response.status})`);
+  if (!response.ok) throw upstreamError(data, t("authz.err.saveFailed", { status: response.status }));
 }
 
 export async function checkDirectory(path: string): Promise<DirectoryHealth> {
@@ -149,7 +151,7 @@ export async function checkDirectory(path: string): Promise<DirectoryHealth> {
     body: JSON.stringify({ path }),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.success) throw new Error(data.message || data.error || `目录权限复查失败 (${response.status})`);
+  if (!response.ok || !data.success) throw new Error(data.message || data.error || t("authz.err.checkFailed", { status: response.status }));
   return data as DirectoryHealth;
 }
 
@@ -182,13 +184,13 @@ function openAuthorizationSurface(): AuthSurface {
     const bar = document.createElement("div");
     bar.style.cssText = "display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--card-border,#ded6cb)";
     const title = document.createElement("strong");
-    title.textContent = "飞牛目录授权";
+    title.textContent = t("authz.surfaceTitle");
     const cancel = document.createElement("button");
     cancel.type = "button";
-    cancel.textContent = "取消";
+    cancel.textContent = t("common.cancel");
     cancel.style.cssText = "min-height:36px;padding:4px 12px";
     const frame = document.createElement("iframe");
-    frame.title = "飞牛目录授权";
+    frame.title = t("authz.surfaceTitle");
     frame.style.cssText = "flex:1;width:100%;border:0;background:#fff";
     let closed = false;
     const close = () => {
@@ -204,7 +206,7 @@ function openAuthorizationSurface(): AuthSurface {
     return { get closed() { return closed; }, navigate: (next) => { frame.src = next; }, close };
   }
   const popup = window.open("about:blank", "_blank", "width=720,height=760");
-  if (!popup) throw new Error("浏览器拦截了授权窗口，请允许弹窗后重试");
+  if (!popup) throw new Error(t("authz.err.popupBlocked"));
   return {
     get closed() { return popup.closed; },
     navigate: (next) => popup.location.replace(next),
@@ -275,11 +277,11 @@ function waitForAuthorization(path: string): Promise<AuthResult> {
       if (!surface.closed || closing) return;
       closing = true;
       void pollResult().finally(() => {
-        if (!settled) finish(new Error("已取消授权"));
+        if (!settled) finish(new Error(t("authz.err.cancelled")));
       });
     }, 500);
     const resultPollTimer = window.setInterval(() => void pollResult(), 900);
-    const timeout = window.setTimeout(() => finish(new Error("授权超时，请重试")), 5 * 60 * 1000);
+    const timeout = window.setTimeout(() => finish(new Error(t("authz.err.timeout"))), 5 * 60 * 1000);
     window.addEventListener("message", onMessage);
     window.addEventListener("storage", onStorage);
     window.addEventListener("focus", lookupStored);

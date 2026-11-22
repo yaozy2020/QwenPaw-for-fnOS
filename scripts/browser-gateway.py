@@ -36,9 +36,17 @@ ADMIN = {"X-Trim-Userid": "1000", "X-Trim-Username": "browser-gateway-test-admin
 TOKEN = "isolated-browser-gateway-supervisor-token-2026"
 MAX_BODY = 64 * 1024
 MAX_RESPONSE = 8 * 1024 * 1024
+VERIFIED_LINK = ""
+if os.environ.get("QWENPAW_E2E_INCLUDE_VERIFIED") == "1":
+    verified_version = (ROOT / "patches" / "verified-version").read_text(encoding="utf-8").strip()
+    VERIFIED_LINK = (
+        f"<a href='qwenpaw-{verified_version}.tar.gz' "
+        "data-upload-time='2026-09-01T00:00:00Z'>verified</a>"
+    )
 INDEX_BODY = (
     "<html><body>"
-    "<a href='qwenpaw-2.0.0.tar.gz' data-upload-time='2026-07-01T00:00:00Z'>stable</a>"
+    + VERIFIED_LINK
+    + "<a href='qwenpaw-2.0.0.tar.gz' data-upload-time='2026-07-01T00:00:00Z'>stable</a>"
     "<a href='qwenpaw-2.1.0b1-py3-none-any.whl' data-upload-time='2026-08-01T00:00:00Z'>beta</a>"
     "<a href='unrelated-99.0.0.tar.gz'>unrelated</a>"
     "</body></html>"

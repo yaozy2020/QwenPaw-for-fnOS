@@ -16,11 +16,15 @@ import { createPrompt } from "./modal";
 import { createSettingsPanel } from "./settingsPanel";
 import { createStatusPanel } from "./statusPanel";
 import { createVersionPanel } from "./versionPanel";
+import { localizeBackendMessage, t, type MessageKey } from "./i18n";
+import { createHostTitle } from "./hostTitle";
+import { TrimApp } from "@trimjs/web-app";
 
 const api = createApiClient({ pathname: window.location.pathname, cookie: () => document.cookie });
 
 const prompt = createPrompt();
 const showModal = prompt.show;
+const trimApp = new TrimApp();
 
 // 灵动岛风格置顶 Toast
 // 定时器必须单例:每次 showToast 都新建 setTimeout 会让先前那条的计时器
@@ -64,50 +68,60 @@ const currentMirror = settingsPanel.currentMirror;
 
 async function uninstallKernel() {
   if (!versionPanel.currentRunningVersion()) {
-    showToast(statusPanel.view.data?.installed ? '尚未确认当前内核版本，请刷新后再操作' : '当前未安装 QwenPaw 内核');
+    showToast(statusPanel.view.data?.installed ? t("service.versionUnconfirmed") : t("service.notInstalled"));
     return;
   }
   const ok = await showModal({
-    title: "仅卸载 QwenPaw 内核",
-    message: `将停止服务并删除 QwenPaw v${versionPanel.currentRunningVersion()} 的运行环境与版本钉。\n\n• 用户配置、会话记忆与管理员认证均完整保留，之后可随时重新安装。\n• 注意：受飞牛 fnOS 桌面会话缓存限制，桌面图标隐藏可能需刷新浏览器页面生效。确认继续？`,
+    title: t("service.uninstallTitle"),
+    message: t("service.uninstallMsg", { version: versionPanel.currentRunningVersion() }),
     type: "danger",
-    confirmText: "仅卸载内核，保留数据"
+    confirmText: t("service.uninstallConfirm"),
   });
   if (!ok || recoveryReason() || supervisorReachable() !== true) return;
   try {
-    showToast("正在卸载内核并保留用户数据...");
+    showToast(t("service.uninstalling"));
     const data = operationSucceeded(await api.uninstallKernel());
-    showToast(data.message || "内核已卸载");
+    showToast(localizeBackendMessage(data.code, data.message) || t("service.uninstalled"));
     await fetchStatus();
     fetchLogs();
   } catch (e) {
     console.error("uninstallKernel err:", e);
-    showToast("卸载请求失败: " + errorMessage(e));
+    showToast(t("service.uninstallFailed", { error: errorMessage(e) }));
   }
 }
 
-const serviceControl = reactive({ pending: '' });
+const serviceActionKeys: Record<"start" | "stop" | "restart", MessageKey> = {
+  start: "service.act.start",
+  stop: "service.act.stop",
+  restart: "service.act.restart",
+};
+const serviceControlState = reactive({ action: "" as "" | "start" | "stop" | "restart" });
+const serviceControl = {
+  get pending() {
+    return serviceControlState.action ? t("service.pending", { action: t(serviceActionKeys[serviceControlState.action]) }) : "";
+  },
+};
 async function controlService(act: "start" | "stop" | "restart"): Promise<void> {
-  if (serviceControl.pending) return;
-  const actionName = act === "restart" ? "重启" : (act === "stop" ? "停止" : "启动");
+  if (serviceControlState.action) return;
+  const actionName = t(serviceActionKeys[act]);
   const ok = await showModal({
-    title: `${actionName}服务确认`,
-    message: `确定要立即${actionName} QwenPaw 服务吗？${act === 'restart' ? '重启期间连接会短暂中断。' : ''}`,
-    type: act === 'stop' ? 'danger' : 'primary',
-    confirmText: `确认${actionName}`
+    title: t("service.confirmTitle", { action: actionName }),
+    message: t("service.confirmMsg", { action: actionName, extra: act === "restart" ? t("service.restartExtra") : "" }),
+    type: act === "stop" ? "danger" : "primary",
+    confirmText: t("service.confirmBtn", { action: actionName }),
   });
-  if (!ok || serviceControl.pending || recoveryReason() || supervisorReachable() !== true) return;
-  serviceControl.pending = `正在${actionName}服务…`;
+  if (!ok || serviceControlState.action || recoveryReason() || supervisorReachable() !== true) return;
+  serviceControlState.action = act;
   try {
     showToast(serviceControl.pending);
     const data = operationSucceeded(await api.controlService(act));
-    showToast(data.message || `${actionName}指令已成功执行`);
+    showToast(localizeBackendMessage(data.code, data.message) || t("service.done", { action: actionName }));
     await fetchStatus();
     void fetchLogs();
   } catch (e) {
-    showToast("操作失败: " + errorMessage(e));
+    showToast(t("service.failed", { error: errorMessage(e) }));
   } finally {
-    serviceControl.pending = '';
+    serviceControlState.action = "";
   }
 }
 
@@ -141,7 +155,7 @@ const installCoordinator = createInstallCoordinator({
 });
 function checkOrUpgrade() {
   if (statusPanel.view.data?.installed && !versionPanel.currentRunningVersion()) {
-    showToast('尚未确认当前内核版本，请刷新后再操作');
+    showToast(t("service.versionUnconfirmed"));
     return;
   }
   return installCoordinator.checkOrUpgrade();
@@ -244,7 +258,7 @@ function syncStatusEvents(): void {
   });
 }
 
-const authorizedDirsPanel = createAuthorizedDirsPanel({ showToast, confirm: showModal });
+const authorizedDirsPanel = createAuthorizedDirsPanel({ showToast, confirm: showModal, sdk: trimApp });
 const statusPolling = createPollingLifecycle({ refresh: fetchStatus, intervalMs: 30000 });
 
 const visited = reactive({ configuration: false, authorization: false });
@@ -259,8 +273,10 @@ const panel = {
   exportLogs: logPanel.exportLogs, copyLogs: logPanel.copyLogs,
 };
 export type PanelContext = typeof panel;
+const stopHostTitle = createHostTitle(() => (webEntry.open ? "" : navigation.title), trimApp);
 const app = createApp(App).provide(panelKey, panel);
 app.onUnmount(() => {
+  stopHostTitle();
   navigation.stop();
   statusPolling.destroy();
   statusPanel.destroy();

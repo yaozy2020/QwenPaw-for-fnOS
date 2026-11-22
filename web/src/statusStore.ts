@@ -43,19 +43,20 @@ export function isStatusSnapshot(value: unknown): value is StatusResponse {
     && isRecord(value.install) && typeof value.install.running === "boolean";
 }
 
-export function formatUptime(seconds: number | null): string {
+export function formatUptime(seconds: number | null, locale: string = "zh-CN"): string {
   if (seconds === null || seconds < 0) return "-";
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = Math.floor(seconds % 60);
+  const isEn = locale.toLowerCase().startsWith("en");
   if (hours > 0 || days > 0) {
     const units = days ? [hours, minutes] : [hours, minutes, secs];
     const clock = units.map(n => String(n).padStart(2, '0')).join(':');
-    return days ? `${days}天 ${clock}` : clock;
+    return days ? (isEn ? `${days}d ${clock}` : `${days}天 ${clock}`) : clock;
   }
-  if (minutes > 0) return `${minutes}分 ${secs}秒`;
-  return `${secs}秒`;
+  if (minutes > 0) return isEn ? `${minutes}m ${secs}s` : `${minutes}分 ${secs}秒`;
+  return isEn ? `${secs}s` : `${secs}秒`;
 }
 
 export function formatMem(kb: number | null): string {

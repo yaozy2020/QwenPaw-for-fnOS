@@ -8,6 +8,7 @@
     "strict": true,
     "allowJs": true,
     "checkJs": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true

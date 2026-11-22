@@ -1,25 +1,29 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { formatMem, type StatusData } from '../statusStore';
+import { currentLocale, t } from '../i18n';
 const props = defineProps<{ data: StatusData; uptime: string }>();
 const unavailable = computed(() => props.data.degraded);
 const running = computed(() => !unavailable.value && props.data.installed !== false && props.data.running);
 const state = computed(() => unavailable.value || props.data.recoveryReason ? 'degraded' : props.data.installed === false ? 'uninstalled' : running.value ? 'running' : 'stopped');
-const title = computed(() => unavailable.value ? '状态不可达' : props.data.recoveryReason ? '需要恢复' : props.data.installed === false ? '内核未安装' : running.value ? '运行中' : '已停止');
+const title = computed(() => unavailable.value ? t('status.unreachable') : props.data.recoveryReason ? t('status.recovery') : props.data.installed === false ? t('status.uninstalled') : running.value ? t('status.running') : t('status.stopped'));
 const description = computed(() => {
   const { degradedDetail, recoveryReason, installed } = props.data;
-  if (unavailable.value) return `暂时无法获取服务状态，请检查网络或重新登录飞牛后重试。${degradedDetail ? `（${degradedDetail}）` : ''}`;
-  if (recoveryReason) return `暂勿重新安装或启停服务。请查看运行日志并保留现场。原因：${recoveryReason}`;
-  if (installed === false) return '先安装 QwenPaw 内核，即可开始使用 AI 对话。';
-  return running.value ? '内核进程正在运行，可在下方查看资源占用和运行时间。' : '内核已安装，启动服务后即可继续对话。';
+  if (unavailable.value) {
+    const detail = degradedDetail ? (currentLocale.value === 'en' ? ` (${degradedDetail})` : `（${degradedDetail}）`) : '';
+    return t('status.desc.unreachable', { detail });
+  }
+  if (recoveryReason) return t('status.desc.recovery', { reason: recoveryReason });
+  if (installed === false) return t('status.desc.uninstalled');
+  return running.value ? t('status.desc.running') : t('status.desc.stopped');
 });
 const stats = computed(() => {
   const { cpu, memKB, pid } = props.data;
   return [
-    ['CPU 使用率', running.value && typeof cpu === 'number' ? `${cpu.toFixed(1)}%` : '-'],
-    ['内存占用', running.value ? formatMem(memKB) : '-'],
-    ['进程 PID', running.value ? pid : '-'],
-    ['运行时间', running.value && props.uptime ? props.uptime : '-'],
+    ['cpu', t('overview.cpu'), running.value && typeof cpu === 'number' ? `${cpu.toFixed(1)}%` : '-'],
+    ['mem', t('overview.memory'), running.value ? formatMem(memKB) : '-'],
+    ['pid', t('overview.pid'), running.value ? pid : '-'],
+    ['uptime', t('overview.uptime'), running.value && props.uptime ? props.uptime : '-'],
   ];
 });
 </script>
@@ -27,9 +31,9 @@ const stats = computed(() => {
   <div class="status-summary">
     <div class="status-head" :data-state="state"><span class="status-dot" aria-hidden="true"></span><span class="status-text">{{ title }}</span></div>
     <p class="status-description" aria-live="polite">{{ description }}</p>
-    <a v-if="data.recoveryReason && !unavailable" href="#logs">查看运行日志</a>
+    <a v-if="data.recoveryReason && !unavailable" href="#logs">{{ t('status.viewLogs') }}</a>
   </div>
-  <div class="stat-grid" aria-label="运行指标">
-    <div v-for="[label, value] in stats" :key="label" class="stat"><div class="stat-label">{{ label }}</div><div class="stat-value">{{ value }}</div></div>
+  <div class="stat-grid" :aria-label="t('overview.metricsAria')">
+    <div v-for="[key, label, value] in stats" :key="key" class="stat"><div class="stat-label">{{ label }}</div><div class="stat-value">{{ value }}</div></div>
   </div>
 </template>

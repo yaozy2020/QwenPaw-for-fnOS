@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import { TrimApp } from "@trimjs/web-app";
+import { currentLocale, t } from "./i18n";
 import {
   authorizeDirectory,
   bindAuthorizedDirectory,
@@ -14,67 +15,81 @@ import {
 interface AuthorizedDirsPanelOptions {
   showToast(message: string): void;
   confirm(options: { title: string; message: string; type: "warn" | "primary" | "danger"; confirmText: string }): Promise<boolean>;
+  sdk?: TrimApp;
 }
 
-export function createAuthorizedDirsPanel({ showToast, confirm }: AuthorizedDirsPanelOptions) {
-  const sdk = new TrimApp();
-  const canOpenDirectory = () => window.parent !== window || !sdk.isWeb;
-  const state = reactive({
-    busy: false, confirmingRemove: "", canOpen: canOpenDirectory(), entries: null as ProjectDirEntry[] | null,
-    listError: "", message: "", error: false,
-  });
+const emptyText = () => "";
 
-  function setStage(message: string, error = false): void {
-    state.message = message;
-    state.error = error;
+export function createAuthorizedDirsPanel({ showToast, confirm, sdk = new TrimApp() }: AuthorizedDirsPanelOptions) {
+  const canOpenDirectory = () => window.parent !== window || !sdk.isWeb;
+  const raw = reactive({
+    busy: false, confirmingRemove: "", canOpen: canOpenDirectory(), entries: null as ProjectDirEntry[] | null,
+    listErrorText: emptyText as () => string, messageText: emptyText as () => string, error: false,
+  });
+  const state = {
+    get busy() { return raw.busy; },
+    get confirmingRemove() { return raw.confirmingRemove; },
+    get canOpen() { return raw.canOpen; },
+    get entries() { return raw.entries; },
+    get listError() { return raw.listErrorText(); },
+    get message() { return raw.messageText(); },
+    get error() { return raw.error; },
+  };
+
+  function setStage(message: () => string, error = false): void {
+    raw.messageText = message;
+    raw.error = error;
   }
 
   function showError(error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
-    state.listError = `目录绑定失败：${message}`;
-    setStage(state.listError, true);
+    const formatted = () => t("authz.bindFailed", { error: message });
+    raw.listErrorText = formatted;
+    setStage(formatted, true);
     showToast(message);
   }
 
   async function readEntries(): Promise<boolean> {
     try {
-      state.entries = await loadProjectDirs();
-      state.listError = "";
-      if (state.error) setStage("");
+      raw.entries = await loadProjectDirs();
+      raw.listErrorText = emptyText;
+      if (raw.error) setStage(emptyText);
       return true;
     } catch (error) {
-      state.listError = error instanceof Error ? error.message : String(error);
-      setStage(`读取工作区目录失败：${state.listError}`, true);
+      const detail = error instanceof Error ? error.message : String(error);
+      raw.listErrorText = () => detail;
+      setStage(() => t("authz.readFailed", { error: detail }), true);
       return false;
     }
   }
 
   async function refresh(): Promise<void> {
-    if (state.busy) return;
-    state.busy = true;
-    try { await readEntries(); } finally { state.busy = false; }
+    if (raw.busy) return;
+    raw.busy = true;
+    try { await readEntries(); } finally { raw.busy = false; }
   }
 
   async function add(): Promise<void> {
-    if (state.busy) return;
-    state.busy = true;
-    setStage("正在打开飞牛授权，等待回调…");
+    if (raw.busy) return;
+    raw.busy = true;
+    setStage(() => t("authz.opening"));
     try {
       const result = await authorizeDirectory();
-      if (!result.paths.length) throw new Error("授权结果中没有可选目录");
-      setStage(`已收到授权目录 ${result.paths[0]}，正在绑定…`);
-      await bindAuthorizedDirectory(result.paths[0], stage => {
-        setStage(stage === "read" ? "正在读取现有工作区目录…" : "正在保存到 QwenPaw 工作区…");
+      if (!result.paths.length) throw new Error(t("authz.noSelectableDir"));
+      const firstPath = result.paths[0];
+      setStage(() => t("authz.receivedBinding", { path: firstPath }));
+      await bindAuthorizedDirectory(firstPath, stage => {
+        setStage(() => (stage === "read" ? t("authz.readingExisting") : t("authz.savingWorkspace")));
       });
       const refreshed = await readEntries();
       if (refreshed) {
-        setStage("目录已授权并绑定到工作区");
-        showToast("目录已授权并绑定到工作区");
+        setStage(() => t("authz.bindSuccess"));
+        showToast(t("authz.bindSuccess"));
       }
     } catch (error) {
       showError(error);
     } finally {
-      state.busy = false;
+      raw.busy = false;
     }
   }
 
@@ -82,18 +97,18 @@ export function createAuthorizedDirsPanel({ showToast, confirm }: AuthorizedDirs
     try {
       const result: unknown = await sdk.callAppMethod("getAppMessage");
       if (result == null) return `getAppMessage=${String(result)}`;
-      if (typeof result !== "object") return `getAppMessage类型=${typeof result}`;
+      if (typeof result !== "object") return t("authz.diag.type", { type: typeof result });
       const record = result as Record<string, unknown>;
       const keys = Object.keys(record).sort().join(",");
-      const appApi = typeof record.appApi === "string" ? record.appApi : "缺失";
-      return `getAppMessage字段=${keys || "无"}，appApi=${appApi}`;
+      const appApi = typeof record.appApi === "string" ? record.appApi : t("authz.diag.missing");
+      return t("authz.diag.fields", { keys: keys || t("authz.diag.none"), appApi });
     } catch (error) {
-      return `getAppMessage读取失败=${error instanceof Error ? error.message : String(error)}`;
+      return t("authz.diag.readFailed", { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
   async function openDirectory(path: string): Promise<void> {
-    if (state.busy || !canOpenDirectory()) return;
+    if (raw.busy || !canOpenDirectory()) return;
     try {
       await sdk.ready();
       const result: unknown = await sdk.openFileManager(path);
@@ -102,71 +117,81 @@ export function createAuthorizedDirsPanel({ showToast, confirm }: AuthorizedDirs
         || record?.success === false
         || record?.ok === false
         || (typeof record?.code === "number" && record.code !== 0);
-      const detail = result === undefined ? "无返回值" : typeof result === "string" ? result : JSON.stringify(result);
-      if (failed) throw new Error((typeof record?.message === "string" && record.message) || detail);
-      setStage(`openFileManager 返回：${detail || "空结果"}；请确认文件管理器是否打开`);
+      const detail = result === undefined ? "" : typeof result === "string" ? result : JSON.stringify(result);
+      if (failed) throw new Error((typeof record?.message === "string" && record.message) || detail || t("authz.noReturn"));
+      setStage(() => t("authz.openReturned", { detail: result === undefined ? t("authz.noReturn") : (detail || t("authz.emptyResult")) }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const diagnostics = sdk.isWeb ? "" : `；${await mobileAppMessageDiagnostics()}`;
-      setStage(`打开目录失败：${message}${diagnostics}`, true);
-      showToast(`打开目录失败：${message}${diagnostics}`);
+      const diagText = sdk.isWeb ? "" : await mobileAppMessageDiagnostics();
+      const formatFailed = () => {
+        const sep = currentLocale.value === "en" ? "; " : "；";
+        const diagnostics = diagText ? `${sep}${diagText}` : "";
+        return t("authz.openFailed", { error: message, diagnostics });
+      };
+      setStage(formatFailed, true);
+      showToast(formatFailed());
     }
   }
 
   async function reauthorize(path: string): Promise<void> {
-    if (state.busy) return;
-    state.busy = true;
+    if (raw.busy) return;
+    raw.busy = true;
     try {
       await authorizeDirectory(path);
       const health = await checkDirectory(path);
       await readEntries();
-      showToast(health.readable && health.writable ? "目录已重新授权，可读写" : "目录已重新授权，但读写权限仍不足");
+      showToast(health.readable && health.writable ? t("authz.reauthOk") : t("authz.reauthLimited"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : String(error));
     } finally {
-      state.busy = false;
+      raw.busy = false;
     }
   }
 
   async function remove(path: string): Promise<void> {
-    if (state.busy) return;
-    state.busy = true;
-    state.confirmingRemove = path;
+    if (raw.busy) return;
+    raw.busy = true;
+    raw.confirmingRemove = path;
     try {
-      if (!(await confirm({ title: "移除目录绑定", message: `仅从 QwenPaw 工作区移除 ${path}，不会删除目录或文件。`, type: "warn", confirmText: "移除绑定" }))) return;
-      state.confirmingRemove = "";
+      if (!(await confirm({
+        title: t("authz.removeTitle"),
+        message: t("authz.removeMsg", { path }),
+        type: "warn",
+        confirmText: t("authz.removeConfirm"),
+      }))) return;
+      raw.confirmingRemove = "";
       await unlinkAuthorizedDirectory(path);
       await readEntries();
-      showToast("已移除目录绑定，文件未删除");
+      showToast(t("authz.removedToast"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : String(error));
     } finally {
-      state.confirmingRemove = "";
-      state.busy = false;
+      raw.confirmingRemove = "";
+      raw.busy = false;
     }
   }
 
   async function restorePending(): Promise<void> {
     const result = readStoredAuthorizationResult();
-    if (!result?.paths.length || state.busy) return;
-    state.busy = true;
-    setStage("检测到已完成的授权，正在恢复目录绑定…");
+    if (!result?.paths.length || raw.busy) return;
+    raw.busy = true;
+    setStage(() => t("authz.restoring"));
     try {
       await bindAuthorizedDirectory(result.paths[0], stage => {
-        setStage(stage === "read" ? "正在读取现有工作区目录…" : "正在保存到 QwenPaw 工作区…");
+        setStage(() => (stage === "read" ? t("authz.readingExisting") : t("authz.savingWorkspace")));
       });
       if (await readEntries()) {
         clearStoredAuthorizationResult();
-        setStage("已恢复授权目录绑定");
+        setStage(() => t("authz.restored"));
       }
     } catch (error) {
       showError(error);
     } finally {
-      state.busy = false;
+      raw.busy = false;
     }
   }
 
-  window.addEventListener("flutterInAppWebViewPlatformReady", () => { state.canOpen = canOpenDirectory(); });
+  window.addEventListener("flutterInAppWebViewPlatformReady", () => { raw.canOpen = canOpenDirectory(); });
   return { state, refresh, restorePending, add, openDirectory, reauthorize, remove };
 }
 export type AuthorizedDirsState = ReturnType<typeof createAuthorizedDirsPanel>["state"];

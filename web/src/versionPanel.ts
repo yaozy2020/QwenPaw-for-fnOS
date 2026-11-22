@@ -1,15 +1,45 @@
 import type { ApiClient, VersionItem } from "./api";
 import { shallowReactive } from "vue";
+import { t, type MessageKey } from "./i18n";
+
+export type InstallActionKind = "install" | "reinstall" | "downgrade" | "upgrade";
+
+const actionShortKeys: Record<InstallActionKind, MessageKey> = {
+  install: "deploy.actionShort.install",
+  reinstall: "deploy.actionShort.reinstall",
+  downgrade: "deploy.actionShort.downgrade",
+  upgrade: "deploy.actionShort.upgrade",
+};
 
 interface VersionPanelOptions {
   api: Pick<ApiClient, "versionList">;
   showToast(message: string): void;
 }
 
+const emptyText = () => "";
+
 export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
-  const view = shallowReactive({ list: [] as VersionItem[], backup: false, manual: false, selected: '', stable: '', beta: '', recommended: '', current: '', error: '', fresh: false, loading: false, actionsFor: '' });
+  const raw = shallowReactive({
+    list: [] as VersionItem[], backup: false, manual: false, selected: '', stable: '', beta: '', recommended: '',
+    current: '', errorText: emptyText as () => string, fresh: false, loading: false, actionsFor: '',
+  });
+  const view = {
+    get list() { return raw.list; },
+    get backup() { return raw.backup; },
+    set backup(value: boolean) { raw.backup = value; },
+    get manual() { return raw.manual; },
+    get selected() { return raw.selected; },
+    get stable() { return raw.stable; },
+    get beta() { return raw.beta; },
+    get recommended() { return raw.recommended; },
+    get current() { return raw.current; },
+    get error() { return raw.errorText(); },
+    get fresh() { return raw.fresh; },
+    get loading() { return raw.loading; },
+    get actionsFor() { return raw.actionsFor; },
+  };
   let listRequest = 0;
-  let pendingInstallAction = '';
+  let pendingInstallAction: InstallActionKind | '' = '';
 
   function compareVersion(v1: string, v2: string): number {
     function parse(value: string): number[] {
@@ -46,7 +76,7 @@ export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
   }
 
   function listedAction(current: string, selected: string) {
-    return current === view.actionsFor ? view.list.find(item => item.version === selected)?.action : undefined;
+    return current === raw.actionsFor ? raw.list.find(item => item.version === selected)?.action : undefined;
   }
 
   function isDowngradeOf(current: string, selected: string): boolean {
@@ -61,47 +91,55 @@ export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
     return current.replace(/^v/i, "").trim() === selected.replace(/^v/i, "").trim();
   }
 
+  function currentInstallActionKind(): InstallActionKind {
+    if (!raw.current) return "install";
+    if (isSameVersion(raw.current, raw.selected)) return "reinstall";
+    return isDowngradeOf(raw.current, raw.selected) ? "downgrade" : "upgrade";
+  }
+
   function currentInstallAction(): string {
-    if (!view.current) return "安装";
-    if (isSameVersion(view.current, view.selected)) return "重新安装";
-    return isDowngradeOf(view.current, view.selected) ? "降级" : "升级";
+    return t(actionShortKeys[currentInstallActionKind()]);
   }
 
   function pickVersion(version: string): void {
-    if (!view.fresh || !view.list.some(item => item.version === version)) return;
-    view.manual = true;
-    view.selected = version;
+    if (!raw.fresh || !raw.list.some(item => item.version === version)) return;
+    raw.manual = true;
+    raw.selected = version;
   }
 
   function showVersionSourceError(detail = ""): false {
-    const message = '当前下载源不可用，无法获取版本列表。请更换下载源，或检查 NAS 网络、DNS 与代理设置后重试。';
-    view.error = [message, detail, view.list.length ? '当前显示上一次查询结果，不能用于安装。' : ''].filter(Boolean).join(' ');
-    showToast(message);
+    const hasPrevious = raw.list.length > 0;
+    raw.errorText = () => [t("version.sourceUnavailable"), detail, hasPrevious ? t("version.staleWarning") : ''].filter(Boolean).join(' ');
+    showToast(t("version.sourceUnavailable"));
     return false;
   }
 
   async function fetchVersionList(sourceChanged = false): Promise<boolean> {
     const request = ++listRequest;
-    const currentAtRequest = view.current;
-    if (sourceChanged) Object.assign(view, { list: [], manual: false, selected: '', stable: '', beta: '', recommended: '', error: '' });
-    view.fresh = false;
-    view.loading = true;
-    const manual = view.manual ? view.selected : '';
+    const currentAtRequest = raw.current;
+    if (sourceChanged) Object.assign(raw, { list: [], manual: false, selected: '', stable: '', beta: '', recommended: '', errorText: emptyText });
+    raw.fresh = false;
+    raw.loading = true;
+    const manual = raw.manual ? raw.selected : '';
     try {
       const result = await api.versionList();
       if (request !== listRequest) return false;
       const { data } = result;
       if (result.ok && data.success && Array.isArray(data.versions)) {
-        view.list = data.versions;
-        view.actionsFor = data.versions.find(item => item.action === 'reinstall')?.version || currentAtRequest;
-        const listed = (value?: string | null) => view.list.find(v => v.version === value)?.version || "";
-        view.stable = listed(data.latest_stable);
-        view.beta = listed(data.latest_beta) || view.list.find(version => version.is_beta)?.version || "";
-        view.recommended = listed(data.recommended_version);
-        view.manual = !!listed(manual);
-        view.selected = view.manual ? manual : view.recommended;
-        view.error = view.recommended ? '' : view.list.length ? '当前下载源未列出本安装包带有适配补丁的版本。可从列表中选择其他版本，或更换下载源。' : '当前下载源没有可选版本。请更换下载源或稍后重试。';
-        view.fresh = true;
+        raw.list = data.versions;
+        raw.actionsFor = data.versions.find(item => item.action === 'reinstall')?.version || currentAtRequest;
+        const listed = (value?: string | null) => raw.list.find(v => v.version === value)?.version || "";
+        raw.stable = listed(data.latest_stable);
+        raw.beta = listed(data.latest_beta) || raw.list.find(version => version.is_beta)?.version || "";
+        raw.recommended = listed(data.recommended_version);
+        raw.manual = !!listed(manual);
+        raw.selected = raw.manual ? manual : raw.recommended;
+        raw.errorText = raw.recommended
+          ? emptyText
+          : raw.list.length
+            ? () => t("version.noRecommended")
+            : () => t("version.emptyList");
+        raw.fresh = true;
         return true;
       }
       return showVersionSourceError(data.message || `HTTP ${result.status}`);
@@ -109,24 +147,24 @@ export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
       if (request !== listRequest) return false;
       console.warn("fetchVersionList err:", error);
       return showVersionSourceError((error as Error).message);
-    } finally { if (request === listRequest) view.loading = false; }
+    } finally { if (request === listRequest) raw.loading = false; }
   }
 
   async function checkOnlineVersions(): Promise<void> {
-    showToast("正在在线检查 PyPI 最新版本...");
+    showToast(t("version.checkingToast"));
     if (await fetchVersionList()) {
-      showToast(`当前下载源列出 ${view.list.length} 个版本。`);
+      showToast(t("version.listedToast", { count: raw.list.length }));
     }
   }
 
   return {
-    view, fetchVersionList, checkOnlineVersions, pickVersion, currentInstallAction, isSameVersion, isDowngradeOf,
-    selectedVersion: () => view.fresh ? view.selected : '',
-    isRecommended: () => !!view.selected && view.selected === view.recommended,
-    hasVersion: (value: string) => view.fresh && view.list.some(item => item.version === value),
-    currentRunningVersion: () => view.current,
-    setCurrentRunningVersion: (version: string) => { view.current = version; },
-    pendingInstallAction: () => pendingInstallAction,
-    setPendingInstallAction: (action: string) => { pendingInstallAction = action; },
+    view, fetchVersionList, checkOnlineVersions, pickVersion, currentInstallAction, currentInstallActionKind, isSameVersion, isDowngradeOf,
+    selectedVersion: () => raw.fresh ? raw.selected : '',
+    isRecommended: () => !!raw.selected && raw.selected === raw.recommended,
+    hasVersion: (value: string) => raw.fresh && raw.list.some(item => item.version === value),
+    currentRunningVersion: () => raw.current,
+    setCurrentRunningVersion: (version: string) => { raw.current = version; },
+    pendingInstallAction: () => pendingInstallAction ? t(actionShortKeys[pendingInstallAction]) : '',
+    setPendingInstallAction: (action: InstallActionKind | '') => { pendingInstallAction = action; },
   };
 }

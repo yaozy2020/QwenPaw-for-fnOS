@@ -4,7 +4,7 @@
 - 当前状态：G0–G3 按已批准范围完成，G4 已实施；生产管理 Web 为 Gateway-only，CGI 文件、生产 CGI 子命令、前端 action fallback、CGI 专属测试与 CI 门禁均已删除。真实手机 fnOS App 暂不纳入本轮验收，最终手机复测仍待用户。fnOS logout 后旧会话仍有效是已知平台问题，用户确认不阻塞应用验收；不称其已撤销或已修复。官方 PyPI 直连 15 分钟无输出超时；阿里云真实 `qwenpaw==2.2.2.post1` 上游安装/卸载通过，但不是官方 PyPI 直连通过。
 - 当前候选、验证结果和待验收项统一见 `docs/session-handoff-2026-11-04.md`；本文不再复制候选摘要。历史旧包路径仅作审计记录，不表示本地产物仍保留。
 - 桌面控制台与 `qwenpaw.main` 均经 Gateway/Socket，不直连内核端口。Rust `web_proxy` 适配上游路径、流式 SSE 与 Bearer Authorization，并分离管理系统 CSRF 与上游请求；WebSocket 返回 501。
-- 前端合法 `seq + instance` 使用 `sessionStorage`，页面重建/pageshow 恢复同一任务轮询而不重复 POST；存储不可用时安全降级。语言只在首次初始化时默认中文，不覆盖已有英文。
+- 前端合法 `seq + instance` 使用 `sessionStorage`，页面重建/pageshow 恢复同一任务轮询而不重复 POST；存储不可用时安全降级。界面支持跟随系统/简体中文/English，首次初始化默认中文且不覆盖已有英文；主题支持跟随系统/白天/暗夜，授权回调页同步解析既有主题偏好。
 - 调查基线：工作树包含大量未提交的模块化、配置事务、安装恢复及管理层实现。必须按当前工作树判断并保留既有改动，不用 reset、clean 或 checkout 覆盖；不自动 commit、push、tag、发布或部署。
 
 ## 1. 目标、范围与非目标
@@ -67,7 +67,7 @@
 fnOS cmd 薄入口 → Rust platform/service 子命令 → ManagementCore
 ```
 
-控制台经 `/app/qwenpaw/`，`qwenpaw.main` 经 `/app/qwenpaw/web/` 直达 QwenPaw 对话，两者共用 Gateway/Socket 和默认 fnOS iframe 会话链；“进入 Web 对话”在 PC 浏览器打开新标签页，在 fnOS App 内打开全屏 iframe，返回先关闭覆盖层。生产 CGI、CGI 子命令及旧 action fallback 已删除。`supervisor-control.sock` 仍是独立私有控制通道，loopback HTTP 也不是 Gateway 入口。WebSocket 代理返回 501，不能描述为已支持。
+控制台经 `/app/qwenpaw/`，`qwenpaw.main` 经 `/app/qwenpaw/web/` 直达 QwenPaw 对话，两者共用 Gateway/Socket 和默认 fnOS iframe 会话链；“进入 Web 对话”在 PC 浏览器打开新标签页，在 fnOS App 内打开全屏 iframe，通过宿主返回手势或浏览器历史关闭覆盖层。生产 CGI、CGI 子命令及旧 action fallback 已删除。`supervisor-control.sock` 仍是独立私有控制通道，loopback HTTP 也不是 Gateway 入口。WebSocket 代理返回 501，不能描述为已支持。
 
 ### 3.1 当前模块边界
 

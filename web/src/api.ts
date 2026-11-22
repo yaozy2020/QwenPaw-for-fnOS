@@ -1,5 +1,6 @@
 export interface ApiMessageResponse {
   success?: boolean;
+  code?: string;
   message?: string;
 }
 

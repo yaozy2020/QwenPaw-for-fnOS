@@ -3,9 +3,9 @@
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
 > 数据源：manifest / cmd / wizard / app / supervisor Gateway testdata / .github / git tags。
 
-## 当前版本：v1.5.1
+## 当前版本：v1.5.6-6
 
-- **生成时间**：2026-11-21 12:56:19 +0800
+- **生成时间**：2026-11-22 12:04:57 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -50,8 +50,8 @@
 ### QwenPaw 2.3.0.post1
 
 - 上游 PR：`#8719`（临时下游兼容，不表示上游已合并）
-- 后端及预构建 Console 差异文件：1150 个，原始数据 54,624,930 字节
-- manifest SHA256：`d7ffec040432b15ecba58e328a5275481c17d5ab629c7f98fea9b9e9e4f452fd`
+- 后端及预构建 Console 差异文件：1150 个，原始数据 54,628,598 字节
+- manifest SHA256：`cba3e5b5427ce7fc395a4cbf5abd8c4e920a66fd867e023a964ea8d3cd6b8012`
 
 - FPK 携带后端补丁和完整预构建 Console；安装时不再下载源码或运行 npm/Vite
 
@@ -73,7 +73,7 @@
 | Workflow | 触发 |
 |:---------|:-----|
 | `ci.yml` | PR 触发，跑 preflight + 前端构建验证 |
-| `release.yml` | tag 触发，fnpackup 容器构建并自动上传 Release |
+| `release.yml` | tag 或手动触发，fpkstudio 双构建并上传 GitHub Release |
 
 ## 最近发布记录
 

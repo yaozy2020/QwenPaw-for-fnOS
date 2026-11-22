@@ -82,7 +82,7 @@ jobs:
       # [1] 标签与 manifest 映射校验
       # 映射规则：
       #   例:v2.1.0-rc.2 -> manifest 以 2.1.0- 开头 -> prerelease=true
-      #   v2.1.0      -> manifest 2.1.0   -> prerelease=false
+      #   v2.1.0      -> manifest 2.1.0-N -> prerelease=false
       - name: Verify tag matches manifest mapping
         id: verify
         env:

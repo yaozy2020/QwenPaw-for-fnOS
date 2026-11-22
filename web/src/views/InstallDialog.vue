@@ -1,14 +1,63 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from "vue";
 import LogLines from "./LogLines.vue";
 import InstallSteps from "./InstallSteps.vue";
+import { closeDialog, showDialog } from "./dialogHelpers";
 import { usePanel } from "../panelContext";
+import { t } from "../i18n";
+
 const panel = usePanel();
 const view = panel.progress.view;
+const dialog = ref<HTMLDialogElement>();
+const box = ref<HTMLElement>();
+const minimizeBtn = ref<HTMLButtonElement>();
+const closeBtn = ref<HTMLButtonElement>();
+let opened = 0;
+
+function dismiss() {
+  if (view.minimize) panel.minimizeUpgradeModal();
+  else panel.closeUpgradeModal();
+}
+
+function trapFocus(event: KeyboardEvent) {
+  if (event.key !== "Tab" || !dialog.value) return;
+  const el = dialog.value;
+  const focusable = Array.from(el.querySelectorAll<HTMLElement>('button, input, [href], select, textarea, [tabindex]:not([tabindex="-1"])'))
+    .filter(item => !item.matches(':disabled') && item.getClientRects().length > 0);
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!first || !last) {
+    event.preventDefault();
+    el.focus();
+  } else if (!el.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+watch(() => view.open, async open => {
+  const el = dialog.value;
+  if (!open) {
+    closeDialog(el);
+    return;
+  }
+  await nextTick();
+  if (!view.open) return;
+  opened = Date.now();
+  showDialog(el);
+  await nextTick();
+  if (!view.open) return;
+  const target = view.minimize ? minimizeBtn.value : closeBtn.value;
+  target?.focus();
+}, { flush: "post" });
 </script>
 
 <template>
-  <div class="modal-overlay" id="upgradeModal" :class="{active: view.open}">
-    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="upTitle" aria-describedby="upSubTitle" tabindex="-1">
+  <dialog ref="dialog" class="modal-overlay" id="upgradeModal" :class="{active: view.open}" aria-labelledby="upTitle" aria-describedby="upSubTitle" tabindex="-1" @keydown="trapFocus" @cancel.prevent="dismiss" @click.self="Date.now() - opened > 250 && dismiss()">
+    <div ref="box" class="modal-box">
       <div class="modal-header">
         <div class="modal-icon-badge primary">
           <span class="spinner" id="upSpinner" v-show="view.spinner"></span>
@@ -21,18 +70,18 @@ const view = panel.progress.view;
           <div class="modal-subtitle" id="upSubTitle">{{ view.subtitle }}</div>
         </div>
       </div>
-      <ol class="install-steps" id="upSteps" aria-label="安装进度">
+      <ol class="install-steps" id="upSteps" :aria-label="t('progress.stepsAria')">
         <InstallSteps v-bind="view.steps" />
       </ol>
       <div class="upgrade-terminal-body" id="upTerminal"><LogLines :lines="view.lines" :empty="view.empty" success /></div>
       <div class="modal-actions">
         <!-- 常驻出口:任务执行中也能关掉弹窗(转后台继续跑),
              避免后端失联时页面被永久锁死 -->
-        <button class="btn-outline btn-block" id="btnUpMinimize" v-show="view.minimize"
-                @click="panel.minimizeUpgradeModal()">转到后台运行</button>
-        <button class="btn-primary btn-block" id="btnUpClose"
-                @click="panel.closeUpgradeModal()" v-show="view.close">完成并返回控制台</button>
+        <button ref="minimizeBtn" class="btn-outline btn-block" id="btnUpMinimize" v-show="view.minimize"
+                @click="panel.minimizeUpgradeModal()">{{ t('progress.minimize') }}</button>
+        <button ref="closeBtn" class="btn-primary btn-block" id="btnUpClose"
+                @click="panel.closeUpgradeModal()" v-show="view.close">{{ t('progress.close') }}</button>
       </div>
     </div>
-  </div>
+  </dialog>
 </template>

@@ -8,7 +8,7 @@ use axum::{
 };
 use serde_json::json;
 
-use super::{begin_operation, check_token, err_json, AppState};
+use super::{begin_operation, check_token, err_json, err_json_code, AppState};
 
 pub(super) async fn start(
     State(state): State<AppState>,
@@ -30,8 +30,9 @@ pub(super) async fn start(
     .await
     .unwrap_or(false);
     if !installed {
-        return err_json(
+        return err_json_code(
             StatusCode::CONFLICT,
+            "kernel_not_installed",
             "QwenPaw 内核尚未安装,请在「版本更新」中选择版本安装",
         );
     }
@@ -41,11 +42,11 @@ pub(super) async fn start(
     match res {
         Ok(pid) => {
             state.events.invalidate();
-            Json(json!({"ok": true, "success": true, "message": "QwenPaw 已启动", "pid": pid}))
+            Json(json!({"ok": true, "success": true, "code": "service_started", "message": "QwenPaw 已启动", "pid": pid}))
                 .into_response()
         }
         Err(e) if e.contains("already running") => {
-            Json(json!({"ok": true, "success": true, "message": "QwenPaw 已在运行"}))
+            Json(json!({"ok": true, "success": true, "code": "service_already_running", "message": "QwenPaw 已在运行"}))
                 .into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -72,7 +73,7 @@ pub(super) async fn stop(
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error);
     }
     state.events.invalidate();
-    Json(json!({"ok": true, "success": true, "message": "QwenPaw 已停止"})).into_response()
+    Json(json!({"ok": true, "success": true, "code": "service_stopped", "message": "QwenPaw 已停止"})).into_response()
 }
 
 pub(super) async fn restart(
@@ -97,7 +98,7 @@ pub(super) async fn restart(
     match res {
         Ok(pid) => {
             state.events.invalidate();
-            Json(json!({"ok": true, "success": true, "message": "QwenPaw 已重启", "pid": pid}))
+            Json(json!({"ok": true, "success": true, "code": "service_restarted", "message": "QwenPaw 已重启", "pid": pid}))
                 .into_response()
         }
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),

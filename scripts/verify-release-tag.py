@@ -5,7 +5,7 @@ verify-release-tag.py — 校验 Release Tag 与 manifest 映射规则
 
 规则映射：
   v2.1.0-rc.2 -> manifest 2.1.0-N (N 单调递增) -> prerelease=true
-  v2.1.0      -> manifest 2.1.0                 -> prerelease=false
+  v2.1.0      -> manifest 2.1.0-N (N 单调递增) -> prerelease=false
 
 RC 序号不能直接当 FPK 构建号：那会让 rc.2 的构建号小于 rc.1 的 -7，
 触发 fnOS 的"版本倒退、拒绝覆盖升级"。构建号由 manifest 独立维护，必须单调递增。
@@ -29,7 +29,7 @@ def parse_tag(tag: str) -> tuple[str, bool]:
     if m_rc:
         return m_rc.group(1), True
 
-    # 匹配正式标签: 2.1.0 -> manifest: 2.1.0, prerelease: False
+    # 匹配正式标签: 2.1.0 -> manifest: 2.1.0-N, prerelease: False
     m_release = re.match(r"^(\d+\.\d+\.\d+)$", raw)
     if m_release:
         return m_release.group(1), False

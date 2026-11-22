@@ -10,8 +10,9 @@ use std::{
 };
 
 const MARKER_FILE: &str = ".qwenpaw-base-path-patch";
-const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_FILES: usize = 4096;
+const MAX_MANIFEST_DELETE_FILES: usize = 8192;
 const MAX_PAYLOAD_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
 
@@ -99,7 +100,7 @@ impl BasePathPatch {
         }
         if manifest.files.is_empty()
             || manifest.files.len() > MAX_MANIFEST_FILES
-            || manifest.delete_files.len() > MAX_MANIFEST_FILES
+            || manifest.delete_files.len() > MAX_MANIFEST_DELETE_FILES
         {
             return Err("base-path 补丁清单文件数量无效".into());
         }

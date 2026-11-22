@@ -1,5 +1,23 @@
 # 会话交接：QwenPaw-for-fnOS
 
+- `1.5.5` iOS 长会话修复候选：在 1.5.4 已验证的移动头部、动态标题与上架材料基础上，同步当前 Console 工作树已有的四项长会话缓解：iOS 关闭逐气泡导航测量与 `content-visibility:auto`、历史恢复补分页标记、收窄输入区 DOM 监听。目标回归 54 项、生产构建、包内 Gateway 2 项、FPK 审计及双构建字节一致性通过。候选 `build/candidates/1.5.5-ios-long-chat/qwenpaw-1.5.5-x86.fpk`，SHA256 `ec4be05988f73ac11d190f5c6909776b45dacfbe5dfe3a28854ddc3423677a11`。真机 iOS 私有属性分支与长会话滚动仍须实机验收，不推进或打包 1.6。
+
+- `1.5.4` 上架筹备（门禁未放行）：当前只使用 1.5.x，门禁全部通过前不得推进或打包 1.6；提前生成的 1.6 候选已作废删除。真机发现的上游聊天页移动头部挤压及控制台原生标题不随页面变化已修复，并通过源码、隔离复测和最终 1.5.4 FPK 包级验证。最终候选 `build/candidates/1.5.4-mobile-title/qwenpaw-1.5.4-x86.fpk`，SHA256 `a7c9841b431348138b01f310e30509562743c71df9286dd07efaae261182fbec`，双构建字节一致；未执行飞牛应用中心验收，不推进或打包 1.6。申请材料和逐项验证状态见 `store-submission-1.6.0.md`。不自动提交上架、部署、commit、push、tag 或发布，本地结果不替代最终 FPK 的飞牛应用中心真机验收。
+
+- `1.5.4` 本地验证基线：候选 `build/candidates/1.5.4-store-prep/qwenpaw-1.5.4-x86.fpk`，SHA256 `baa15a7d7cbee03081bedb0c9bb6021a6cc887ee49ec83cc2b838d9927423bcf`。前端 191 项、Rust 428+13、严格 Clippy/lint、双浏览器 Gateway、真实反代端口、release API、7 个 SIGKILL 断点、平台回调、真实 venv、包内 Chromium 2 项、FPK 审计及双构建字节一致性通过；musl Gateway 26 项中 24 通过、2 项因隔离环境外部属主能力明确跳过。未执行飞牛应用中心验收。
+
+- `1.5.3-5` 候选：`build/candidates/1.5.3-5-frontend-final/qwenpaw-1.5.3-5-x86.fpk`，33,995,813 字节，SHA256 `1ae4d51e6d108b04344cde60fe55e451bb1db7be83546e76b80dc8dad8a3d59c`。收敛主题色同步、日志筛选清除、自动滚底状态及原生安装弹窗焦点循环修复，包含此前组件化、导航、授权回调和 UI 优化。前端 177 项、类型检查、生产构建、preflight、完整 FPK 构建及 1150 个载荷摘要审计通过；未执行飞牛应用中心验收。
+
+- `1.5.3-4` 候选：`build/candidates/1.5.3-4-dropdown-ui/qwenpaw-1.5.3-4-x86.fpk`，33,995,799 字节，SHA256 `474004b54fd6e81d6aa3711c2f0791457728f08d6cd47cada2c0a8583381563a`。优化版本弹层可视定位，移动端下载源改为文档流展开，保留此前组件化、导航与 UI 优化；另包含主题色同步、日志筛选清除、自动滚底状态及原生安装弹窗焦点循环修复。前端 177 项、类型检查、生产构建、preflight、完整 FPK 构建及 1150 个载荷摘要审计通过；未执行飞牛应用中心验收。
+
+- `1.5.3-3` 候选：`build/candidates/1.5.3-3-ui-refinement/qwenpaw-1.5.3-3-x86.fpk`，33,994,602 字节，SHA256 `efd4d8a6f10283a0534a30bb5ed7ada298f4ed5396712b3fd6a39246e838650d`。优化版本列表信息层级、键盘滚动边界与移动端卡片/日志控件，保留此前组件化和导航优化。前端 177 项、类型检查、生产构建、preflight、完整 FPK 构建及 1150 个载荷摘要审计通过；未执行飞牛应用中心验收。
+
+- `1.5.3-2` 候选：`build/candidates/1.5.3-2-navigation-ui/qwenpaw-1.5.3-2-x86.fpk`，33,994,782 字节，SHA256 `3a2afc4ccb60e5f8c0149db2457bf6cfa892b63593ebd4206ef1bae7e01c3048`。合入分区导航历史切换、全屏 Web 宿主返回和授权回调双主题样式，保留组件化与最新 UI。前端 177 项、类型检查、生产构建、preflight、完整 FPK 构建及 1150 个载荷摘要审计通过；包内 Chromium 2 项真实 Gateway 回归与清理核验通过。未执行真实 fnOS App 或应用中心验收。
+
+- `1.5.3-1` 候选：`build/candidates/1.5.3-1-componentized-ui/qwenpaw-1.5.3-1-x86.fpk`，33,994,286 字节，SHA256 `6f67dd895d6e95b22d78b798b95e767936888c75a931bd1b1bfef74792c1e4cc`。合入下载源选择器、原生登录/密码重置对话框、品牌图标与弹窗/外部关闭工具的组件化，保留最新 UI 和文案。前端 177 项、类型检查、生产构建、preflight、完整 FPK 构建及 1150 个载荷摘要审计通过；包内 Chromium 2 项真实 Gateway 回归与清理核验通过。未执行飞牛应用中心验收。
+
+- `1.5.2-1` 候选：`build/candidates/1.5.2-1-ui-polish/qwenpaw-1.5.2-1-x86.fpk`，33,993,049 字节，SHA256 `8806ffec84c5d5055f6f25020f9560f06eb6791de8d5ce37273106a7ad7ccb0c`。打包最新品牌橙、桌面侧栏、卡片与移动磨砂导航美化，保留 DSH 日志阅读布局，并包含安装引导、状态、关于页与 README 文案优化。前端 177 项、类型检查、preflight、完整 FPK 构建及 1150 个载荷摘要审计通过；未执行飞牛应用中心验收。
+
 - `1.5.1` 候选：`build/candidates/1.5.1-dsh-logs/qwenpaw-1.5.1-x86.fpk`，33,991,281 字节，SHA256 `bb67ad95668693486c0b6e89f4b21bd4f8ce3cb068a8a25d2e579deef2928270`。按 DSH 参考布局优化日志页：导出与自动滚底直接可见，筛选、复制、实时刷新和清空默认收进原生展开区；浅色主题使用轻底等宽日志，保留错误、警告与成功语义色。未改变日志窗口、读取、筛选、订阅、导出或清空协议。前端 177 项、类型检查、生产构建、preflight、版本/审计一致性、完整 FPK 构建与 1150 个载荷摘要审计通过；从最终 FPK 提取的页面和 musl supervisor 在 Chromium / WebKit 各通过 2 项真实 Gateway 回归，覆盖管理工具展开、日志追加与退订、清空、安装恢复和卸载，双端清理核验通过。未执行飞牛应用中心验收。
 
 - `1.5.0` 候选：`build/candidates/1.5.0-pr8719-ui/qwenpaw-1.5.0-x86.fpk`，33,992,055 字节，SHA256 `72895c2a4b6cd3f567c58499b922a7afc3d83e94fa8b6e61dae21a480d46db5c`。跟进 PR #8719 至 `e2cda8ff`，只向 2.3.0.post1 载荷新增 Desktop、托管 env CLI 与 PawApp 三处前缀修复；独立 Data 插件不随包更新。管理台合入日志级别/关键字筛选、筛选结果复制、长日志合并与分块渲染优化、弹层和定时器清理、视觉及键盘交互优化；移动端日志控件保持至少 44px 触控目标。上游新增回归 4 项、前端 177 项与类型检查、隔离 root/network namespace 的 Rust 428+13、严格 Clippy/lint、preflight、版本/审计一致性、完整 FPK 构建及 1150 个载荷摘要审计通过。Chromium / WebKit Gateway 各 12 项通过、1 项因自动反代 fixture 未启用而按既有条件跳过，清理核验通过；从最终 FPK 提取的 musl supervisor 与页面另通过包内 Chromium 2 项，清理核验通过。未执行真实语音、独立 Data 插件或飞牛应用中心验收。

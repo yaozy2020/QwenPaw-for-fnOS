@@ -2,6 +2,7 @@ import { ApiClientError, type ApiClient } from "./api";
 import type { createInstallProgressPanel } from "./installProgressPanel";
 import type { ModalOptionsWithoutInput } from "./modal";
 import type { createVersionPanel } from "./versionPanel";
+import { localizeBackendMessage, t } from "./i18n";
 
 interface InstallCoordinatorOptions {
   api: Pick<ApiClient, "upgradeStatus" | "upgrade">;
@@ -30,57 +31,61 @@ export function createInstallCoordinator({
     const reason = recoveryReason();
     if (!reason && supervisorReachable() === true) return false;
     versionPanel.setPendingInstallAction("");
-    showToast(reason ? "安装已暂停：" + reason : "控制台无法确认监督者状态，暂不可安装");
+    showToast(reason ? t("install.paused", { reason }) : t("install.unreachable"));
     return true;
   }
 
   async function checkOrUpgrade(): Promise<void> {
     if (!versionPanel.selectedVersion()) {
-      showToast("请先获取版本列表并选择目标版本。");
+      showToast(t("install.pickFirst"));
       return;
     }
     if (blocked()) return;
     const requestedVersion = versionPanel.selectedVersion();
     const requestedMirror = currentMirror();
     const backup = versionPanel.view.backup;
-    const compatibilityNote = (backup ? '先停机备份已有数据；备份或校验失败将中止安装。\n\n' : '') + (versionPanel.isRecommended() ? '' : '本安装包没有此版本的适配补丁。从飞牛桌面打开 QwenPaw Web 时，页面可能无法加载。\n\n');
+    const compatibilityNote = (backup ? t("install.backupNote") : "") + (versionPanel.isRecommended() ? "" : t("install.unpatchedNote"));
     let ok = false;
 
     if (!versionPanel.currentRunningVersion()) {
-      versionPanel.setPendingInstallAction("安装");
+      versionPanel.setPendingInstallAction("install");
       ok = await showModal({
-        title: "安装内核确认",
-        message: `${compatibilityNote}将下载并安装 QwenPaw v${versionPanel.selectedVersion()}。确认开始安装？`,
+        title: t("install.confirm.installTitle"),
+        message: t("install.confirm.installMsg", { note: compatibilityNote, version: versionPanel.selectedVersion() }),
         type: "primary",
-        confirmText: "开始安装",
-        cancelText: "取消"
+        confirmText: t("install.confirm.installBtn"),
+        cancelText: t("common.cancel"),
       });
     } else if (versionPanel.isSameVersion(versionPanel.currentRunningVersion(), versionPanel.selectedVersion())) {
-      versionPanel.setPendingInstallAction("重新安装");
+      versionPanel.setPendingInstallAction("reinstall");
       ok = await showModal({
-        title: "重新安装当前版本",
-        message: `${compatibilityNote}将通过独立暂存环境重新安装 QwenPaw v${versionPanel.selectedVersion()}，运行中的服务会中断。安装失败时会尝试恢复运行环境，不会自动还原用户数据。确认继续？`,
+        title: t("install.confirm.reinstallTitle"),
+        message: t("install.confirm.reinstallMsg", { note: compatibilityNote, version: versionPanel.selectedVersion() }),
         type: "warn",
-        confirmText: "重新安装",
-        cancelText: "取消"
+        confirmText: t("install.confirm.reinstallBtn"),
+        cancelText: t("common.cancel"),
       });
     } else if (versionPanel.isDowngradeOf(versionPanel.currentRunningVersion(), versionPanel.selectedVersion())) {
-      versionPanel.setPendingInstallAction("降级");
+      versionPanel.setPendingInstallAction("downgrade");
       ok = await showModal({
-        title: "降级风险警告",
-        message: `${compatibilityNote}将从 v${versionPanel.currentRunningVersion()} 降级到 v${versionPanel.selectedVersion()}。旧版本可能无法读取现有配置或会话数据，也可能无法启动。确认降级？`,
+        title: t("install.confirm.downgradeTitle"),
+        message: t("install.confirm.downgradeMsg", {
+          note: compatibilityNote,
+          current: versionPanel.currentRunningVersion(),
+          version: versionPanel.selectedVersion(),
+        }),
         type: "danger",
-        confirmText: "确认降级",
-        cancelText: "取消并返回"
+        confirmText: t("install.confirm.downgradeBtn"),
+        cancelText: t("install.confirm.downgradeCancel"),
       });
     } else {
-      versionPanel.setPendingInstallAction("升级");
+      versionPanel.setPendingInstallAction("upgrade");
       ok = await showModal({
-        title: "在线升级确认",
-        message: `${compatibilityNote}即将安装 QwenPaw v${versionPanel.selectedVersion()} 并重新构建环境，运行中的服务会中断。确认继续？`,
+        title: t("install.confirm.upgradeTitle"),
+        message: t("install.confirm.upgradeMsg", { note: compatibilityNote, version: versionPanel.selectedVersion() }),
         type: "warn",
-        confirmText: "开始升级",
-        cancelText: "取消"
+        confirmText: t("install.confirm.upgradeBtn"),
+        cancelText: t("common.cancel"),
       });
     }
     if (!ok) {
@@ -93,11 +98,11 @@ export function createInstallCoordinator({
       const status = await api.upgradeStatus();
       if (status.ok && status.data.recovery_required === true) {
         versionPanel.setPendingInstallAction("");
-        showToast(status.data.recovery_error || "上一次事务需要恢复，暂不可安装");
+        showToast(status.data.recovery_error || t("install.recoveryBlocked"));
         return;
       }
       if (status.ok && status.data.upgrading) {
-        showToast("已有安装任务正在进行中,已切换到进度查看");
+        showToast(t("install.alreadyRunning"));
         await progress.attachRunning();
         return;
       }
@@ -105,7 +110,7 @@ export function createInstallCoordinator({
     if (blocked()) return;
 
     if (!versionPanel.hasVersion(requestedVersion) || requestedMirror !== currentMirror()) {
-      showToast("版本或下载源已变更，请重新确认安装");
+      showToast(t("install.changedRetry"));
       return;
     }
     const requestRunId = progress.begin();
@@ -115,17 +120,18 @@ export function createInstallCoordinator({
       if (!progress.isCurrent(requestRunId)) return;
       const data = result.data;
       if (data.success === false) {
+        const backendMsg = localizeBackendMessage(data.code, data.message);
         if (data.running) {
-          showToast(data.message || "已有安装任务进行中,已切换到进度查看");
+          showToast(backendMsg || t("install.alreadyRunningFallback"));
           progress.open(true, data.seq, data.instance);
           return;
         }
-        showToast("安装未开始: " + (data.message || "后端拒绝"));
+        showToast(t("install.notStarted", { reason: backendMsg || t("install.backendRejected") }));
         progress.close();
         return;
       }
       if (!result.ok || data.success !== true) {
-        throw new Error(data.message || `安装受理失败（HTTP ${result.status}）`);
+        throw new Error(localizeBackendMessage(data.code, data.message) || t("install.acceptFailed", { status: result.status }));
       }
       if (typeof data.seq === "number") {
         progress.accept(data.seq, data.instance);
@@ -133,7 +139,7 @@ export function createInstallCoordinator({
     } catch (error) {
       if (!progress.isCurrent(requestRunId)) return;
       if (!(error instanceof ApiClientError) || error.kind !== "network") {
-        showToast("安装请求失败: " + errorMessage(error));
+        showToast(t("install.requestFailed", { error: errorMessage(error) }));
         progress.close();
         return;
       }

@@ -58,12 +58,13 @@ pub(super) async fn kernel_install(
     match acceptance {
         InstallAcceptance::Started { seq } => {
             state.events.invalidate();
-            Json(json!({"ok": true, "success": true, "message": "安装已开始", "seq": seq, "instance": super::instance_id()}))
+            Json(json!({"ok": true, "success": true, "code": "install_started", "message": "安装已开始", "seq": seq, "instance": super::instance_id()}))
                 .into_response()
         }
         InstallAcceptance::Busy { seq } => Json(json!({
             "ok": true,
             "success": false,
+            "code": "install_busy",
             "message": "安装正在进行中,请等待完成后再试",
             "seq": seq,
             "instance": super::instance_id(),
@@ -250,8 +251,10 @@ pub(super) async fn kernel_uninstall(
     let mut message = "内核已卸载，用户配置、记忆与管理员认证已保留".to_string();
     if !warnings.is_empty() {
         message.push_str(&format!("；{}", warnings.join("；")));
+        return Json(json!({"ok": true, "success": true, "message": message})).into_response();
     }
-    Json(json!({"ok": true, "success": true, "message": message})).into_response()
+    Json(json!({"ok": true, "success": true, "code": "kernel_uninstalled", "message": message}))
+        .into_response()
 }
 
 pub(super) async fn kernel_pin(

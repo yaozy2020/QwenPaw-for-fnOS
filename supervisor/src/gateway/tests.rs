@@ -1438,7 +1438,10 @@ async fn capture_web_upstream(
             "text/javascript; charset=utf-8",
         );
     }
-    if uri == "/assets/compressed-fixture.js" {
+    if matches!(
+        uri.as_str(),
+        "/assets/compressed-fixture.js" | "/app/qwenpaw/web/assets/compressed-fixture.js"
+    ) {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
@@ -2974,6 +2977,47 @@ async fn tcp_root_javascript_preserves_the_client_accept_encoding_header() {
         .unwrap();
     assert_eq!(received.headers[header::ACCEPT_ENCODING], "gzip, br");
     server.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn mounted_console_preserves_precompressed_upstream_assets() {
+    let (_dir, state, router) = fixture("mounted-console-precompressed-asset");
+    let marker = Path::new(&state.home_dir)
+        .join("venv")
+        .join(".qwenpaw-base-path-patch");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(marker, b"test fixture").unwrap();
+    let (mut captured, upstream) = start_web_upstream(&state).await;
+    let mut headers = admin_headers();
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, br"),
+    );
+
+    let response = router
+        .oneshot(request(
+            "GET",
+            "/app/qwenpaw/web/assets/compressed-fixture.js",
+            headers,
+            Body::empty(),
+            Some(peer()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+    assert_eq!(
+        response.headers()[header::CONTENT_LENGTH],
+        HeaderValue::from_str(&COMPRESSED_JS.len().to_string()).unwrap()
+    );
+    assert_eq!(
+        &to_bytes(response.into_body(), 4096).await.unwrap()[..],
+        COMPRESSED_JS
+    );
+    let received = captured.recv().await.unwrap();
+    assert_eq!(received.headers[header::ACCEPT_ENCODING], "gzip, br");
     upstream.abort();
 }
 

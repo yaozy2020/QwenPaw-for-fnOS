@@ -10,7 +10,8 @@ use axum::{
 use serde_json::json;
 
 use super::{
-    begin_operation, check_token, err_json, management_error_response, AppState, AuthCache,
+    begin_operation, check_token, err_json, err_json_code, management_error_response, AppState,
+    AuthCache,
 };
 pub(super) async fn kernel_reset_auth(
     State(state): State<AppState>,
@@ -60,20 +61,26 @@ pub(super) async fn kernel_reset_auth(
     {
         Ok(Ok(reply)) => match reply.status() {
             StatusCode::NO_CONTENT => Json(json!({"success":true})).into_response(),
-            StatusCode::CONFLICT => {
-                err_json(StatusCode::CONFLICT, "未启用原生鉴权或尚无已注册账号")
-            }
-            StatusCode::PRECONDITION_FAILED => {
-                err_json(StatusCode::CONFLICT, "原生账号与飞牛入口绑定不一致，未更改")
-            }
-            StatusCode::SERVICE_UNAVAILABLE => err_json(
+            StatusCode::CONFLICT => err_json_code(
+                StatusCode::CONFLICT,
+                "native_auth_uninitialized",
+                "未启用原生鉴权或尚无已注册账号",
+            ),
+            StatusCode::PRECONDITION_FAILED => err_json_code(
+                StatusCode::CONFLICT,
+                "native_auth_mismatch",
+                "原生账号与飞牛入口绑定不一致，未更改",
+            ),
+            StatusCode::SERVICE_UNAVAILABLE => err_json_code(
                 StatusCode::SERVICE_UNAVAILABLE,
+                "native_auth_unconfirmed",
                 "无法确认账号记录或写入结果，请核对内核状态",
             ),
             _ => unavailable(),
         },
-        _ => err_json(
+        _ => err_json_code(
             StatusCode::SERVICE_UNAVAILABLE,
+            "native_auth_no_ack",
             "未收到内核确认，请先用新密码尝试登录",
         ),
     }
@@ -127,7 +134,7 @@ pub(super) async fn mirror_set(
         Err(error) => return err_json(StatusCode::BAD_REQUEST, &error.to_string()),
     };
     match state.core.set_mirror(&request.mirror) {
-        Ok(()) => Json(json!({"success": true, "message": "下载源已保存"})).into_response(),
+        Ok(()) => Json(json!({"success": true, "code": "mirror_saved", "message": "下载源已保存"})).into_response(),
         Err(error) => management_error_response(error),
     }
 }
@@ -273,10 +280,14 @@ pub(super) async fn web_proxy_port_set(
     if request.port != 0
         && (request.port == state.kernel.port() || request.port == state.supervisor_port)
     {
-        return err_json(StatusCode::BAD_REQUEST, "端口已被内核或管理器使用");
+        return err_json_code(
+            StatusCode::BAD_REQUEST,
+            "port_in_use",
+            "端口已被内核或管理器使用",
+        );
     }
     let Some(manager) = state.web_proxy.clone() else {
-        return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
+        return err_json_code(StatusCode::NOT_FOUND, "web_proxy_disabled", "Web 反代未启用");
     };
     let public = match request.public {
         Some(public) => public,
@@ -285,7 +296,7 @@ pub(super) async fn web_proxy_port_set(
     match manager.reconfigure(request.port, public).await {
         Ok(port) => {
             state.events.invalidate();
-            Json(json!({"success": true, "port": port, "message": "Web 反代端口已切换"}))
+            Json(json!({"success": true, "port": port, "code": "web_proxy_port_changed", "message": "Web 反代端口已切换"}))
                 .into_response()
         }
         Err(error) => err_json(

@@ -3,20 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f1ed">
   <title>飞牛目录授权</title>
   <style>
     :root { color-scheme: light dark; font: 15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f3ef; color: #2c2825; }
-    main { width: min(440px, calc(100vw - 40px)); padding: 28px; box-sizing: border-box; background: #faf9f6; border: 1px solid #ded6cb; border-radius: 14px; }
-    h1 { margin: 0 0 12px; font-size: 22px; }
-    p { margin: 0; color: #655d54; }
-    .path { margin-top: 16px; padding: 10px; background: #efeee9; overflow-wrap: anywhere; font-family: ui-monospace,monospace; font-size: 12px; }
-    button { margin-top: 22px; min-height: 40px; padding: 6px 16px; border: 1px solid #a34727; border-radius: 8px; background: #a34727; color: #fff; cursor: pointer; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f2f1ed; color: rgba(20, 20, 19, 0.90); }
+    main { width: min(440px, calc(100vw - 40px)); padding: 28px; box-sizing: border-box; background: #faf9f6; border: 1px solid rgba(20, 20, 19, 0.08); border-radius: 14px; box-shadow: 0 2px 10px rgba(20, 20, 19, 0.04); }
+    h1 { margin: 0 0 12px; font-size: 20px; font-weight: 600; }
+    p { margin: 0; color: rgba(20, 20, 19, 0.62); }
+    .path { margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: #f1f0eb; overflow-wrap: anywhere; font-family: ui-monospace,monospace; font-size: 12px; }
+    button { margin-top: 22px; min-height: 40px; padding: 6px 18px; border: 0; border-radius: 10px; background: #ff7f16; color: #fff; font-weight: 500; cursor: pointer; }
+    html[data-theme="dark"] body { background: #141414; color: rgba(255, 255, 255, 0.90); }
+    html[data-theme="dark"] main { background: #1f1f1f; border-color: rgba(255, 255, 255, 0.11); }
+    html[data-theme="dark"] p { color: rgba(255, 255, 255, 0.66); }
+    html[data-theme="dark"] .path { background: #262626; }
+    html[data-theme="dark"] button { background: #ff8c2e; }
+    html[data-ui-style="miuix"] body { background: #f4f3f0; color: rgba(38, 34, 30, 0.86); }
+    html[data-ui-style="miuix"] main { background: #fcfbf9; border-color: transparent; border-radius: 22px; box-shadow: 0 2px 12px rgba(38, 34, 30, 0.03); }
+    html[data-ui-style="miuix"] p { color: rgba(38, 34, 30, 0.56); }
+    html[data-ui-style="miuix"] .path { background: #f0eee9; border-radius: 14px; }
+    html[data-ui-style="miuix"] button { background: #e47b34; color: #ffffff; border-radius: 999px; }
+    html[data-ui-style="miuix"][data-theme="dark"] body { background: #131315; color: rgba(242, 239, 235, 0.86); }
+    html[data-ui-style="miuix"][data-theme="dark"] main { background: #1e1e21; border-color: transparent; box-shadow: none; }
+    html[data-ui-style="miuix"][data-theme="dark"] p { color: rgba(242, 239, 235, 0.56); }
+    html[data-ui-style="miuix"][data-theme="dark"] .path { background: #28282c; }
+    html[data-ui-style="miuix"][data-theme="dark"] button { background: #d98448; color: #ffffff; }
     @media (prefers-color-scheme: dark) {
-      body { background: #181615; color: #f1eae2; }
-      main { background: #24211f; border-color: #51463e; }
-      p { color: #d0c5ba; }
-      .path { background: #302b27; }
+      html:not([data-theme="light"]) body { background: #141414; color: rgba(255, 255, 255, 0.90); }
+      html:not([data-theme="light"]) main { background: #1f1f1f; border-color: rgba(255, 255, 255, 0.11); }
+      html:not([data-theme="light"]) p { color: rgba(255, 255, 255, 0.66); }
+      html:not([data-theme="light"]) .path { background: #262626; }
+      html:not([data-theme="light"]) button { background: #ff8c2e; }
     }
   </style>
 </head>
@@ -29,6 +47,80 @@
 </main>
 <script>
 (function () {
+  var storage = null;
+  try { storage = window.localStorage || null; } catch (_) {}
+  var media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  function applyTheme() {
+    var themeMode = "system";
+    var uiStyle = "default";
+    try {
+      var savedTheme = storage && typeof storage.getItem === "function" ? storage.getItem("qwenpaw_theme_v2") : null;
+      if (savedTheme === "light" || savedTheme === "dark") themeMode = savedTheme;
+      var savedStyle = storage && typeof storage.getItem === "function" ? storage.getItem("qwenpaw_ui_style_v1") : null;
+      if (savedStyle === "miuix") uiStyle = "miuix";
+    } catch (_) {}
+    var resolvedTheme = themeMode === "system" ? (media && media.matches ? "dark" : "light") : themeMode;
+    if (document.documentElement && typeof document.documentElement.setAttribute === "function") {
+      document.documentElement.setAttribute("data-theme", resolvedTheme);
+      document.documentElement.setAttribute("data-ui-style", uiStyle);
+    }
+    if (typeof document.querySelector === "function") {
+      var themeMeta = document.querySelector('meta[name="theme-color"]');
+      if (themeMeta) {
+        themeMeta.setAttribute(
+          "content",
+          uiStyle === "miuix" ? (resolvedTheme === "dark" ? "#131315" : "#f4f3f0") : (resolvedTheme === "dark" ? "#141414" : "#f2f1ed")
+        );
+      }
+    }
+  }
+  applyTheme();
+  if (media && typeof media.addEventListener === "function") media.addEventListener("change", applyTheme);
+  else if (media && typeof media.addListener === "function") media.addListener(applyTheme);
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("storage", function (event) {
+      if (!event || event.key === null || event.key === "qwenpaw_theme_v2" || event.key === "qwenpaw_ui_style_v1") applyTheme();
+    });
+  }
+
+  var loc = "";
+  try { loc = (storage && typeof storage.getItem === "function" ? storage.getItem("qwenpaw_locale_v1") : "") || ""; } catch (_) {}
+  var nav = window.navigator;
+  if (!loc && nav) loc = (nav.languages && nav.languages[0]) || nav.language || "zh-CN";
+  var isEn = /^en\b/i.test(loc);
+  if (document.documentElement) document.documentElement.lang = isEn ? "en" : "zh-CN";
+  var text = isEn ? {
+    pageTitle: "fnOS Folder Authorization",
+    returning: "Returning to QwenPaw…",
+    received: "Authorization result received.",
+    close: "Close",
+    pubFailTitle: "Authorization Callback Failed",
+    pubFailMsg: function (d) { return "Authorization callback API failed: " + d + ". Keep this page open and report this message to the maintainer."; },
+    netErr: "Network error",
+    sendErr: "Request could not be sent",
+    okTitle: "Folder Authorized",
+    failTitle: "Authorization Incomplete",
+    okMsg: "Authorized for fnOS app. Returning to QwenPaw.",
+    cancelMsg: "Authorization cancelled. Return to QwenPaw and retry."
+  } : {
+    pageTitle: "飞牛目录授权",
+    returning: "正在返回 QwenPaw…",
+    received: "授权结果已收到。",
+    close: "关闭",
+    pubFailTitle: "授权回传失败",
+    pubFailMsg: function (d) { return "授权结果接口返回失败：" + d + "。请保留本页并将此提示反馈给维护者。"; },
+    netErr: "网络错误",
+    sendErr: "请求未能发出",
+    okTitle: "目录授权成功",
+    failTitle: "未完成授权",
+    okMsg: "已授权给飞牛应用，正在返回 QwenPaw。",
+    cancelMsg: "授权已取消，请返回 QwenPaw 后重试。"
+  };
+  document.title = text.pageTitle;
+  document.getElementById("title").textContent = text.returning;
+  document.getElementById("message").textContent = text.received;
+  document.getElementById("close").textContent = text.close;
+
   var params = new URLSearchParams(location.search);
   var paths = [];
   try {
@@ -46,13 +138,13 @@
   var payload = { type: "qwenpaw:authorized-directory", state: result.state, result: result, search: location.search };
   var success = result.status === "success" && (paths.length > 0 || result.method === "authorizeUserFile" || result.method === "authorizeSharedFile");
   var canAutoClose = success;
-  try { localStorage.setItem("qwenpaw.auth-result.v1", JSON.stringify({ state: result.state, result: result, search: location.search, ts: Date.now() })); } catch (_) {}
+  try { if (storage && typeof storage.setItem === "function") storage.setItem("qwenpaw.auth-result.v1", JSON.stringify({ state: result.state, result: result, search: location.search, ts: Date.now() })); } catch (_) {}
   try { if (window.opener && !window.opener.closed) window.opener.postMessage(payload, location.origin); } catch (_) {}
   try { if (window.parent !== window) window.parent.postMessage(payload, location.origin); } catch (_) {}
   function publicationFailed(detail) {
     canAutoClose = false;
-    document.getElementById("title").textContent = "授权回传失败";
-    document.getElementById("message").textContent = "授权结果接口返回失败：" + detail + "。请保留本页并将此提示反馈给维护者。";
+    document.getElementById("title").textContent = text.pubFailTitle;
+    document.getElementById("message").textContent = text.pubFailMsg(detail);
   }
   try {
     var csrf = document.cookie.split(";").map(function (part) { return part.trim(); }).find(function (part) {
@@ -66,13 +158,13 @@
     }).then(function (response) {
       if (!response.ok) publicationFailed("HTTP " + response.status);
     }).catch(function (error) {
-      publicationFailed(error && error.message ? error.message : "网络错误");
+      publicationFailed(error && error.message ? error.message : text.netErr);
     });
   } catch (error) {
-    publicationFailed(error && error.message ? error.message : "请求未能发出");
+    publicationFailed(error && error.message ? error.message : text.sendErr);
   }
-  document.getElementById("title").textContent = success ? "目录授权成功" : "未完成授权";
-  document.getElementById("message").textContent = success ? "已授权给飞牛应用，正在返回 QwenPaw。" : (result.error || "授权已取消，请返回 QwenPaw 后重试。");
+  document.getElementById("title").textContent = success ? text.okTitle : text.failTitle;
+  document.getElementById("message").textContent = success ? text.okMsg : (result.error || text.cancelMsg);
   if (paths.length) {
     var path = document.getElementById("path");
     path.textContent = paths[0];

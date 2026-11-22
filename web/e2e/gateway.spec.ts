@@ -17,6 +17,7 @@ async function openLogTools(page: Page) {
 
 const prefix = "/app/qwenpaw/";
 const api = `${prefix}api/`;
+test.use({ locale: "zh-CN" });
 
 interface Metadata {
   appPort: number;
@@ -171,11 +172,19 @@ test('monitor shows cold status before slow metadata, streams live process metri
 
 test('overview exposes a single in-panel release picker and offline recovery instructions', async ({page}) => {
   await page.goto(prefix);
+  await expect(page).toHaveTitle('概览 · QwenPaw');
   const picker = page.locator('#targetVersion');
   await expect(picker).toBeVisible();
   await expect(page.locator('#btnChangeServicePort, #authorizedDirsList')).toHaveCount(0);
+  if (process.env.QWENPAW_E2E_INCLUDE_VERIFIED === "1") await expect(picker).toContainText('2.3.0.post1');
   for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: 844 });
+    if (process.env.QWENPAW_UI_ARTIFACT_DIR) {
+      await page.screenshot({path: join(process.env.QWENPAW_UI_ARTIFACT_DIR, `overview-${width}.png`), fullPage: width > 390, animations: "disabled"});
+    }
+    if (process.env.QWENPAW_UI_ARTIFACT_DIR && width === 390) {
+      await page.setViewportSize({ width, height: 1000 });
+    }
     await picker.click();
     const list = page.getByRole('listbox', { name: '目标版本' });
     await expect(list).not.toContainText(/推荐|fnOS 已验证|官方认证/);
@@ -184,11 +193,19 @@ test('overview exposes a single in-panel release picker and offline recovery ins
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
     expect(await list.getByRole('option').first().evaluate(el => el.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+    if (process.env.QWENPAW_UI_ARTIFACT_DIR && width === 390) {
+      await page.locator('#btnUpgradeAction').evaluate(element => element.scrollIntoView({block: 'center'}));
+    }
     if (process.env.QWENPAW_UI_ARTIFACT_DIR) {
-      await page.locator('#version').screenshot({path: join(process.env.QWENPAW_UI_ARTIFACT_DIR, `release-picker-${width}.png`)});
+      const path = join(process.env.QWENPAW_UI_ARTIFACT_DIR, `release-picker-${width}.png`);
+      if (width === 390) await page.screenshot({path, animations: "disabled"});
+      else await page.locator('#version').screenshot({path, animations: "disabled"});
     }
     await page.keyboard.press('Escape');
     await expect(picker).toBeFocused();
+    if (process.env.QWENPAW_UI_ARTIFACT_DIR && width === 390) {
+      await page.setViewportSize({ width, height: 844 });
+    }
   }
   await pickVersion(page, '2.1.0b1');
   await expect(picker).toContainText('测试版');
@@ -206,7 +223,28 @@ test('overview exposes a single in-panel release picker and offline recovery ins
   const recoveryFile = page.getByText('preinstall-data.tar', {exact:true});
   await expect(recoveryFile).toBeVisible();
   await page.locator('[data-section="configuration"]').click();
+  await expect(page).toHaveTitle('配置 · QwenPaw');
   await expect(page.locator('#btnChangeServicePort')).toBeVisible();
+  await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('#themeToggleBtn')).toHaveAttribute('data-theme-mode', 'dark');
+  if (process.env.QWENPAW_UI_ARTIFACT_DIR) {
+    await page.screenshot({path: join(process.env.QWENPAW_UI_ARTIFACT_DIR, 'configuration-dark-1280.png'), fullPage: true, animations: "disabled"});
+  }
+  await page.locator('#localeToggleBtn').click();
+  await expect(page).toHaveTitle('Settings · QwenPaw');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+  await expect(page.locator('#localeToggleBtn')).toHaveAttribute('data-locale', 'en');
+  if (process.env.QWENPAW_UI_ARTIFACT_DIR) {
+    await page.screenshot({path: join(process.env.QWENPAW_UI_ARTIFACT_DIR, 'configuration-en-dark-1280.png'), fullPage: true, animations: "disabled"});
+  }
+  await page.locator('#localeToggleBtn').click();
+  await expect(page).toHaveTitle('配置 · QwenPaw');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN');
+  await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('#themeToggleBtn')).toHaveAttribute('data-theme-mode', 'light');
+  await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('#themeToggleBtn')).toHaveAttribute('data-theme-mode', 'system');
   await page.goBack();
   await expect(recoveryFile).toBeVisible();
 });

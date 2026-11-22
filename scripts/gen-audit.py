@@ -247,7 +247,7 @@ def render() -> str:
         a("|:---------|:-----|")
         wf_desc = {
             "ci.yml": "PR 触发，跑 preflight + 前端构建验证",
-            "release.yml": "tag 触发，fnpackup 容器构建并自动上传 Release",
+            "release.yml": "tag 或手动触发，fpkstudio 双构建并上传 GitHub Release",
         }
         for w in workflows:
             a(f"| `{w}` | {wf_desc.get(w, '-')} |")

@@ -1,6 +1,7 @@
 import { nextTick, shallowReactive } from "vue";
 import { createPollingLifecycle } from "./pollingLifecycle";
 import type { ApiClient, LogEntry } from "./api";
+import { t } from "./i18n";
 
 const LOG_PAGE_SIZE = 100;
 const LOG_WINDOW_MAX = 2000;
@@ -76,13 +77,27 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
   let liveLogFetchSeq = 0;
   let followLatest = true;
   let disconnectDom: (() => void) | null = null;
-  const view = shallowReactive({
+  const raw = shallowReactive({
     lines: [] as LogEntry[],
     exportBusy: false,
-    error: '',
+    hasError: false,
     level: 'all' as LogLevelFilter,
     query: '',
+    autoScroll: true,
   });
+  const view = {
+    get lines() { return raw.lines; },
+    set lines(value: LogEntry[]) { raw.lines = value; },
+    get exportBusy() { return raw.exportBusy; },
+    set exportBusy(value: boolean) { raw.exportBusy = value; },
+    get error() { return raw.hasError ? t("logs.readError") : ""; },
+    get level() { return raw.level; },
+    set level(value: LogLevelFilter) { raw.level = value; },
+    get query() { return raw.query; },
+    set query(value: string) { raw.query = value; },
+    get autoScroll() { return raw.autoScroll; },
+    set autoScroll(value: boolean) { raw.autoScroll = value; },
+  };
 
   let inLogs: boolean | undefined;
   let autoRefresh = true;
@@ -96,8 +111,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     const shouldScroll = followLatest;
     view.lines = logLines;
     renderedLines = logLines;
-    const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
-    if (autoScroll?.checked && shouldScroll) void nextTick(() => { if (followLatest) terminal.scrollTop = terminal.scrollHeight; });
+    if (view.autoScroll && shouldScroll) void nextTick(() => { if (followLatest) terminal.scrollTop = terminal.scrollHeight; });
   }
 
   async function refresh(): Promise<void> {
@@ -109,34 +123,34 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
       if (document.hidden || !visible() || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
       const data = result.data;
       if (result.ok && data.success && Array.isArray(data.logs)) {
-        view.error = '';
+        raw.hasError = false;
         logLines = mergeLogWindow(logLines, data.logs);
         render();
-      } else view.error = "读取日志失败，可重试。";
+      } else raw.hasError = true;
     } catch (error) {
-      if (mySeq === liveLogFetchSeq && generation === logClearGeneration && visible()) view.error = "读取日志失败，可重试。";
+      if (mySeq === liveLogFetchSeq && generation === logClearGeneration && visible()) raw.hasError = true;
     }
   }
 
   async function clear(): Promise<void> {
     const ok = await confirm({
-      title: "删除服务日志",
-      message: "这将删除后端保存的服务日志，而不仅仅清空当前显示。删除后无法恢复，确认继续？",
+      title: t("logs.clearTitle"),
+      message: t("logs.clearMsg"),
       type: "danger",
-      confirmText: "确认删除日志",
+      confirmText: t("logs.clearConfirm"),
     });
     if (!ok) return;
     try {
       const result = await api.clearLogs();
-      if (!result.ok || result.data.success === false) throw new Error(result.data.message || `删除日志失败 (${result.status})`);
+      if (!result.ok || result.data.success === false) throw new Error(result.data.message || t("logs.clearFailedStatus", { status: result.status }));
       ++logClearGeneration;
       ++liveLogFetchSeq;
       logLines = [];
       followLatest = true;
       render();
-      showToast("已请求清理服务日志");
+      showToast(t("logs.clearedToast"));
     } catch (error) {
-      showToast(`删除日志失败: ${errorMessage(error)}`);
+      showToast(t("logs.clearFailed", { error: errorMessage(error) }));
     }
   }
 
@@ -146,7 +160,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     try {
       const result = await api.logs(LOG_WINDOW_MAX);
       if (!result.ok || !result.data.success || !Array.isArray(result.data.logs)) {
-        throw new Error(result.data.message || `读取日志失败 (${result.status})`);
+        throw new Error(result.data.message || t("logs.readFailedStatus", { status: result.status }));
       }
       const content = result.data.logs.map(logEntryText).join("\n") + "\n";
       const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
@@ -158,9 +172,9 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showToast(`已导出 ${result.data.logs.length} 行日志`);
+      showToast(t("logs.exportedToast", { count: result.data.logs.length }));
     } catch (error) {
-      showToast(`导出日志失败: ${errorMessage(error)}`);
+      showToast(t("logs.exportFailed", { error: errorMessage(error) }));
     } finally {
       view.exportBusy = false;
     }
@@ -191,7 +205,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
         : view.lines.filter(entry => matchesLogFilter(entry, view.level, view.query))
     );
     if (!source.length) {
-      showToast("当前无日志可复制");
+      showToast(t("logs.nothingToCopy"));
       return;
     }
     const text = source.map(logEntryText).join("\n");
@@ -208,11 +222,20 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
         area.select();
         const copied = document.execCommand("copy");
         area.remove();
-        if (!copied) throw new Error("浏览器不支持剪贴板写入");
+        if (!copied) throw new Error(t("logs.clipboardUnsupported"));
       }
-      showToast(`已复制 ${source.length} 行日志`);
+      showToast(t("logs.copiedToast", { count: source.length }));
     } catch (error) {
-      showToast(`复制日志失败: ${errorMessage(error)}`);
+      showToast(t("logs.copyFailed", { error: errorMessage(error) }));
+    }
+  }
+
+  function setAutoScroll(enabled: boolean): void {
+    view.autoScroll = enabled;
+    const terminal = document.getElementById("logTerminal");
+    if (enabled && terminal) {
+      followLatest = true;
+      terminal.scrollTop = terminal.scrollHeight;
     }
   }
 
@@ -224,18 +247,10 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
       followLatest = terminal.scrollHeight - terminal.clientHeight - terminal.scrollTop <= 24;
     };
     terminal?.addEventListener("scroll", onScroll, { passive: true });
-    const autoScroll = document.getElementById("autoScrollCheck") as HTMLInputElement | null;
-    const onAutoScrollChange = () => {
-      if (autoScroll?.checked && terminal) {
-        followLatest = true;
-        terminal.scrollTop = terminal.scrollHeight;
-      }
-    };
-    autoScroll?.addEventListener("change", onAutoScrollChange);
     let observer: ResizeObserver | null = null;
     if (terminal && typeof ResizeObserver === "function") {
       observer = new ResizeObserver(() => {
-        if (followLatest && autoScroll?.checked && terminal.clientHeight > 0) {
+        if (followLatest && view.autoScroll && terminal.clientHeight > 0) {
           terminal.scrollTop = terminal.scrollHeight;
         }
       });
@@ -243,7 +258,6 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     }
     disconnectDom = () => {
       terminal?.removeEventListener("scroll", onScroll);
-      autoScroll?.removeEventListener("change", onAutoScrollChange);
       observer?.disconnect();
     };
   }
@@ -259,6 +273,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
       polling.destroy();
     },
     setAutoRefresh,
+    setAutoScroll,
     exportLogs,
     copyLogs,
   };

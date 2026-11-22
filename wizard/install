@@ -4,7 +4,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "<strong>QwenPaw for fnOS</strong> 是用于安装和管理 QwenPaw 内核的第三方应用。首次使用时，打开飞牛桌面的「QwenPaw 控制台」，在「概览 → 部署版本」选择并安装内核。"
+                "helpText": "<strong>QwenPaw for fnOS</strong> 是面向飞牛 NAS 的第三方部署外壳，用于安装与管理 QwenPaw 内核。安装完成后，请打开飞牛桌面的「QwenPaw 控制台」，在「概览 → 部署版本」选择并安装内核。"
             },
             {
                 "type": "tips",
@@ -52,11 +52,11 @@
         ]
     },
     {
-        "stepTitle": "Web 端口设置",
+        "stepTitle": "服务端口设置",
         "items": [
             {
                 "type": "tips",
-                "helpText": "设置 QwenPaw 的 Web 访问端口。默认端口为 18088，如有冲突可自行修改为其他可用端口 (如 18090)。"
+                "helpText": "设置 QwenPaw 内核的本机监听端口。默认端口为 18088，如有冲突可修改为其他可用端口（如 18090）。"
             },
             {
                 "type": "text",
@@ -69,7 +69,7 @@
                         "message": "请输入服务端口"
                     }
                 ],
-                "helpText": "QwenPaw Web 服务的监听端口 (默认 18088)。"
+                "helpText": "QwenPaw 内核本机监听端口（默认 18088）。"
             }
         ]
     },
@@ -78,7 +78,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "选择日志级别，这将影响日志输出的详细程度。"
+                "helpText": "选择内核运行日志级别，决定日志输出的详细程度。"
             },
             {
                 "type": "select",

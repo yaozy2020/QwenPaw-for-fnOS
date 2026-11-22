@@ -61,7 +61,7 @@ async function fixture(t, options = {}) {
     posts: [], logQueries: [], liveLogQueries: [], requestPaths: [], statusPolls: 0, statusRequests: 0,
     ...options,
   };
-  const context = await browser.newContext({ viewport: options.viewport, deviceScaleFactor: options.deviceScaleFactor, javaScriptEnabled: options.javaScriptEnabled, userAgent: options.userAgent });
+  const context = await browser.newContext({ locale: options.locale ?? "zh-CN", viewport: options.viewport, deviceScaleFactor: options.deviceScaleFactor, javaScriptEnabled: options.javaScriptEnabled, userAgent: options.userAgent });
   t.after(() => context.close());
   await context.addCookies([{ name: "qwenpaw_csrf", value: "test-token", url: origin }]);
   const page = await context.newPage();
@@ -207,6 +207,25 @@ async function box(locator) {
 }
 
 const desktop = { width: 1440, height: 900 };
+
+browserTest('fnOS console title follows the current section and locale', async t => {
+  const { page } = await fixture(t, {
+    userAgent: 'Mozilla/5.0 FNAppType/Android FNAppVer/1.38.2',
+    viewport: { width: 390, height: 844 },
+  });
+  page.on('pageerror', error => console.error('title regression pageerror:', error.message));
+  await page.goto(origin + prefix);
+  await expect(page).toHaveTitle('概览 · QwenPaw');
+  await page.locator('[data-section="configuration"]').click();
+  await expect(page).toHaveTitle('配置 · QwenPaw');
+  await page.locator('#localeToggleBtn').click();
+  await expect(page).toHaveTitle('Settings · QwenPaw');
+  await page.locator('[data-section="authorization"]').click();
+  await expect(page).toHaveTitle('Access & Backup · QwenPaw');
+  await page.locator('[data-section="logs"]').click();
+  await expect(page).toHaveTitle('Logs · QwenPaw');
+});
+
 const runningStatus = {
   success: true, installed: true, running: true, pid: 421,
   startAt: Math.floor(Date.now() / 1000) - 3600, cpu: 1.5, memKB: 102400,
@@ -382,13 +401,13 @@ browserTest("a version refresh without beta removes the stale beta card", async 
   await expect(page.getByRole("option")).toHaveCount(1);
 });
 
-browserTest("an App user can return from Web without the host back gesture", async t => {
+browserTest("an App user opens Web in a clean full-screen overlay and returns via host back", async t => {
   const { page } = await fixture(t, { userAgent: 'Mobile FNAppType/iOS', status: runningStatus });
   await page.goto(origin + prefix + '#overview');
   await page.locator('#btnWebConsole').click();
-  const back = page.getByRole('button', { name: '返回控制台', exact: true });
-  await expect(back).toBeVisible();
-  await back.click();
+  await expect(page.locator('#webEntryOverlay')).toBeVisible();
+  await expect(page.locator('#webEntryBack')).toHaveCount(0);
+  await page.goBack();
   await expect(page.locator('#webEntryOverlay')).toBeHidden();
   await expect(page.locator('#btnWebConsole')).toBeFocused();
   assert.equal(new URL(page.url()).hash, '#overview');
@@ -827,15 +846,35 @@ browserTest("desktop secondary controls keep comfortable pointer targets", async
   }
 });
 
-browserTest("theme toggle names the current mode and the action it performs", async t => {
+browserTest("theme toggle flips light/dark directly while settings selector restores system mode", async t => {
   const { page } = await fixture(t, { initScript: () => localStorage.setItem("qwenpaw_theme_v2", "dark") });
-  await page.goto(origin + prefix);
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto(origin + prefix + "#configuration");
   const toggle = page.locator("#themeToggleBtn");
-  await expect(toggle).toHaveAttribute("aria-label", "暗夜模式，切换到白天模式");
+  await expect(toggle).toHaveAttribute("aria-label", "夜晚模式，切换到白天模式");
+  await expect(page.locator("#themeText")).toHaveText("夜晚");
   await toggle.click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-mode", "light");
   await expect(page.locator("#themeText")).toHaveText("白天");
-  await expect(toggle).toHaveAttribute("aria-label", "白天模式，切换到暗夜模式");
+  await expect(page.locator("#themeIconSun")).toBeVisible();
+  await expect(toggle).toHaveAttribute("aria-label", "白天模式，切换到夜晚模式");
+  await toggle.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme-mode", "dark");
+  await expect(page.locator("#themeText")).toHaveText("夜晚");
+  await expect(page.locator("#themeIconMoon")).toBeVisible();
+
+  await page.locator('#themeModeGroup [data-theme-option="system"]').click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme-mode", "system");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.locator("#themeText")).toHaveText("白天");
+  await expect(page.locator("#themeIconSun")).toBeVisible();
+  assert.equal(await page.evaluate(() => localStorage.getItem("qwenpaw_theme_v2")), null);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.locator("#themeText")).toHaveText("夜晚");
+  await expect(toggle).toHaveAttribute("aria-label", "夜晚模式，切换到白天模式");
 });
 
 browserTest("theme: unavailable matchMedia does not prevent the dashboard mounting", async t => {
@@ -856,29 +895,153 @@ browserTest("theme: a manual choice survives system changes when storage is bloc
   await page.emulateMedia({colorScheme:'light'});
   await page.goto(origin + prefix);
   await page.locator('#themeToggleBtn').click();
-  await expect(page.locator('#themeText')).toHaveText('暗夜');
+  await expect(page.locator('#themeText')).toHaveText('夜晚');
   await page.emulateMedia({colorScheme:'dark'});
   await page.waitForFunction(() => window.systemThemeEvents === 1);
   await page.emulateMedia({colorScheme:'light'});
   await page.waitForFunction(() => window.systemThemeEvents === 2);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await expect(page.locator('#themeToggleBtn')).toHaveAccessibleName('暗夜模式，切换到白天模式');
+  await expect(page.locator('#themeToggleBtn')).toHaveAccessibleName('夜晚模式，切换到白天模式');
 });
 
 browserTest("theme: changing or clearing the preference in another tab updates the open panel", async t => {
   const { page } = await fixture(t);
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto(origin + prefix);
+  await expect(page.locator('#themeIconSun')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'system');
   const other = await page.context().newPage();
   await other.route(origin + prefix, route => route.fulfill({ contentType: 'text/html', body: '<title>Settings</title>' }));
   await other.goto(origin + prefix);
   await other.evaluate(() => localStorage.setItem('qwenpaw_theme_v2', 'dark'));
   await expect(page.locator('#themeIconMoon')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await other.evaluate(() => localStorage.removeItem('qwenpaw_theme_v2'));
   await expect(page.locator('#themeIconSun')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('html')).toHaveAttribute('data-theme-mode', 'system');
   await page.emulateMedia({ colorScheme: 'dark' });
   await expect(page.locator('#themeIconMoon')).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   assert.equal(await page.evaluate(() => localStorage.getItem('qwenpaw_theme_v2')), null);
+});
+
+browserTest("theme: uiStyle switches between default and Miuix across light/dark and syncs across tabs", async t => {
+  const { page } = await fixture(t, { status: runningStatus });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto(origin + prefix + '#configuration');
+  await expect(page.locator('html')).toHaveAttribute('data-ui-style', 'default');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f2f1ed');
+  await expect(page.locator('#uiStyleGroup [data-ui-style-option="default"]')).toHaveAttribute('aria-pressed', 'true');
+
+  await page.locator('#uiStyleGroup [data-ui-style-option="miuix"]').click();
+  await expect(page.locator('html')).toHaveAttribute('data-ui-style', 'miuix');
+  await expect(page.locator('#uiStyleGroup [data-ui-style-option="miuix"]')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#f4f3f0');
+  assert.equal(await page.evaluate(() => localStorage.getItem('qwenpaw_ui_style_v1')), 'miuix');
+
+  await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(page.locator('html')).toHaveAttribute('data-ui-style', 'miuix');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#131315');
+
+  const other = await page.context().newPage();
+  await other.route(origin + prefix, route => route.fulfill({ contentType: 'text/html', body: '<title>Sync</title>' }));
+  await other.goto(origin + prefix);
+  await other.evaluate(() => localStorage.removeItem('qwenpaw_ui_style_v1'));
+  await expect(page.locator('html')).toHaveAttribute('data-ui-style', 'default');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#141414');
+});
+
+browserTest("i18n: follows browser English locale, toggles languages live, and syncs across tabs", async t => {
+  const { page } = await fixture(t, { locale: "en-US", status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await expect(page).toHaveTitle("Overview · QwenPaw");
+  await expect(page.locator("#sectionTitle")).toHaveText("Overview");
+  await expect(page.locator("#statusBadge")).toContainText("Running");
+  await expect(page.locator("#localeText")).toHaveText("EN");
+  await expect(page.locator("#themeText")).toHaveText("Light");
+
+  await page.locator("#localeToggleBtn").click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  await expect(page).toHaveTitle("概览 · QwenPaw");
+  await expect(page.locator("#sectionTitle")).toHaveText("概览");
+  await expect(page.locator("#statusBadge")).toContainText("运行中");
+  await expect(page.locator("#localeText")).toHaveText("中文");
+  await expect(page.locator("#themeText")).toHaveText("白天");
+
+  const other = await page.context().newPage();
+  await other.route(origin + prefix, route => route.fulfill({ contentType: "text/html", body: "<title>Sync</title>" }));
+  await other.goto(origin + prefix);
+  await other.evaluate(() => localStorage.setItem("qwenpaw_locale_v1", "en"));
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await expect(page.locator("#sectionTitle")).toHaveText("Overview");
+});
+
+browserTest("i18n: English mobile header fits all sections without overlap or overflow at 360px", async t => {
+  const { page } = await fixture(t, { locale: "en-US", viewport: { width: 360, height: 844 }, status: runningStatus });
+  await page.goto(origin + prefix);
+  await expect(page.locator("#localeToggleBtn .locale-short")).toBeVisible();
+  await expect(page.locator("#localeToggleBtn .locale-short")).toHaveText("EN");
+  const controlSelectors = ["#localeToggleBtn", "#themeToggleBtn", "#aboutButton", "#btnWebConsole"];
+  const intersects = (a, b) => a.x < b.x + b.width && a.x + a.width > b.x
+    && a.y < b.y + b.height && a.y + a.height > b.y;
+  for (const section of ["overview", "configuration", "authorization", "logs"]) {
+    await page.locator(`#mobileSectionNav a[data-section="${section}"]`).click();
+    const header = await box(page.locator("header"));
+    const title = await box(page.locator(".brand-info h1"));
+    const controls = await Promise.all(controlSelectors.map(selector => box(page.locator(selector))));
+    for (const [index, control] of controls.entries()) {
+      assert.equal(intersects(title, control), false, `${section}: ${controlSelectors[index]} overlaps title`);
+      assert.ok(control.width >= 44 && control.height >= 44, `${section}: ${controlSelectors[index]} < 44px`);
+    }
+    assert.ok(header.height <= 90, `${section}: header wrapped (${header.height}px)`);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${section}: horizontal overflow`);
+  }
+});
+
+browserTest("i18n: live locale switch updates transient error banners and active install dialog", async t => {
+  const { page } = await fixture(t, {
+    status: { ...runningStatus, install: { running: true } },
+    install: { success: true, upgrading: true, running: true, seq: 42, instance: "worker-a", phase: "downloading" },
+    installLogs: [],
+    versions: { success: false, message: "mirror timeout" },
+  });
+  await page.goto(origin + prefix);
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await expect(page.locator("#versionSourceStatus")).toContainText("当前下载源不可用");
+  await page.locator("#localeToggleBtn").click();
+  await expect(page.locator("#versionSourceStatus")).toContainText("The current download source is unavailable");
+
+  await page.locator("#installRunningTip").click();
+  await expect(page.locator("#upTitle")).toHaveText("Viewing active install task…");
+  await expect(page.locator("#upTerminal")).toContainText("Downloading dependencies…");
+  await page.locator("#btnUpMinimize").click();
+  await page.locator("#localeToggleBtn").click();
+  await page.locator("#taskCenterButton").click();
+  await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+  await expect(page.locator("#upTerminal")).toContainText("正在下载依赖包...");
+});
+
+browserTest("i18n: settings language selector can return to follow system locale", async t => {
+  const { page } = await fixture(t, { locale: "en-US", status: runningStatus });
+  await page.goto(origin + prefix + "#configuration");
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await expect(page.locator("html")).toHaveAttribute("data-locale-mode", "system");
+  await expect(page.locator('#localeModeGroup [data-locale-option="system"]')).toHaveAttribute("aria-pressed", "true");
+
+  await page.locator('#localeModeGroup [data-locale-option="zh-CN"]').click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  await expect(page.locator("html")).toHaveAttribute("data-locale-mode", "zh-CN");
+  await expect(page.locator("#configurationTitle")).toHaveText("服务配置");
+  assert.equal(await page.evaluate(() => localStorage.getItem("qwenpaw_locale_v1")), "zh-CN");
+
+  await page.locator('#localeModeGroup [data-locale-option="system"]').click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "en");
+  await expect(page.locator("html")).toHaveAttribute("data-locale-mode", "system");
+  await expect(page.locator("#configurationTitle")).toHaveText("Service Settings");
+  assert.equal(await page.evaluate(() => localStorage.getItem("qwenpaw_locale_v1")), null);
 });
 
 browserTest("about dialog exposes troubleshooting and official links with native focus handling", async t => {

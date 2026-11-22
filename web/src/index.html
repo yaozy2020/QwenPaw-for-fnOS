@@ -4,16 +4,33 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f1ed">
   <title>QwenPaw 控制台</title>
   <script>
     // 首屏防闪屏:无用户显式选择时跟随系统 prefers-color-scheme,须在样式表生效前定题
     (function () {
-      var t = null;
-      try { t = localStorage.getItem("qwenpaw_theme_v2"); } catch (e) {}
-      if (t !== "light" && t !== "dark") {
-        t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-      }
+      var mode = "system";
+      var style = "default";
+      try {
+        var saved = localStorage.getItem("qwenpaw_theme_v2");
+        if (saved === "light" || saved === "dark") mode = saved;
+        if (localStorage.getItem("qwenpaw_ui_style_v1") === "miuix") style = "miuix";
+      } catch (e) {}
+      var t = mode === "system"
+        ? (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+        : mode;
       document.documentElement.setAttribute("data-theme", t);
+      document.documentElement.setAttribute("data-theme-mode", mode);
+      document.documentElement.setAttribute("data-ui-style", style);
+      var m = document.querySelector('meta[name="theme-color"]');
+      if (m) m.setAttribute("content", style === "miuix" ? (t === "dark" ? "#131315" : "#f4f3f0") : (t === "dark" ? "#141414" : "#f2f1ed"));
+      var storedLoc = "";
+      try { storedLoc = localStorage.getItem("qwenpaw_locale_v1") || ""; } catch (e) {}
+      var loc = storedLoc || (navigator.languages && navigator.languages[0]) || navigator.language || "zh-CN";
+      var isEn = /^en\b/i.test(loc);
+      document.documentElement.lang = isEn ? "en" : "zh-CN";
+      document.documentElement.setAttribute("data-locale-mode", storedLoc ? (isEn ? "en" : "zh-CN") : "system");
+      if (isEn) document.title = "QwenPaw Console";
     })();
   </script>
   <style>
