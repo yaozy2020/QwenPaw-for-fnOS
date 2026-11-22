@@ -257,7 +257,10 @@ mod tests {
         tokio::pin!(changes);
         let idle = Duration::from_millis(80);
         assert!(tokio::time::timeout(idle, changes.next()).await.is_err());
-        std::fs::write(&file, "sample\n").unwrap();
+        // Publish one metadata transition; create + write can be sampled separately.
+        let ready = dir.0.join("sample.log");
+        std::fs::write(&ready, "sample\n").unwrap();
+        std::fs::rename(ready, &file).unwrap();
         let _change = tokio::time::timeout(Duration::from_secs(2), changes.next())
             .await
             .unwrap()

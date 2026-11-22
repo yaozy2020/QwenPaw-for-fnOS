@@ -114,6 +114,7 @@ test("pathless reauthorization callback renders success and closes automatically
     { getElementById: id => elements[id], cookie: "" },
     window.location,
   );
+  await Promise.resolve();
   assert.equal(elements.title.textContent, "目录授权成功");
   assert.deepEqual(window.timers.map(timer => timer.milliseconds), [300, 1500]);
   window.timers[0].callback();
@@ -151,6 +152,7 @@ test("callback returns to the console when the WebView blocks window.close", asy
   assert.equal(requests[0].init.method, "POST");
   assert.equal(requests[0].init.headers["X-CSRF-Token"], "test-token");
   assert.match(requests[0].init.body, /"state":"abc"/);
+  await Promise.resolve();
   window.timer.callback();
   assert.equal(window.top.location.url, "/app/qwenpaw/#authorization");
 });
@@ -251,6 +253,8 @@ test("embedded callback does not reload the console before directory binding fin
     { getElementById: id => elements[id], cookie: "" },
     window.location,
   );
+  assert.equal(messages.length, 0);
+  await Promise.resolve();
   assert.equal(messages.length, 1);
   window.timers.find(timer => timer.milliseconds === 1500).callback();
 });
@@ -385,18 +389,26 @@ test("callback reports result publication failure and stays open", async () => {
     setTimeout(callback, milliseconds) { this.timers.push({ callback, milliseconds }); },
   };
   window.parent = window;
-  globalThis.fetch = async () => new Response("{}", { status: 503 });
+  const notifications = [];
+  window.opener = { postMessage() { notifications.push('opener'); } };
+  window.localStorage.setItem = () => notifications.push('storage');
+  let finish;
+  globalThis.fetch = () => new Promise(resolve => { finish = resolve; });
   try {
     new Function("window", "document", "location", source)(
       window,
       { getElementById: id => elements[id], cookie: "" },
       window.location,
     );
+    for (const timer of window.timers) timer.callback();
+    assert.equal(window.closed, false, 'keep the page open while publication is pending');
+    finish(new Response('{}', { status: 503 }));
     await Promise.resolve();
     await Promise.resolve();
     assert.match(elements.title.textContent, /回传失败/);
     assert.match(elements.message.textContent, /503/);
-    window.timers.find(timer => timer.milliseconds === 300).callback();
+    assert.deepEqual(notifications, []);
+    for (const timer of window.timers) timer.callback();
     assert.equal(window.closed, false, "failed publication must not hide the diagnostic by closing the callback");
   } finally {
     globalThis.fetch = originalFetch;
@@ -444,6 +456,7 @@ test("callback renders English copy and tracks system theme changes dynamically"
     new Function("window", "document", "location", source)(win, doc, win.location);
     assert.equal(doc.documentElement.lang, "en");
     assert.equal(doc.title, "fnOS Folder Authorization");
+    await Promise.resolve();
     assert.equal(elements.title.textContent, "Folder Authorized");
     assert.equal(elements.close.textContent, "Close");
     assert.equal(rootAttrs["data-theme"], "light");

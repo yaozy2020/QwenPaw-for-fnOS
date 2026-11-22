@@ -365,7 +365,12 @@ def test_logs(fixture):
     assert fixture.request("/logs")[1] == {"success": True, "logs": []}
     path.unlink()
     assert fixture.request("/logs")[1] == {"success": True, "logs": []}
-    print("PASS: large-file log tails, CRLF/UTF-8, limits, install identity, clear and missing file")
+    path.mkdir()  # Truncating a directory fails even when the fixture runs as root.
+    code, result = fixture.request("/logs/clear", {})
+    assert code == 500 and result.get("success") is False, (code, result)
+    assert path.is_dir()
+    path.rmdir()
+    print("PASS: log tails, install identity, clear success/failure and missing file")
 
 
 def test_settings(fixture):

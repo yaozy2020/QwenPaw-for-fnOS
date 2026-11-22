@@ -114,13 +114,14 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     if (view.autoScroll && shouldScroll) void nextTick(() => { if (followLatest) terminal.scrollTop = terminal.scrollHeight; });
   }
 
-  async function refresh(): Promise<void> {
-    if (document.hidden || !visible()) return;
+  async function refresh(manualFallback = false): Promise<void> {
+    const canRead = () => !document.hidden && (visible() || manualFallback);
+    if (!canRead()) return;
     const generation = logClearGeneration;
     const mySeq = ++liveLogFetchSeq;
     try {
       const result = await api.logs(logLines.length ? LOG_PAGE_SIZE : LOG_WINDOW_MAX);
-      if (document.hidden || !visible() || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
+      if (!canRead() || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
       const data = result.data;
       if (result.ok && data.success && Array.isArray(data.logs)) {
         raw.hasError = false;
@@ -128,7 +129,7 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
         render();
       } else raw.hasError = true;
     } catch (error) {
-      if (mySeq === liveLogFetchSeq && generation === logClearGeneration && visible()) raw.hasError = true;
+      if (mySeq === liveLogFetchSeq && generation === logClearGeneration && canRead()) raw.hasError = true;
     }
   }
 

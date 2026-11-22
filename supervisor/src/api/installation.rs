@@ -350,10 +350,14 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     }
 
     fn assert_installer_calls(dir: &TestDir, state: &AppState, index: &str) {
-        let bootstrap: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.0.join("bootstrap.json")).unwrap()).unwrap();
-        let uv: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.0.join("uv.json")).unwrap()).unwrap();
+        let record = |name: &str| -> serde_json::Value {
+            let bytes = std::fs::read(dir.0.join(name)).unwrap_or_else(|err| {
+                panic!("read {name}: {err}; installer error: {}", state.install.snapshot().error)
+            });
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        let bootstrap = record("bootstrap.json");
+        let uv = record("uv.json");
         assert_eq!(
             bootstrap["argv"],
             json!([

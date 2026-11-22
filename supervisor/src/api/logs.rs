@@ -105,8 +105,14 @@ pub(super) async fn logs_clear(
     }
     // 截断落盘移入 spawn_blocking:与全库 async 卫生纪律一致(审查 P2-7)
     let log_path = state.kernel_log.clone();
-    let _ = tokio::task::spawn_blocking(move || std::fs::write(&log_path, "")).await;
-    Json(json!({"success": true, "code": "logs_cleared", "message": "日志已清理"})).into_response()
+    match tokio::task::spawn_blocking(move || std::fs::write(&log_path, "")).await {
+        Ok(Ok(())) => {
+            Json(json!({"success": true, "code": "logs_cleared", "message": "日志已清理"}))
+                .into_response()
+        }
+        Ok(Err(error)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
 }
 
 /// pip 日志尾部(Rust 侧 JSON 转义,替代桥侧 python3;含引号/反斜杠安全)

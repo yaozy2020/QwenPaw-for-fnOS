@@ -244,6 +244,8 @@ test('overview exposes a single in-panel release picker and offline recovery ins
   await page.locator('#themeToggleBtn').click();
   await expect(page.locator('#themeToggleBtn')).toHaveAttribute('data-theme-mode', 'light');
   await page.locator('#themeToggleBtn').click();
+  await expect(page.locator('#themeToggleBtn')).toHaveAttribute('data-theme-mode', 'dark');
+  await page.locator('#themeModeGroup [data-theme-option="system"]').click();
   await expect(page.locator('#themeToggleBtn')).toHaveAttribute('data-theme-mode', 'system');
   await page.goBack();
   await expect(recoveryFile).toBeVisible();

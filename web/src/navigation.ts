@@ -57,15 +57,13 @@ export function createNavigation(onView: (view: ConsoleView | null) => void) {
     });
   }
   function navigate(id: Section, event?: MouseEvent) {
-    if (event) {
-      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-      event.preventDefault();
+    if (current.value === null || (event && (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey))) return;
+    if (current.value !== id) {
+      try { history.pushState(null, '', `#${id}`); }
+      catch (error) { fallback(error); return; }
+      sync();
     }
-    if (current.value === null) return;
-    if (current.value === id) return;
-    try { history.pushState(null, '', `#${id}`); }
-    catch (error) { fallback(error); return; }
-    sync();
+    event?.preventDefault();
   }
   function start() {
     window.addEventListener('hashchange', sync);

@@ -137,12 +137,12 @@
   };
   var payload = { type: "qwenpaw:authorized-directory", state: result.state, result: result, search: location.search };
   var success = result.status === "success" && (paths.length > 0 || result.method === "authorizeUserFile" || result.method === "authorizeSharedFile");
-  var canAutoClose = success;
-  try { if (storage && typeof storage.setItem === "function") storage.setItem("qwenpaw.auth-result.v1", JSON.stringify({ state: result.state, result: result, search: location.search, ts: Date.now() })); } catch (_) {}
-  try { if (window.opener && !window.opener.closed) window.opener.postMessage(payload, location.origin); } catch (_) {}
-  try { if (window.parent !== window) window.parent.postMessage(payload, location.origin); } catch (_) {}
+  function notifyConsole() {
+    try { if (storage && typeof storage.setItem === "function") storage.setItem("qwenpaw.auth-result.v1", JSON.stringify({ state: result.state, result: result, search: location.search, ts: Date.now() })); } catch (_) {}
+    try { if (window.opener && !window.opener.closed) window.opener.postMessage(payload, location.origin); } catch (_) {}
+    try { if (window.parent !== window) window.parent.postMessage(payload, location.origin); } catch (_) {}
+  }
   function publicationFailed(detail) {
-    canAutoClose = false;
     document.getElementById("title").textContent = text.pubFailTitle;
     document.getElementById("message").textContent = text.pubFailMsg(detail);
   }
@@ -156,15 +156,23 @@
       body: JSON.stringify({ state: result.state, search: location.search }),
       keepalive: true
     }).then(function (response) {
-      if (!response.ok) publicationFailed("HTTP " + response.status);
+      if (!response.ok) {
+        publicationFailed("HTTP " + response.status);
+        return;
+      }
+      notifyConsole();
+      document.getElementById("title").textContent = success ? text.okTitle : text.failTitle;
+      document.getElementById("message").textContent = success ? text.okMsg : (result.error || text.cancelMsg);
+      if (success) {
+        window.setTimeout(returnToConsole, 300);
+        window.setTimeout(forceReturnConsole, 1500);
+      }
     }).catch(function (error) {
       publicationFailed(error && error.message ? error.message : text.netErr);
     });
   } catch (error) {
     publicationFailed(error && error.message ? error.message : text.sendErr);
   }
-  document.getElementById("title").textContent = success ? text.okTitle : text.failTitle;
-  document.getElementById("message").textContent = success ? text.okMsg : (result.error || text.cancelMsg);
   if (paths.length) {
     var path = document.getElementById("path");
     path.textContent = paths[0];
@@ -187,8 +195,6 @@
     returnToConsole();
     forceReturnConsole();
   });
-  window.setTimeout(function () { if (canAutoClose) returnToConsole(); }, success ? 300 : 1400);
-  window.setTimeout(function () { if (canAutoClose) forceReturnConsole(); }, 1500);
 })();
 </script>
 </body>

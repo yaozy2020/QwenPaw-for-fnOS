@@ -485,8 +485,10 @@ class GatewayFixture:
                         signal_owned_process(self.process_identity, signal.SIGKILL)
                         self.process.wait(timeout=5)
                         raise RuntimeError("Gateway supervisor cleanup exceeded graceful shutdown budget")
-                require(self.process.returncode == 0,
-                        f"Gateway supervisor exited {self.process.returncode}: {self.read_log()}")
+                if self.process.returncode != 0:
+                    path = self.var / "supervisor.log"
+                    detail = path.read_text(errors="replace")[-4000:] if path.is_file() else "(missing supervisor.log)"
+                    raise RuntimeError(f"Gateway supervisor exited {self.process.returncode}: {detail}\n{self.read_log()[-2000:]}")
                 if self.process_identity is not None:
                     require(not process_is_alive(self.process_identity),
                             "supervisor identity remains alive after wait")

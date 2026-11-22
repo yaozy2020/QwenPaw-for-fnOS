@@ -1699,6 +1699,22 @@ browserTest('history failing after entering logs releases the subscription and s
   assert.deepEqual(errors, []);
 });
 
+browserTest('blocked pushState leaves native anchors and manual log reads available', async t => {
+  const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
+  await page.goto(origin + prefix + '#overview');
+  await page.evaluate(() => { history.pushState = () => { throw new Error('blocked history'); }; });
+  await page.getByRole('link', { name: '配置', exact: true }).click();
+  await expect(page).toHaveURL(/#configuration$/);
+  await page.getByRole('link', { name: '日志', exact: true }).click();
+  await expect(page).toHaveURL(/#logs$/);
+  assert.deepEqual(state.liveLogQueries, []);
+  await openLogTools(page);
+  await page.getByRole('button', { name: '刷新日志' }).click();
+  await expect(page.locator('#logTerminal')).toContainText('原始服务日志');
+  assert.deepEqual(state.liveLogQueries, [2000]);
+  assert.equal(await page.evaluate(() => window.EventSource.instances.filter(s => !s.closed && s.url.includes('watch=logs')).length), 0);
+});
+
 browserTest('version and log history keep title, active link, focus and reads in sync', async t => {
   const { page, state } = await fixture(t, { status: runningStatus, initScript: installStatusEventHost });
   await page.goto(origin + prefix + '#version');

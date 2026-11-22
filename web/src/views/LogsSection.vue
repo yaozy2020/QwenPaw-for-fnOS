@@ -87,7 +87,8 @@ const emptyText = computed(() => {
       </summary>
       <div class="log-tools-content">
         <div class="terminal-controls">
-          <label class="check-label">
+          <button v-if="panel.navigation.section === null" type="button" class="btn-outline btn-sm" @click="panel.logs.refresh(true)">{{ t('logs.refresh') }}</button>
+          <label v-else class="check-label">
             <input type="checkbox" id="autoRefreshCheck" checked @change="panel.toggleAutoRefresh(($event.target as HTMLInputElement).checked)"> {{ t('logs.autoRefresh') }}
           </label>
           <button type="button" class="btn-outline btn-sm" id="copyLogsBtn" :disabled="!visibleLines.length" @click="panel.copyLogs(visibleLines)">{{ t('logs.copyFiltered') }}</button>
@@ -106,7 +107,7 @@ const emptyText = computed(() => {
         </search>
       </div>
     </details>
-    <div v-if="view.error" role="status" class="notice notice-warn">{{ view.error }} <button type="button" class="btn-outline" @click="panel.logs.refresh()">{{ t('logs.retry') }}</button></div>
+    <div v-if="view.error" role="status" class="notice notice-warn">{{ view.error }} <button type="button" class="btn-outline" @click="panel.logs.refresh(panel.navigation.section === null)">{{ t('logs.retry') }}</button></div>
     <div class="terminal-body" id="logTerminal" role="log" :aria-label="t('logs.terminalAria')" aria-live="off" tabindex="0"><LogLines :lines="visibleLines" :empty="emptyText" /></div>
   </section>
 </template>
