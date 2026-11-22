@@ -2910,6 +2910,95 @@ async fn tcp_prefixed_management_path_is_proxied_instead_of_mounted() {
 }
 
 #[tokio::test]
+async fn mounted_legacy_pawapp_session_cleanup_is_scoped_to_known_kernels() {
+    let path = "/app/qwenpaw/web/api/hub/pawapps/sessions";
+    let grant = format!("qwenpaw_app_{}", "ab".repeat(32));
+    for (version, supported) in [
+        ("2.3.0", true),
+        ("2.2.2.post1", true),
+        ("2.3.0.post1", false),
+        ("unknown", false),
+    ] {
+        let (_dir, state, router) = fixture("legacy-pawapp-cookie");
+        fs::write(
+            Path::new(&state.core.var_dir).join("qwenpaw-version"),
+            version,
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        state
+            .core
+            .kernel
+            .set_port(listener.local_addr().unwrap().port());
+        let app = Router::new()
+            .route(
+                "/api/version",
+                axum::routing::get(move || async move { Json(json!({"version": version})) }),
+            )
+            .fallback(|req: Request<Body>| async move {
+                if req.uri().path() == "/api/auth/verify" {
+                    return Json(json!({"valid": true, "username": "fixture"})).into_response();
+                }
+                if req.uri().query() == Some("denied") {
+                    StatusCode::UNAUTHORIZED.into_response()
+                } else {
+                    StatusCode::METHOD_NOT_ALLOWED.into_response()
+                }
+            });
+        let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (method, suffix, with_cookie, expected) in [
+            ("DELETE", "", true, if supported { 204 } else { 405 }),
+            ("DELETE", "", false, if supported { 204 } else { 405 }),
+            ("DELETE", "?denied", true, 401),
+            ("DELETE", "/other", true, 405),
+            ("POST", "", true, 405),
+        ] {
+            let mut headers = admin_headers();
+            headers.insert("x-forwarded-host", HeaderValue::from_static("nas.test"));
+            headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+            headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+            headers.insert(header::ORIGIN, HeaderValue::from_static("http://nas.test"));
+            if with_cookie {
+                headers.insert(header::COOKIE, HeaderValue::from_str(&format!("{grant}=first; qwenpaw_session=keep; qwenpaw_app_bad=keep; {grant}=duplicate")).unwrap());
+            }
+            let response = router
+                .clone()
+                .oneshot(request(
+                    method,
+                    &format!("{path}{suffix}"),
+                    headers,
+                    Body::empty(),
+                    Some(peer()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                expected,
+                "{version} {method} {suffix}"
+            );
+            let cookies: Vec<_> = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .collect();
+            if expected == 204 {
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            }
+            if expected == 204 && with_cookie {
+                assert_eq!(cookies.len(), 1);
+                assert_eq!(cookies[0].to_str().unwrap(), format!("{grant}=; Max-Age=0; Path=/app/qwenpaw/web/api/; HttpOnly; SameSite=Strict"));
+            } else {
+                assert!(cookies.is_empty());
+            }
+        }
+        upstream.abort();
+    }
+}
+
+#[tokio::test]
 async fn mounted_javascript_rewrites_concatenated_api_prefix_and_routes_auth_status() {
     let (_dir, state, router) = fixture("gateway-web-230-concatenated-api");
     let (mut captured, upstream) = start_web_upstream(&state).await;

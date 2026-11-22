@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.5.6-6
+version                    = 1.5.6-9
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS 是面向飞牛 NAS 的第三方部署外壳，与 QwenPaw 上游团队无隶属关系。</p><p>提供内核安装与版本管理、运行状态监控、日志筛选导出、端口与反代配置、目录授权及下载源切换。内核按需从所选 PyPI 镜像安装；FPK 内置兼容补丁与预构建 Console，无需现场源码构建。</p>`
 platform                   = x86
@@ -15,4 +15,4 @@ micro_app                  = true
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "v1.5.6-6: 精简移动端日志页布局并适配小屏手机（隐藏卡片内重复标题，合并文件名/自动滚底/导出为单行紧凑工具栏，收紧日志卡片留白与行距以扩大可视区域），并修复 Miuix 悬浮底栏标签换行。"
+changelog                  = "v1.5.6-9：修复 2.3.0 与 2.2.2.post1 在飞牛网关入口登录时清理 PawApp 浏览器授权 Cookie 返回 405 的问题。"

@@ -20,6 +20,12 @@ fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台�
 
 开发版本以 `manifest` 为准；下列候选记录只对应各自的 FPK。管理台导航降级为单页时保留原生分区锚点，日志支持手动读取，不启用后台日志订阅。目录授权回调仅在结果回传成功后自动返回；清空日志仅在截断成功后报告成功。
 
+**1.5.6-9 旧内核会话 Cookie 清理候选：** fnOS 网关挂载路径中，若 `/api/hub/pawapps/sessions` 的 DELETE 仅对版本钉精确为 `2.3.0` 或 `2.2.2.post1` 的实例返回 405，Gateway 按浏览器收到的 host-only `/app/qwenpaw/web/api/` Cookie 作用域，清除格式匹配的 `qwenpaw_app_<64位小写十六进制>` Cookie；原生成功、其他状态/版本/路径及鉴权失败均原样保留。只撤浏览器 Cookie，不撤销上游令牌。候选 `build/validation/legacy-session.a3uyqB/fpk/qwenpaw-1.5.6-9-x86.fpk`，SHA256 `fb13549a8f69a19f82182401a07fbfa78913ca7627b920ac06ae0f7a45d7ef7d`。隔离 Chromium 的三版首次安装、注册/登录、重启回滚和升级后刷新均验证通过；Rust 全量测试、严格 lint、Console payload 与前端类型检查通过。完整 GitHub CI 工作流未全部执行，fnOS 应用中心真机验收仍未放行。首次测试错误由本地隔离 wrapper 的 PID namespace session ID=0 引起，修正 wrapper 在隔离 PID namespace 内以 `setsid` 启动后全量 Rust 与严格 lint 通过；不修改生产进程身份校验。详情见 `docs/store-submission-1.6.0.md`。
+
+**1.5.6-8 登录主题性能候选：** 默认 Console 在已有认证门禁放行后读取主题，匿名登录页使用本地明暗模式；不改变 Gateway 鉴权。已在隔离环境验证 `-7` → `-8` 的真实 post1 指纹重建。`-8` 的浏览器验收发现两种旧内核会话清理 405，该问题由 `-9` 定向修复；三版冷暖测量和原包摘要见 `docs/store-submission-1.6.0.md`。
+
+**1.5.6-7 三版本兼容验收：** PR #8719 已适配至 `286c6556`，只为官方 `2.3.0.post1` 出货预构建载荷。当前外壳不继承历史 2.3.0 跨版本迁移。`2.3.0` 与 `2.2.2.post1` 用各自 wheel 的 Console。隔离验收及仍阻碍放行的 401/405 见 `docs/store-submission-1.6.0.md`，不能据此宣称全功能兼容或应用中心真机放行。
+
 **1.5.5 iOS 长会话修复候选：** 在 1.5.4 已验证的移动头部、动态标题与上架材料基础上，同步当前 Console 工作树已有的四项长会话缓解：iOS 关闭逐气泡导航测量与 `content-visibility:auto`、历史恢复补分页标记、收窄输入区 DOM 监听。目标回归 54 项、生产构建、包内 Gateway 2 项、FPK 审计及双构建字节一致性通过。候选 `build/candidates/1.5.5-ios-long-chat/qwenpaw-1.5.5-x86.fpk`，SHA256 `ec4be05988f73ac11d190f5c6909776b45dacfbe5dfe3a28854ddc3423677a11`。真机 iOS 私有属性分支与长会话滚动仍须实机验收，不推进或打包 1.6。
 
 **1.5.4 上架筹备（门禁未放行）：** 当前只使用 1.5.x，门禁全部通过前不得推进或打包 1.6；提前生成的 1.6 候选已作废删除。三态主题、中英文界面、后端提示本地化、文案统一、根图标规格修正和真实界面截图已纳入筹备，但真机发现的上游聊天页移动头部挤压及控制台原生标题不随页面变化已修复，并通过源码、隔离复测和最终 1.5.4 FPK 包级验证。最终候选 `build/candidates/1.5.4-mobile-title/qwenpaw-1.5.4-x86.fpk`，SHA256 `a7c9841b431348138b01f310e30509562743c71df9286dd07efaae261182fbec`，双构建字节一致；未执行飞牛应用中心验收，不推进或打包 1.6。申请材料和验收状态见 `docs/store-submission-1.6.0.md`。本地构建与隔离测试不替代最终 FPK 的飞牛应用中心真机验收或上架审核。

@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.5.6-6-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.5.6-9-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
@@ -67,7 +67,7 @@
 
 ## 当前版本与兼容边界
 
-- **当前开发版本以 `manifest` 为准**（见页首版本号）。上架材料中已有包级复验记录的筹备候选为 `1.5.5`，其结果不代表当前工作树。当前外壳的适配基线内核为官方 `2.3.0.post1`（跟进上游 PR #8719 子路径、Voice 回调、Desktop/PawApp 上下文适配；独立 Data 插件与 Chrome 扩展安装器不随本 FPK 交付）。候选产物与验收记录见 `docs/store-submission-1.6.0.md`；门禁全部通过前只使用 1.5.x，不推进或打包 1.6。
+- **当前开发版本以 `manifest` 为准**（见页首版本号）。`1.5.6-9` 在隔离环境用同一 FPK 验收了 `2.3.0.post1`、`2.3.0`、`2.2.2.post1`：两种旧内核的 PawApp 浏览器授权 Cookie 清理在 fnOS 网关普通应用入口遇到上游 405 时，由 Gateway 仅对版本钉确认的旧版清理精确的 `/api/` 授权 Cookie；真实 Chromium 验收确认目标 Cookie 消失、无关 Cookie 保留，重复请求返回 204。该兼容只清浏览器 Cookie，不撤销服务端令牌。候选尚未通过完整 CI 或 fnOS 应用中心真机验收，不代表已获上架放行。三个版本各自使用原有 Console，外壳升级不更改其内核版本钉；默认官方 `2.3.0.post1` 适配上游 PR #8719（独立 Data 插件与 Chrome 扩展安装器不随 FPK 交付）。产物与逐项验收边界见 `docs/store-submission-1.6.0.md`；门禁全部通过前只使用 1.5.x，不推进或打包 1.6。
 - **近期前端与交互更新**：
   - **视觉与布局**：对齐 QwenPaw Console 品牌橙与暖中性色体系，桌面端采用毛玻璃侧栏与清晰控件层次，移动端采用磨砂底部导航、分组卡片与文档流展开下载源列表，延续 DSH 日志阅读层级与日志筛选/复制优化。
   - **组件化与导航**：拆分下载源选择器、原生登录与密码重置对话框，复用品牌图标与弹窗交互；统一分区导航历史切换，全屏 Web 使用宿主返回手势，授权回调页支持品牌化双主题；优化版本列表定位与键盘浏览体验，修复原生安装弹窗焦点循环。

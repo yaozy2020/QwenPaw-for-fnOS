@@ -199,6 +199,11 @@ async fn forward_impl(
     let mut rotated = parts
         .extensions
         .remove::<tokio::sync::watch::Receiver<()>>();
+    let legacy_cleanup = (rewrite_paths
+        && !migrated
+        && method == Method::DELETE
+        && path == "/api/hub/pawapps/sessions")
+        .then(|| headers.get(header::COOKIE).cloned());
     parts.uri = uri;
     parts.headers = headers;
     if rewrite_head {
@@ -221,6 +226,11 @@ async fn forward_impl(
     };
 
     let status = upstream.status();
+    if let Some(cookie) = legacy_cleanup.filter(|_| status == StatusCode::METHOD_NOT_ALLOWED) {
+        if is_legacy_session_kernel(state) {
+            return clear_mounted_pawapp_cookies(cookie.as_ref(), secure);
+        }
+    }
     let mut response_headers = response_headers(upstream.headers(), rewrite_paths);
     let content_type = response_headers
         .get(header::CONTENT_TYPE)
@@ -372,6 +382,49 @@ fn requires_upstream_auth(path: &str, method: &Method) -> bool {
                     || path.starts_with("/api/frontend_plugin/")))
         });
     required
+}
+
+fn is_legacy_session_kernel(state: &GatewayState) -> bool {
+    std::fs::read_to_string(std::path::Path::new(&state.app.core.var_dir).join("qwenpaw-version"))
+        .ok()
+        .is_some_and(|version| matches!(version.trim(), "2.3.0" | "2.2.2.post1"))
+}
+
+fn clear_mounted_pawapp_cookies(cookie: Option<&HeaderValue>, secure: bool) -> Response {
+    let mut response = (
+        StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "no-store")],
+    )
+        .into_response();
+    let mut seen = HashSet::new();
+    for pair in cookie
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .split(';')
+    {
+        let Some((name, _)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        let Some(hash) = name.strip_prefix("qwenpaw_app_") else {
+            continue;
+        };
+        if hash.len() == 64
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && seen.insert(name)
+        {
+            let secure = if secure { "; Secure" } else { "" };
+            let expired = format!(
+                "{name}=; Max-Age=0; Path={WEB_PREFIX}/api/; HttpOnly; SameSite=Strict{secure}"
+            );
+            response.headers_mut().append(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&expired).expect("validated ASCII cookie name"),
+            );
+        }
+    }
+    response
 }
 
 async fn verify_upstream_session(
