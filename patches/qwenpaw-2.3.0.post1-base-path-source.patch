@@ -2582,3 +2582,1408 @@ index c1ff6182..1eb4d41c 100644
      if len(parts) >= 3 and parts[1] == "api" and parts[2]:
          return parts[2]
  
+--- a/console/index.html
++++ b/console/index.html
+@@ -1,12 +1,8 @@
+ <!doctype html>
+ <html lang="en">
+   <head>
+-    <base href="/" />
+-    <script>
+-      window.__qpBase = "";
+-      window.__qpBaseUrl = window.__qpBase + "/";
+-    </script>
+     <meta charset="UTF-8" />
++    <base href="/" />
+     <link rel="icon" type="image/svg+xml" href="/online.svg" />
+     <meta
+       name="viewport"
+--- a/console/scripts/startup-monitor-plugin.test.ts
++++ b/console/scripts/startup-monitor-plugin.test.ts
+@@ -16,6 +16,7 @@
+ 
+ const originalUrl = location.href;
+ let entry: HTMLScriptElement;
++let baseElement: HTMLBaseElement;
+ 
+ afterEach(async () => {
+   document.body.innerHTML = '<div id="root">Mounted</div>';
+@@ -23,7 +24,7 @@
+   entry?.remove();
+   document.body.innerHTML = "";
+   sessionStorage.clear();
+-  delete window.__qpBase;
++  baseElement?.remove();
+   vi.useRealTimers();
+   history.replaceState(null, "", originalUrl);
+ });
+@@ -46,7 +47,9 @@
+       );
+       vi.useFakeTimers();
+       history.replaceState(null, "", `${base}/chat`);
+-      window.__qpBase = base;
++      baseElement = document.createElement("base");
++      baseElement.href = `${base}/`;
++      document.head.append(baseElement);
+       document.body.innerHTML =
+         '<div id="root"><div class="qwenpaw-boot"><div class="qwenpaw-boot__content">Loading</div></div></div>';
+       entry = document.createElement("script");
+--- a/console/src/api/config.test.ts
++++ b/console/src/api/config.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, it, expect, beforeEach, vi } from "vitest";
++import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+ import {
+   getApiUrl,
+   getApiToken,
+@@ -7,18 +7,18 @@
+   updateBrowserSession,
+ } from "./config";
+ 
+-// VITE_API_BASE_URL / TOKEN are declared globals in config.ts — set via globalThis
+-const setViteBase = (v: string) => {
+-  (globalThis as any).VITE_API_BASE_URL = v;
+-};
+-const setToken = (v: string) => {
+-  (globalThis as any).TOKEN = v;
+-};
++const setViteBase = (v: string) => vi.stubGlobal("VITE_API_BASE_URL", v);
++const setToken = (v: string) => vi.stubGlobal("TOKEN", v);
++
++afterEach(() => vi.unstubAllGlobals());
+ 
+ describe("getApiUrl", () => {
+-  beforeEach(() => {
++  let baseElement: HTMLBaseElement | undefined;
++
++  beforeEach(() => setViteBase(""));
++  afterEach(() => {
++    baseElement?.remove();
+     setViteBase("");
+-    delete window.__qpBase;
+   });
+ 
+   it("prepends /api prefix when base is empty", () => {
+@@ -46,7 +46,9 @@
+   });
+ 
+   it("uses the server-injected prefix for same-origin API requests", () => {
+-    window.__qpBase = "/app/qwenpaw/web";
++    baseElement = document.createElement("base");
++    baseElement.href = "/app/qwenpaw/web/";
++    document.head.append(baseElement);
+     expect(getApiUrl("/models")).toBe("/app/qwenpaw/web/api/models");
+     setViteBase("http://localhost:8088");
+     expect(getApiUrl("/models")).toBe("http://localhost:8088/api/models");
+--- a/console/src/layouts/LocalAvatarPicker.test.tsx
++++ b/console/src/layouts/LocalAvatarPicker.test.tsx
+@@ -5,8 +5,14 @@
+ import LocalAvatarPicker from "./LocalAvatarPicker";
+ import { avatarApi } from "../api/modules/avatars";
+ import { useLocalAvatar } from "../stores/localAvatarStore";
+-vi.hoisted(() => vi.stubEnv("BASE_URL", "/qwenpaw/"));
+-afterAll(() => vi.unstubAllEnvs());
++
++const baseElement = vi.hoisted(() => {
++  const base = document.createElement("base");
++  base.href = "/qwenpaw/";
++  document.head.append(base);
++  return base;
++});
++afterAll(() => baseElement.remove());
+ 
+ vi.mock("../api/modules/avatars", () => ({
+   avatarApi: {
+--- a/console/src/pages/Chat/index.tsx
++++ b/console/src/pages/Chat/index.tsx
+@@ -71,6 +71,7 @@
+ import { agentApi } from "../../api/modules/agent";
+ import { skillApi } from "../../api/modules/skill";
+ import { getApiUrl } from "../../api/config";
++import { getConsoleAssetUrl } from "../../utils/runtimeBasePath";
+ import { buildAuthHeaders } from "../../api/authHeaders";
+ import { providerApi } from "../../api/modules/provider";
+ import type { SkillSpec } from "../../api/types";
+@@ -4068,7 +4069,7 @@
+       welcome: {
+         ...i18nConfig.welcome,
+         nick: extNick ?? "QwenPaw",
+-        avatar: extAvatar ?? `${import.meta.env.BASE_URL}qwenpaw.png`,
++        avatar: extAvatar ?? getConsoleAssetUrl("qwenpaw.png"),
+         ...(extGreeting !== undefined ? { greeting: extGreeting } : {}),
+         ...(extDescription !== undefined
+           ? { description: extDescription }
+--- a/console/src/pages/Hub/components/HubShell.test.tsx
++++ b/console/src/pages/Hub/components/HubShell.test.tsx
+@@ -3,8 +3,11 @@
+ import { afterAll, expect, it, vi } from "vitest";
+ import HubShell from "./HubShell";
+ 
+-vi.hoisted(() => {
+-  window.__qpBase = "/app/qwenpaw/web";
++const baseElement = vi.hoisted(() => {
++  const base = document.createElement("base");
++  base.href = "/app/qwenpaw/web/";
++  document.head.append(base);
++  return base;
+ });
+ vi.mock("react-i18next", () => ({
+   useTranslation: () => ({ t: (key: string) => key }),
+@@ -15,7 +18,7 @@
+ const originalLocation = Object.getOwnPropertyDescriptor(window, "location")!;
+ afterAll(() => {
+   Object.defineProperty(window, "location", originalLocation);
+-  delete window.__qpBase;
++  baseElement.remove();
+   vi.restoreAllMocks();
+ });
+ 
+--- a/console/src/utils/navigationMode.test.ts
++++ b/console/src/utils/navigationMode.test.ts
+@@ -81,7 +81,16 @@
+ });
+ 
+ describe("configured console basename", () => {
++  let baseElement: HTMLBaseElement | undefined;
++
++  function setDocumentBase(path: string) {
++    baseElement = document.createElement("base");
++    baseElement.href = `${path}/`;
++    document.head.append(baseElement);
++  }
++
+   afterEach(() => {
++    baseElement?.remove();
+     vi.unstubAllEnvs();
+     vi.resetModules();
+   });
+@@ -160,22 +169,18 @@
+   it.each(["/控制台", "/my console"])(
+     "keeps browser navigation inside %s",
+     async (base) => {
+-      window.__qpBase = base;
+-      try {
+-        const navigation = await loadNavigation(undefined);
+-        const pathname = new URL(`${base}/login`, "https://example.org").pathname;
+-        expect(navigation.stripRouterBasename(pathname)).toBe("/login");
+-        expect(navigation.addRouterBasename(pathname, "/chat")).toBe(
+-          pathname.replace(/login$/, "chat"),
+-        );
+-      } finally {
+-        delete window.__qpBase;
+-      }
++      setDocumentBase(base);
++      const navigation = await loadNavigation(undefined);
++      const pathname = new URL(`${base}/login`, "https://example.org").pathname;
++      expect(navigation.stripRouterBasename(pathname)).toBe("/login");
++      expect(navigation.addRouterBasename(pathname, "/chat")).toBe(
++        pathname.replace(/login$/, "chat"),
++      );
+     },
+   );
+ 
+   it("prefers the server-injected runtime base path", async () => {
+-    window.__qpBase = "/app/qwenpaw/web";
++    setDocumentBase("/app/qwenpaw/web");
+     const navigation = await loadNavigation(undefined);
+     const location = {
+       pathname: "/app/qwenpaw/web/chat",
+@@ -188,6 +193,5 @@
+     expect(navigation.getLoginHref(location)).toBe(
+       "/app/qwenpaw/web/login?redirect=%2Fchat%3Fdraft%3Done",
+     );
+-    delete window.__qpBase;
+   });
+ });
+--- a/console/src/utils/runtimeBasePath.test.ts
++++ b/console/src/utils/runtimeBasePath.test.ts
+@@ -1,53 +1,77 @@
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ import { getConsoleAssetUrl, getRuntimeBasePath } from "./runtimeBasePath";
+ 
++const originalUrl = location.href;
++let baseElement: HTMLBaseElement | undefined;
++
++function setBase(href: string, parent = document.head) {
++  baseElement = document.createElement("base");
++  baseElement.setAttribute("href", href);
++  parent.append(baseElement);
++}
++
+ describe("runtime base path", () => {
+   afterEach(() => {
+-    delete window.__qpBase;
++    baseElement?.remove();
++    history.replaceState(null, "", originalUrl);
+     vi.unstubAllEnvs();
+   });
+ 
+-  it("defaults to the existing root deployment", () => {
++  it("does not infer the deployment prefix from a deep link", () => {
++    vi.stubEnv("BASE_URL", "./");
++    history.replaceState(null, "", "/settings/models/providers?tab=local");
+     expect(getRuntimeBasePath()).toBe("");
+     expect(getConsoleAssetUrl("logo-light.svg")).toBe("/logo-light.svg");
+   });
+ 
+-  it("keeps root asset URLs absolute with a relative Vite build base", () => {
+-    vi.stubEnv("BASE_URL", "./");
+-    expect(getConsoleAssetUrl("logo-light.svg")).toBe("/logo-light.svg");
++  it("ignores a base outside the document head", () => {
++    setBase("/body-only/", document.body);
++    expect(getRuntimeBasePath()).toBe("");
++  });
++
++  it("keeps public asset paths absolute for an explicit Vite build base", () => {
++    vi.stubEnv("BASE_URL", "/site/console/");
++    setBase("/");
++    expect(getConsoleAssetUrl("logo-light.svg")).toBe(
++      "/site/console/logo-light.svg",
++    );
+   });
+ 
+-  it("uses the server-injected prefix for public assets", () => {
+-    window.__qpBase = "/app/qwenpaw/web";
++  it("uses the server-injected base for public assets on a deep route", () => {
++    history.replaceState(null, "", "/app/qwenpaw/web/settings/models");
++    setBase("/app/qwenpaw/web/");
+     expect(getRuntimeBasePath()).toBe("/app/qwenpaw/web");
+     expect(getConsoleAssetUrl("logo-light.svg")).toBe(
+       "/app/qwenpaw/web/logo-light.svg",
+     );
+   });
+ 
+-  it.each(["/app/%71wenpaw/web", "/app/qwenpaw%20web", "/app/%2571wenpaw/web"])(
+-    "rejects percent-encoded configuration %s",
+-    (value) => {
+-      window.__qpBase = value;
+-      expect(getRuntimeBasePath()).toBe("");
+-    },
+-  );
+-
+-  it("preserves decoded Unicode prefixes", () => {
+-    window.__qpBase = "/app/中文/";
+-    expect(getRuntimeBasePath()).toBe("/app/中文");
++  it("preserves the raw decoded Unicode and spaces in a base path", () => {
++    setBase("/app/中文 console/");
++    expect(getRuntimeBasePath()).toBe("/app/中文 console");
++    expect(getConsoleAssetUrl("logo-light.svg")).toBe(
++      "/app/中文 console/logo-light.svg",
++    );
+   });
+ 
+-  it("normalizes a trailing slash and rejects malformed injected values", () => {
+-    window.__qpBase = "/app/qwenpaw/web/";
+-    expect(getRuntimeBasePath()).toBe("/app/qwenpaw/web");
+-    window.__qpBase = "https://attacker.example/";
+-    expect(getRuntimeBasePath()).toBe("");
+-    window.__qpBase = "/app/../admin";
+-    expect(getRuntimeBasePath()).toBe("");
+-    window.__qpBase = "//attacker.example";
+-    expect(getRuntimeBasePath()).toBe("");
+-    window.__qpBase = "/app/%2e%2e/admin";
++  it.each([
++    "./console/",
++    "https://foreign.example/",
++    "//foreign.example/",
++    "/\t/foreign.example/",
++    "/app/../admin/",
++    "/app/console",
++    "/app/console//",
++    "/app//admin/",
++    "/app\\admin/",
++    "/app/?x=1",
++    "/app/#section",
++    "/app/%71wenpaw/web/",
++    "/app/qwenpaw%20web/",
++    "/app/%2571wenpaw/web/",
++    "/app/%2e%2e/admin/",
++  ])("rejects invalid raw bases before URL normalization: %j", (value) => {
++    setBase(value);
+     expect(getRuntimeBasePath()).toBe("");
+   });
+ });
+--- a/console/src/utils/runtimeBasePath.ts
++++ b/console/src/utils/runtimeBasePath.ts
+@@ -1,33 +1,20 @@
+-declare global {
+-  interface Window {
+-    __qpBase?: string;
+-  }
+-}
+-
+ export function getRuntimeBasePath(): string {
+-  if (typeof window === "undefined") return "";
+-  const value = window.__qpBase?.trim() || "";
+-  if (!value || value === "/") return "";
+-  if (!value.startsWith("/") || /[%?#\\]/.test(value)) return "";
+-  const path = value.replace(/\/+$/, "");
+-  try {
+-    const invalid = path
+-      .split("/")
+-      .slice(1)
+-      .some((segment) => {
+-        const decoded = decodeURIComponent(segment);
+-        return (
+-          !segment ||
+-          decoded === "." ||
+-          decoded === ".." ||
+-          decoded.includes("/") ||
+-          decoded.includes("\\")
+-        );
+-      });
+-    return invalid ? "" : path;
+-  } catch {
++  if (typeof document === "undefined") return "";
++  // Read the server's raw directory path, not the browser's normalized URL.
++  const href = document.head?.querySelector("base[href]")?.getAttribute("href");
++  if (
++    !href?.startsWith("/") ||
++    !href.endsWith("/") ||
++    /[%?#\\\t\n\r]/.test(href)
++  ) {
+     return "";
+   }
++  const path = href.slice(0, -1);
++  const invalid = path
++    .split("/")
++    .slice(1)
++    .some((segment) => !segment || segment === "." || segment === "..");
++  return invalid ? "" : path;
+ }
+ 
+ export function getConsoleAssetUrl(filename: string): string {
+--- a/console/vite.config.test.ts
++++ b/console/vite.config.test.ts
+@@ -1,7 +1,11 @@
+ import { execFileSync } from "node:child_process";
++import { readFileSync } from "node:fs";
+ import { describe, expect, it } from "vitest";
+ 
+-function loadDeploymentConfig(basename: string | undefined) {
++function loadDeploymentConfig(
++  basename: string | undefined,
++  mode = "production",
++) {
+   const env: NodeJS.ProcessEnv = {
+     ...process.env,
+     BASE_URL: "https://unrelated.example.com",
+@@ -18,15 +22,13 @@
+       "--eval",
+       `import { loadConfigFromFile } from "vite";
+        const { config } = await loadConfigFromFile({
+-         command: "build", mode: "production",
++         command: "build", mode: ${JSON.stringify(mode)},
+        });
+-       const renderBuiltUrl = config.experimental?.renderBuiltUrl;
+        process.stdout.write(JSON.stringify({
+          base: config.base ?? "/",
+          apiBase: config.define.VITE_API_BASE_URL,
+-         assetBase: config.define["import.meta.env.BASE_URL"],
+-         jsAsset: renderBuiltUrl?.("logo-light.svg", { hostType: "js" }),
+-         htmlEntry: renderBuiltUrl?.("assets/index.js", { hostType: "html" }),
++         assetBaseOverride: config.define["import.meta.env.BASE_URL"],
++         assetUrlOverride: Boolean(config.experimental?.renderBuiltUrl),
+        }));`,
+     ],
+     {
+@@ -37,24 +39,28 @@
+   return JSON.parse(output) as {
+     base: string;
+     apiBase: string;
+-    jsAsset?: { runtime: string };
+-    htmlEntry?: { relative: boolean };
+-    assetBase?: string;
++    assetBaseOverride?: string;
++    assetUrlOverride: boolean;
+   };
+ }
+ 
+ describe("console deployment configuration", () => {
+   it.each([undefined, "", " "])(
+-    "uses relative entry assets when the basename is %j",
++    "uses Vite's standard relative asset handling when the basename is %j",
+     (basename) => {
+       const config = loadDeploymentConfig(basename);
+       expect(config.base).toBe("./");
+-      expect(config.jsAsset?.runtime).toContain("__qpBase");
+-      expect(config.assetBase).toContain("__qpBase");
+-      expect(config.htmlEntry).toEqual({ relative: true });
++      expect(config.assetUrlOverride).toBe(false);
++      expect(config.assetBaseOverride).toBeUndefined();
+     },
+   );
+ 
++  it("keeps the backend's document-base token without a base-setting script", () => {
++    const html = readFileSync("index.html", "utf8");
++    expect(html).toContain('<base href="/" />');
++    expect(html).not.toContain("__qpBase");
++  });
++
+   it.each([
+     ["/qwenpaw", "/qwenpaw/"],
+     ["/qwenpaw/", "/qwenpaw/"],
+@@ -65,5 +71,15 @@
+     const config = loadDeploymentConfig(basename);
+     expect(config.base).toBe(base);
+     expect(config.apiBase).toBe('"/backend"');
++    expect(config.assetUrlOverride).toBe(false);
++    expect(config.assetBaseOverride).toBeUndefined();
++  });
++
++  it("keeps the Tauri asset base at the root regardless of the web basename", () => {
++    const config = loadDeploymentConfig("/qwenpaw", "tauri");
++    expect(config.base).toBe("/");
++    expect(config.apiBase).toBe('""');
++    expect(config.assetUrlOverride).toBe(false);
++    expect(config.assetBaseOverride).toBeUndefined();
+   });
+ });
+--- a/console/vite.config.ts
++++ b/console/vite.config.ts
+@@ -40,25 +40,7 @@
+       : consoleBasename
+       ? `${normalizeConsoleBasename(consoleBasename)}/`
+       : "./",
+-    experimental:
+-      !desktop && !consoleBasename
+-        ? {
+-            renderBuiltUrl(filename, { hostType }) {
+-              if (hostType === "js") {
+-                return {
+-                  runtime: `__qpBase + ${JSON.stringify(`/${filename}`)}`,
+-                };
+-              }
+-              return { relative: true };
+-            },
+-          }
+-        : undefined,
+     define: {
+-      "import.meta.env.BASE_URL": desktop
+-        ? JSON.stringify("/")
+-        : consoleBasename
+-        ? JSON.stringify(`${normalizeConsoleBasename(consoleBasename)}/`)
+-        : "window.__qpBaseUrl",
+       VITE_API_BASE_URL: JSON.stringify(desktop ? "" : apiBaseUrl),
+       TOKEN: JSON.stringify(env.TOKEN || ""),
+       MOBILE: false,
+--- a/src/qwenpaw/agents/memory/proactive/proactive_responder.py
++++ b/src/qwenpaw/agents/memory/proactive/proactive_responder.py
+@@ -17,7 +17,7 @@
+ 
+ from ....config.config import load_agent_config
+ from ....utils.runtime_api import async_api_client
+-from ...tools.agent_management import resolve_agent_api_base_url
++from ...tools.agent_management import resolve_agent_api_endpoint
+ from ...tools import (
+     browser,
+     execute_shell_command,
+@@ -318,11 +318,7 @@
+ 
+     headers = {"X-Agent-Id": active_agent_id}
+ 
+-    base_url = resolve_agent_api_base_url()
+-    clean_base = base_url.rstrip("/")
+-    api_base_url = (
+-        f"{clean_base}/api" if not clean_base.endswith("/api") else clean_base
+-    )
++    api_base_url = resolve_agent_api_endpoint()
+ 
+     try:
+         async with (
+--- a/src/qwenpaw/agents/tools/agent_management.py
++++ b/src/qwenpaw/agents/tools/agent_management.py
+@@ -25,6 +25,8 @@
+ from ...runtime.tool_registry import tool_descriptor
+ from ...utils.runtime_api import (
+     api_client,
++    api_url_from_deployment,
++    api_url_from_override,
+     async_api_client,
+     read_runtime_api,
+ )
+@@ -42,7 +44,7 @@
+ 
+ 
+ def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
+-    """Resolve the agent API base URL.
++    """Discover the deployment root or return a trimmed explicit override.
+ 
+     Priority:
+     1. Explicit ``base_url`` argument
+@@ -63,11 +65,11 @@
+     return f"{DEFAULT_AGENT_API_BASE_URL}{base_path}"
+ 
+ 
+-def _normalize_api_base_url(base_url: Optional[str]) -> str:
+-    base = resolve_agent_api_base_url(base_url).rstrip("/")
+-    if not base.endswith("/api"):
+-        base = f"{base}/api"
+-    return base
++def resolve_agent_api_endpoint(base_url: Optional[str] = None) -> str:
++    """Resolve the API endpoint, not the root of the deployment."""
++    if base_url:
++        return api_url_from_override(base_url)
++    return api_url_from_deployment(resolve_agent_api_base_url())
+ 
+ 
+ def _tool_text_response(text: str) -> ToolChunk:
+@@ -137,7 +139,7 @@
+     default_timeout: float = DEFAULT_AGENT_API_TIMEOUT,
+ ) -> httpx.Client:
+     """Create an HTTP client targeting the local agent API."""
+-    normalized = _normalize_api_base_url(base_url)
++    normalized = resolve_agent_api_endpoint(base_url)
+     return api_client(
+         base_url=normalized,
+         timeout=default_timeout,
+@@ -389,7 +391,7 @@
+     Unlike the sync ``to_thread`` path, cancelling this coroutine exits
+     ``AsyncClient`` context managers and aborts the in-flight request.
+     """
+-    normalized = _normalize_api_base_url(base_url)
++    normalized = resolve_agent_api_endpoint(base_url)
+     response_data: Optional[Dict[str, Any]] = None
+     async with async_api_client(
+         base_url=normalized,
+@@ -427,7 +429,7 @@
+     ``initiator`` carries the caller session that gave up so the target's
+     logs can attribute the stop (GH-8252).
+     """
+-    normalized = _normalize_api_base_url(base_url)
++    normalized = resolve_agent_api_endpoint(base_url)
+     async with async_api_client(
+         base_url=normalized,
+         timeout=httpx.Timeout(timeout),
+@@ -1580,10 +1582,7 @@
+     base_url: Optional[str] = None,
+ ) -> Optional[Dict[str, Any]]:
+     """Call POST /api/fork/agent to prepare fork session + worktree."""
+-    url = (
+-        _normalize_api_base_url(base_url).removesuffix("/api")
+-        + "/api/fork/agent"
+-    )
++    url = f"{resolve_agent_api_endpoint(base_url)}/fork/agent"
+     payload = {
+         "agent_id": agent_id,
+         "parent_session_id": parent_session_id,
+--- a/src/qwenpaw/cli/agents_cmd.py
++++ b/src/qwenpaw/cli/agents_cmd.py
+@@ -28,7 +28,7 @@
+ )
+ from ..config.config import ModelSlotConfig
+ from ..providers.provider_manager import ProviderManager
+-from .http import print_json, resolve_base_url
++from .http import print_json, resolve_api_endpoint
+ 
+ SUPPORTED_AGENT_TEMPLATES = list_supported_agent_templates()
+ 
+@@ -506,7 +506,7 @@
+         ]
+       }
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+     print_json(agent_tools.list_agents_data(base_url))
+ 
+ 
+@@ -685,7 +685,7 @@
+       qwenpaw agents delete research --remove-workspace
+       qwenpaw agents delete research --yes
+     """
+-    resolved_base_url = resolve_base_url(ctx, base_url)
++    resolved_base_url = resolve_api_endpoint(ctx, base_url)
+ 
+     if not yes:
+         click.echo(f"WARNING: You are about to delete agent '{agent_id}'.")
+@@ -909,7 +909,7 @@
+         * Status flow: submitted → pending → running → finished
+         * finished includes: completed (✅) or failed (❌)
+ """
+-    resolved_base_url = resolve_base_url(ctx, base_url)
++    resolved_base_url = resolve_api_endpoint(ctx, base_url)
+ 
+     # Validate parameters
+     _validate_chat_parameters(
+--- a/src/qwenpaw/cli/app_cmd.py
++++ b/src/qwenpaw/cli/app_cmd.py
+@@ -102,6 +102,7 @@
+     help="Bind port",
+ )
+ @click.option("--reload", is_flag=True, help="Enable auto-reload (dev only)")
++@click.option("--desktop-root", is_flag=True, hidden=True)
+ @click.option(
+     "--log-level",
+     default="info",
+@@ -131,6 +132,7 @@
+     host: str,
+     port: int,
+     reload: bool,
++    desktop_root: bool,
+     workers: int,  # pylint: disable=unused-argument
+     log_level: str,
+     hide_access_paths: tuple[str, ...],
+@@ -139,6 +141,15 @@
+     global _dependency_restart  # pylint: disable=global-statement
+     _dependency_restart = None
+ 
++    if desktop_root:
++        if reload:
++            raise click.UsageError(
++                "--desktop-root cannot be used with --reload",
++            )
++        from ..envs.store import force_desktop_base_path_root
++
++        force_desktop_base_path_root()
++
+     # NOTE: the server intentionally runs UNPRIVILEGED. The Windows
+     # restricted-token sandbox no longer requires the whole server to be
+     # elevated (which PR #5931 forced via ShellExecuteW("runas"), breaking
+--- a/src/qwenpaw/cli/auto.py
++++ b/src/qwenpaw/cli/auto.py
+@@ -26,7 +26,8 @@
+ 
+ import click
+ 
+-from .http import client, print_json, resolve_base_url
++from ..utils.runtime_api import api_client as client
++from .http import print_json, resolve_api_endpoint as _base_url
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -36,7 +37,7 @@
+ 
+ 
+ def _ensure_daemon_alive(base_url: str) -> None:
+-    """HEAD ``/healthz`` and abort if the daemon is not reachable."""
++    """HEAD ``/version`` and abort if the daemon is not reachable."""
+     try:
+         with client(base_url) as c:
+             r = c.head("/version")
+@@ -50,10 +51,6 @@
+         sys.exit(2)
+ 
+ 
+-def _base_url(ctx: click.Context, base_url: str | None) -> str:
+-    return resolve_base_url(ctx, base_url)
+-
+-
+ def _add_command(
+     group: click.Group,
+     cmd_name: str,
+--- a/src/qwenpaw/cli/channels_cmd.py
++++ b/src/qwenpaw/cli/channels_cmd.py
+@@ -32,7 +32,8 @@
+ from ..config.utils import get_plugins_dir
+ from ..plugins.loader import PluginLoader
+ from .utils import prompt_confirm, prompt_path, prompt_select
+-from .http import client, print_json, resolve_base_url
++from ..utils.runtime_api import api_client as client
++from .http import print_json, resolve_api_endpoint
+ 
+ 
+ # Fields that contain secrets — display masked in ``list``
+@@ -1055,7 +1056,7 @@
+     Returns:
+       JSON response with success status and message details.
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+ 
+     payload = {
+         "channel": channel,
+--- a/src/qwenpaw/cli/chats_cmd.py
++++ b/src/qwenpaw/cli/chats_cmd.py
+@@ -8,8 +8,9 @@
+ 
+ import click
+ 
+-from .http import client, print_json, resolve_base_url
++from .http import print_json, resolve_api_endpoint
+ from ..app.channels.schema import DEFAULT_CHANNEL
++from ..utils.runtime_api import api_client as client
+ 
+ 
+ @click.group("chats")
+@@ -64,7 +65,7 @@
+       qwenpaw chats list --channel discord
+       qwenpaw chats list --user-id alice --channel discord
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+     params: dict[str, str] = {}
+     if user_id:
+         params["user_id"] = user_id
+@@ -101,7 +102,7 @@
+     Examples:
+       qwenpaw chats get 823845fe-dd13-43c2-ab8b-d05870602fd8
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+     with client(base_url) as c:
+         headers = {"X-Agent-Id": agent_id}
+         r = c.get(f"/chats/{chat_id}", headers=headers)
+@@ -175,7 +176,7 @@
+     JSON file creation example:
+       qwenpaw chats create -f chat.json
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+     if file_ is not None:
+         payload = json.loads(file_.read_text(encoding="utf-8"))
+     else:
+@@ -228,7 +229,7 @@
+     Examples:
+       qwenpaw chats update <chat_id> --name "Renamed Chat"
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+     headers = {"X-Agent-Id": agent_id}
+     payload = {"name": name}
+     with client(base_url) as c:
+@@ -265,7 +266,7 @@
+     Examples:
+       qwenpaw chats delete 823845fe-dd13-43c2-ab8b-d05870602fd8
+     """
+-    base_url = resolve_base_url(ctx, base_url)
++    base_url = resolve_api_endpoint(ctx, base_url)
+     with client(base_url) as c:
+         headers = {"X-Agent-Id": agent_id}
+         r = c.delete(f"/chats/{chat_id}", headers=headers)
+--- a/src/qwenpaw/cli/cron_cmd.py
++++ b/src/qwenpaw/cli/cron_cmd.py
+@@ -8,17 +8,9 @@
+ 
+ import click
+ 
+-from .http import client, print_json, resolve_base_url
++from .http import print_json, resolve_api_endpoint as _base_url
+ from ..app.channels.schema import DEFAULT_CHANNEL
+-
+-
+-def _base_url(ctx: click.Context, base_url: Optional[str]) -> str:
+-    """Resolve base_url with priority:
+-    1) command --base-url
+-    2) global --host/--port
+-        (already resolved in main.py, may come from config.json)
+-    """
+-    return resolve_base_url(ctx, base_url)
++from ..utils.runtime_api import api_client as client
+ 
+ 
+ @click.group("cron")
+--- a/src/qwenpaw/cli/desktop_cmd.py
++++ b/src/qwenpaw/cli/desktop_cmd.py
+@@ -285,6 +285,7 @@
+                 "-m",
+                 "qwenpaw",
+                 "app",
++                "--desktop-root",
+                 "--host",
+                 host,
+                 "--port",
+--- a/src/qwenpaw/cli/http.py
++++ b/src/qwenpaw/cli/http.py
+@@ -9,19 +9,19 @@
+ import httpx
+ 
+ from ..app.base_path import normalize_base_path
+-from ..utils.runtime_api import api_client
++from ..utils.runtime_api import (
++    api_client,
++    api_url_from_deployment,
++    api_url_from_override,
++)
+ 
+ 
+ DEFAULT_BASE_URL = "http://127.0.0.1:8088"
+ 
+ 
+ def client(base_url: str) -> httpx.Client:
+-    """Create HTTP client with /api prefix added to all requests."""
+-    # Ensure base_url ends with /api
+-    base = base_url.rstrip("/")
+-    if not base.endswith("/api"):
+-        base = f"{base}/api"
+-    return api_client(base)
++    """Create an API client from a legacy explicit base URL."""
++    return api_client(api_url_from_override(base_url))
+ 
+ 
+ def print_json(data: Any) -> None:
+@@ -46,3 +46,10 @@
+     port = (ctx.obj or {}).get("port", 8088)
+     base_path = normalize_base_path(os.environ.get("QWENPAW_BASE_PATH"))
+     return f"http://{host}:{port}{base_path}"
++
++
++def resolve_api_endpoint(ctx: click.Context, base_url: Optional[str]) -> str:
++    """Resolve a CLI API endpoint without confusing the mount with /api."""
++    if base_url:
++        return api_url_from_override(base_url)
++    return api_url_from_deployment(resolve_base_url(ctx, None))
+--- a/src/qwenpaw/cli/skills_cmd.py
++++ b/src/qwenpaw/cli/skills_cmd.py
+@@ -49,7 +49,8 @@
+ from ..envs.registry import is_bootstrap_protected_env_key
+ from ..exceptions import SkillsError
+ from ..security.skill_scanner import SkillScanError, scan_skill_directory
+-from .http import client, resolve_base_url
++from ..utils.runtime_api import api_client as client
++from .http import resolve_api_endpoint
+ from .utils import prompt_checkbox, prompt_confirm
+ 
+ 
+@@ -1229,7 +1230,7 @@
+                 _warn_skill_command_conflict(
+                     report["name"],
+                     target_agent,
+-                    resolve_base_url(ctx, base_url),
++                    resolve_api_endpoint(ctx, base_url),
+                 )
+             elif workspace is None:
+                 click.echo(
+--- a/src/qwenpaw/envs/store.py
++++ b/src/qwenpaw/envs/store.py
+@@ -43,6 +43,8 @@
+     _BOOTSTRAP_WORKING_DIR / "envs.json",
+ )
+ _HOST_ENV_VALUES: dict[str, str | None] = {}
++_BASE_PATH_ENV = "QWENPAW_BASE_PATH"
++_desktop_root_forced = False
+ 
+ 
+ def _same_path(a: Path, b: Path) -> bool:
+@@ -103,6 +105,17 @@
+ # ------------------------------------------------------------------
+ 
+ 
++def force_desktop_base_path_root() -> None:
++    """Keep this Desktop backend at `/` without changing saved settings.
++
++    Call before importing the server: package bootstrap may already have
++    loaded the persisted base path, and the server loads it again on import.
++    """
++    global _desktop_root_forced  # pylint: disable=global-statement
++    _desktop_root_forced = True
++    os.environ[_BASE_PATH_ENV] = "/"
++
++
+ def _apply_to_environ(
+     envs: dict[str, str],
+     *,
+@@ -119,6 +132,8 @@
+         if is_internal_env_key(key) or is_managed_control_key(key):
+             continue
+         identity = env_key_identity(key)
++        if _desktop_root_forced and identity == _BASE_PATH_ENV:
++            continue
+         if identity in seen:
+             logger.warning(
+                 f"Skipping case-conflicting environment variable: {key}",
+@@ -137,7 +152,10 @@
+     """Restore the inherited value for *key*, or remove it if absent."""
+     if is_internal_env_key(key):
+         return
+-    host_key = env_key_identity(key) if os.name == "nt" else key
++    identity = env_key_identity(key)
++    if _desktop_root_forced and identity == _BASE_PATH_ENV:
++        return
++    host_key = identity if os.name == "nt" else key
+     inherited = _HOST_ENV_VALUES.get(host_key)
+     if inherited is None:
+         os.environ.pop(key, None)
+@@ -339,10 +357,8 @@
+ def load_envs_into_environ() -> dict[str, str]:
+     """Load envs.json and apply bootstrap-safe entries to ``os.environ``.
+ 
+-    Call this once at application startup so that environment
+-    variables persisted from a previous session are available
+-    immediately. Protected keys are excluded from injection, and
+-    persisted values override existing process/system values.
++    Persisted values override existing process/system values, except for
++    protected keys and the Desktop backend's forced root base path.
+ 
+     Returns:
+         Full persisted mapping from envs.json, including protected keys
+--- a/src/qwenpaw/tauri/entry.py
++++ b/src/qwenpaw/tauri/entry.py
+@@ -290,6 +290,7 @@
+     )
+     from qwenpaw.config.utils import write_last_api
+     from qwenpaw.constant import LOG_LEVEL_ENV, WORKING_DIR
++    from qwenpaw.envs.store import force_desktop_base_path_root
+     from qwenpaw.utils.logging import (
+         SuppressPathAccessLogFilter,
+         setup_logger,
+@@ -326,6 +327,7 @@
+     port_file = str(WORKING_DIR / "desktop_port")
+     port, reused_socket = get_stable_port(port_file, host)
+ 
++    force_desktop_base_path_root()
+     # Import the app instance (instead of the import string) so the desktop
+     # shutdown endpoint can reach the uvicorn server via app.state.
+     from qwenpaw.app._app import app as fastapi_app
+--- a/src/qwenpaw/utils/runtime_api.py
++++ b/src/qwenpaw/utils/runtime_api.py
+@@ -78,6 +78,17 @@
+     _add_runtime_token(request, base_url=base_url)
+ 
+ 
++def api_url_from_deployment(deployment_url: str) -> str:
++    """Add the API route prefix to a known deployment root."""
++    return f"{deployment_url.rstrip('/')}/api"
++
++
++def api_url_from_override(base_url: str) -> str:
++    """Accept legacy overrides with or without the API route prefix."""
++    base = base_url.rstrip("/")
++    return base if base.endswith("/api") else api_url_from_deployment(base)
++
++
+ def api_client(
+     base_url: str,
+     *,
+--- a/tests/unit/cli/test_cli_agents_chat_and_helpers.py
++++ b/tests/unit/cli/test_cli_agents_chat_and_helpers.py
+@@ -150,7 +150,7 @@
+ 
+     assert result.exit_code == 0
+     assert "chunk-1" in result.output
+-    assert seen["call"][0] == "http://127.0.0.1:8088"
++    assert seen["call"][0] == "http://127.0.0.1:8088/api"
+     assert seen["call"][2] == "bot_b"
+     assert seen["call"][3] == 300
+     assert seen["handler"] is not None
+@@ -590,7 +590,7 @@
+ 
+     assert result.exit_code == 0
+     assert stub.seen == (
+-        "http://example.test:9999",
++        "http://example.test:9999/api",
+         "task-7",
+         "bot_b",
+         10,
+--- /dev/null
++++ b/tests/unit/cli/test_cli_api_base_path.py
+@@ -0,0 +1,95 @@
++# -*- coding: utf-8 -*-
++"""Check URLs emitted by Click commands without opening connections."""
++from functools import partial
++
++import httpx
++import pytest
++from click.testing import CliRunner
++
++from qwenpaw.cli.main import cli
++
++
++@pytest.mark.parametrize(
++    "command, routes",
++    [
++        (("cron", "list"), [("GET", "/cron/jobs")]),
++        (
++            ("auto", "crons-list_jobs"),
++            [("HEAD", "/version"), ("GET", "/crons/jobs")],
++        ),
++        (("chats", "list"), [("GET", "/chats")]),
++        (("agents", "list"), [("GET", "/agents")]),
++        (
++            ("agents", "chat", "--background", "--task-id", "demo"),
++            [("GET", "/console/chat/task/demo")],
++        ),
++        (
++            (
++                "channels",
++                "send",
++                "--agent-id",
++                "default",
++                "--channel",
++                "console",
++                "--target-user",
++                "demo",
++                "--target-session",
++                "demo",
++                "--text",
++                "hello",
++            ),
++            [("POST", "/messages/send")],
++        ),
++    ],
++)
++@pytest.mark.parametrize(
++    "mount, override, endpoint",
++    [
++        ("/api/", None, "http://127.0.0.1:9002/api/api"),
++        ("/paw/api/", None, "http://127.0.0.1:9002/paw/api/api"),
++        ("/paw/", None, "http://127.0.0.1:9002/paw/api"),
++        ("/", None, "http://127.0.0.1:9002/api"),
++        (
++            "/api/",
++            "https://example.test/custom",
++            "https://example.test/custom/api",
++        ),
++        (
++            "/api/",
++            "https://example.test/custom/api/",
++            "https://example.test/custom/api",
++        ),
++    ],
++)
++def test_click_commands_target_api(
++    monkeypatch,
++    command,
++    routes,
++    mount,
++    override,
++    endpoint,
++):
++    monkeypatch.setenv("QWENPAW_BASE_PATH", mount)
++    monkeypatch.setattr("qwenpaw.cli.main.read_runtime_api", lambda: None)
++    monkeypatch.setattr(
++        "qwenpaw.cli.main.read_last_api",
++        lambda: ("127.0.0.1", 9002),
++    )
++    requests = []
++
++    def respond(request):
++        requests.append((request.method, str(request.url)))
++        return httpx.Response(200, json={"agents": []})
++
++    monkeypatch.setattr(
++        httpx,
++        "Client",
++        partial(httpx.Client, transport=httpx.MockTransport(respond)),
++    )
++    args = list(command)
++    if override:
++        args.extend(["--base-url", override])
++    result = CliRunner().invoke(cli, args)
++
++    assert result.exit_code == 0, result.exception
++    assert requests == [(method, endpoint + path) for method, path in routes]
+--- a/tests/unit/cli/test_cli_runtime_auth.py
++++ b/tests/unit/cli/test_cli_runtime_auth.py
+@@ -211,13 +211,15 @@
+     assert seen == [None]
+ 
+ 
+-@pytest.mark.parametrize("target", [None, "http://127.0.0.1:9002"])
++@pytest.mark.parametrize("mount", ["", "/api"])
++@pytest.mark.parametrize("target", [None, "http://127.0.0.1:9002/api/"])
+ @pytest.mark.asyncio
+-async def test_async_agent_requests_scope_token(monkeypatch, target):
++async def test_async_agent_requests_scope_token(monkeypatch, target, mount):
++    monkeypatch.setenv("QWENPAW_BASE_PATH", mount)
+     seen = []
+ 
+     def respond(request):
+-        seen.append(request.headers.get(_TOKEN_HEADER))
++        seen.append((request.url.path, request.headers.get(_TOKEN_HEADER)))
+         return httpx.Response(200, json={"ok": True})
+ 
+     monkeypatch.setattr(
+@@ -238,7 +240,12 @@
+         base_url=target,
+     )
+     expected = "secret-a" if target is None else None
+-    assert seen == [expected] * 3
++    endpoint_path = f"{mount}/api" if target is None else "/api"
++    assert seen == [
++        (f"{endpoint_path}/console/chat", expected),
++        (f"{endpoint_path}/console/chat/stop", expected),
++        (f"{endpoint_path}/fork/agent", expected),
++    ]
+ 
+ 
+ @pytest.mark.parametrize(
+@@ -400,6 +407,7 @@
+     caplog,
+     slow_stream,
+ ):
++    monkeypatch.setenv("QWENPAW_BASE_PATH", "/paw/api/")
+     seen = []
+     closed = []
+ 
+@@ -417,6 +425,7 @@
+         seen.append(
+             (
+                 request.url.port,
++                request.url.path,
+                 request.headers.get(_TOKEN_HEADER),
+                 request.headers.get("X-Agent-Id"),
+             ),
+@@ -430,7 +439,7 @@
+     )
+     with caplog.at_level("INFO"):
+         await send_proactive_message_via_http("agent-a", "message", 1)
+-    assert seen == [(9001, "secret-a", "agent-a")]
++    assert seen == [(9001, "/paw/api/api/console/chat", "secret-a", "agent-a")]
+     assert closed == [True]
+     expected = "Timeout (1s)" if slow_stream else "sent successfully via HTTP"
+     assert expected in caplog.text
+--- a/console/src/stores/localAvatarStore.ts
++++ b/console/src/stores/localAvatarStore.ts
+@@ -1,7 +1,8 @@
++import { getConsoleAssetUrl } from "../utils/runtimeBasePath";
+ import { create } from "zustand";
+ import { avatarApi, type AvatarProfile } from "../api/modules/avatars";
+ 
+-export const DEFAULT_AVATAR = `${import.meta.env.BASE_URL}qwenpaw-avatar.gif`;
++export const DEFAULT_AVATAR = getConsoleAssetUrl("qwenpaw-avatar.gif");
+ let generation = 0;
+ let revision = 0;
+ interface AvatarState extends AvatarProfile {
+--- a/console/src/pages/Chat/OptionsPanel/defaultConfig.ts
++++ b/console/src/pages/Chat/OptionsPanel/defaultConfig.ts
+@@ -1,3 +1,4 @@
++import { getConsoleAssetUrl } from "../../../utils/runtimeBasePath";
+ import type { TFunction } from "i18next";
+ 
+ const defaultConfig = {
+@@ -27,7 +28,7 @@
+     greeting: "Hello, how can I help you today?",
+     description:
+       "I am a helpful assistant that can help you with your questions.",
+-    avatar: `${import.meta.env.BASE_URL}online.svg`,
++    avatar: getConsoleAssetUrl("online.svg"),
+     prompts: [
+       {
+         value: "Let's start a new journey!",
+--- a/console/src/pages/AppCenter/AppMarket.tsx
++++ b/console/src/pages/AppCenter/AppMarket.tsx
+@@ -1,3 +1,4 @@
++import { getConsoleAssetUrl } from "@/utils/runtimeBasePath";
+ /**
+  * AppMarket.tsx — App market view for the App Center.
+  *
+@@ -78,7 +79,7 @@
+ // Curated featured apps use pinned artwork because the market API may not
+ // provide an icon for them.
+ const FEATURED_APP_ICONS: Record<string, string> = {
+-  "@agentscope/qwenpaw-creator": `${import.meta.env.BASE_URL}creator-logo.png`,
++  "@agentscope/qwenpaw-creator": getConsoleAssetUrl("creator-logo.png"),
+ };
+ // The upstream market entry ships the same English text under every locale
+ // key, so curated apps carry their real translations here (keyed by language
+--- a/console/src/os/DesktopOS.tsx
++++ b/console/src/os/DesktopOS.tsx
+@@ -1,3 +1,4 @@
++import { getConsoleAssetUrl } from "../utils/runtimeBasePath";
+ /**
+  * DesktopOS.tsx — Plan B PoC entry point: a full-screen desktop shell that
+  * reuses the existing routeRegistry components inside draggable windows.
+@@ -444,7 +445,7 @@
+           lowest layer and never intercepts pointer events, so it reads as a
+           backdrop behind icons and app windows rather than a card. */}
+       <div className={styles.emptyHint}>
+-        <img src={`${import.meta.env.BASE_URL}qwenpaw.png`} alt="" />
++        <img src={getConsoleAssetUrl("qwenpaw.png")} alt="" />
+         <div className={styles.emptyBrandName}>QwenPaw OS</div>
+       </div>
+ 
+--- a/console/src/os/MenuBar.tsx
++++ b/console/src/os/MenuBar.tsx
+@@ -1,3 +1,4 @@
++import { getConsoleAssetUrl } from "../utils/runtimeBasePath";
+ /**
+  * MenuBar.tsx — macOS-style top menu bar.
+  *
+@@ -108,7 +109,7 @@
+             title={t("os.qwenpawMenu", "QwenPaw menu")}
+             aria-label={t("os.qwenpawMenu", "QwenPaw menu")}
+           >
+-            <img src={`${import.meta.env.BASE_URL}qwenpaw.png`} alt="QwenPaw" />
++            <img src={getConsoleAssetUrl("qwenpaw.png")} alt="QwenPaw" />
+           </button>
+         </Dropdown>
+         <Tooltip
+--- a/plugins/channel/voice/README.md
++++ b/plugins/channel/voice/README.md
+@@ -13,6 +13,12 @@
+ 
+ ## Public ingress dependency
+ 
++Before enabling `QWENPAW_BASE_PATH`, update any existing Voice installation
++from `0.1.1` or earlier to `0.1.2` or later and use a QwenPaw core that supports
++this setting. Upgrading the core alone does not replace an installed Voice
++plugin. Older Voice releases do not include the prefix in the public callback
++URLs.
++
+ The paths remain `/voice/incoming`, `/voice/ws` and `/voice/status-callback`.
+ The child registers its real listener with Core and requires the frozen A3
+ `forwarding` binding in the register ACK: route_query_key, route_selector,
+--- a/console/src/App.tsx
++++ b/console/src/App.tsx
+@@ -168,6 +168,13 @@
+     };
+   }, [authStatus, retryKey]);
+ 
++  const { setThemeAuthorized } = useTheme();
++  useEffect(() => {
++    if (status !== "ok" || !setThemeAuthorized) return;
++    setThemeAuthorized(true);
++    return () => setThemeAuthorized(false);
++  }, [status, setThemeAuthorized]);
++
+   if (status === "loading") {
+     return <>{loadingFallback}</>;
+   }
+--- a/console/src/App.pluginStartup.test.tsx
++++ b/console/src/App.pluginStartup.test.tsx
+@@ -1,4 +1,4 @@
+-import { cleanup, render, screen } from "@testing-library/react";
++import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ const backendInfoMock = vi.hoisted(() => vi.fn());
+@@ -19,9 +19,8 @@
+     i18n: { language: "en", resolvedLanguage: "en" },
+   }),
+ }));
+-vi.mock("./contexts/ThemeContext", () => ({
+-  useTheme: () => ({ isDark: false, previewTheme: {} }),
+-}));
++const getTheme = vi.hoisted(() => vi.fn());
++vi.mock("./api/modules/theme", () => ({ themeApi: { get: getTheme } }));
+ vi.mock("./api/modules/language", () => ({
+   languageApi: { getLanguage: vi.fn().mockResolvedValue({ language: "en" }) },
+ }));
+@@ -45,6 +44,7 @@
+ }));
+ 
+ import App from "./App";
++import { ThemeProvider } from "./contexts/ThemeContext";
+ 
+ describe("Console plugin startup boundary", () => {
+   beforeEach(() => {
+@@ -67,6 +67,64 @@
+     expect(pluginProviderMock).not.toHaveBeenCalled();
+   });
+ 
++  it("defers the remote theme on an anonymous settings deep link", async () => {
++    backendInfoMock.mockResolvedValue({
++      mode: "standard",
++      authStatus: { enabled: true, has_users: true },
++    });
++    getTheme.mockResolvedValue({ accent: "#009977" });
++    window.history.replaceState({}, "", "/settings/general");
++    render(
++      <ThemeProvider syncRemote="authorized">
++        <App />
++      </ThemeProvider>,
++    );
++    expect(await screen.findByText("login page")).toBeInTheDocument();
++    expect(getTheme).not.toHaveBeenCalled();
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(new Response(null, { status: 200 })),
++    );
++    try {
++      localStorage.setItem("qwenpaw_auth_token", "fixture-token");
++      act(() => {
++        window.history.pushState({}, "", "/settings/general");
++        window.dispatchEvent(new PopStateEvent("popstate"));
++      });
++      expect(await screen.findByText("main application")).toBeInTheDocument();
++      await waitFor(() =>
++        expect(
++          document.documentElement.style.getPropertyValue("--app-accent"),
++        ).toBe("#009977"),
++      );
++      expect(getTheme).toHaveBeenCalledTimes(1);
++    } finally {
++      localStorage.removeItem("qwenpaw_auth_token");
++      vi.unstubAllGlobals();
++    }
++  });
++
++  it("restores the remote accent for a bound entry without a browser token", async () => {
++    backendInfoMock.mockResolvedValue({
++      mode: "standard",
++      authStatus: { enabled: true, fnos_entry: true },
++    });
++    getTheme.mockResolvedValue({ accent: "#009977" });
++    window.history.replaceState({}, "", "/settings/general");
++    render(
++      <ThemeProvider syncRemote="authorized">
++        <App />
++      </ThemeProvider>,
++    );
++    expect(await screen.findByText("main application")).toBeInTheDocument();
++    await waitFor(() =>
++      expect(
++        document.documentElement.style.getPropertyValue("--app-accent"),
++      ).toBe("#009977"),
++    );
++    expect(getTheme).toHaveBeenCalledTimes(1);
++  });
++
+   it("initializes plugins for the protected main application", async () => {
+     window.history.replaceState({}, "", "/chat");
+     render(<App />);
+--- a/console/src/contexts/ThemeContext.tsx
++++ b/console/src/contexts/ThemeContext.tsx
+@@ -22,6 +22,7 @@
+   setThemeMode: (mode: ThemeMode) => void;
+   /** Convenience toggle: light ↔ dark (skips system) */
+   toggleTheme: () => void;
++  setThemeAuthorized?: (authorized: boolean) => void;
+   userTheme: ThemeConfig;
+   previewTheme: ThemeConfig;
+   setThemePreview: (theme: ThemeConfig) => void;
+@@ -65,8 +66,10 @@
+   syncRemote = true,
+ }: {
+   children: ReactNode;
+-  syncRemote?: boolean;
++  syncRemote?: boolean | "authorized";
+ }) {
++  const [authorized, setAuthorized] = useState(false);
++  const remoteEnabled = syncRemote === "authorized" ? authorized : syncRemote;
+   const [themeMode, setThemeModeState] = useState<ThemeMode>(getInitialMode);
+   const [isDark, setIsDark] = useState<boolean>(() =>
+     resolveIsDark(getInitialMode()),
+@@ -75,7 +78,13 @@
+   const [previewTheme, setPreviewTheme] = useState<ThemeConfig>({});
+ 
+   useEffect(() => {
+-    if (!syncRemote) return;
++    if (!remoteEnabled) {
++      if (syncRemote === "authorized") {
++        setUserTheme({});
++        setPreviewTheme({});
++      }
++      return;
++    }
+     let cancelled = false;
+     themeApi
+       .get()
+@@ -91,7 +100,7 @@
+     return () => {
+       cancelled = true;
+     };
+-  }, [syncRemote]);
++  }, [syncRemote, remoteEnabled]);
+ 
+   const saveUserTheme = useCallback(async (theme: ThemeConfig) => {
+     const saved = await themeApi.update(theme);
+@@ -148,6 +157,7 @@
+         themeMode,
+         isDark,
+         setThemeMode,
++        setThemeAuthorized: syncRemote === "authorized" ? setAuthorized : undefined,
+         toggleTheme,
+         userTheme,
+         previewTheme,
+--- a/console/src/main.tsx
++++ b/console/src/main.tsx
+@@ -57,7 +57,7 @@
+ 
+ void i18nSettled.then(() => {
+   createRoot(document.getElementById("root")!).render(
+-    <ThemeProvider>
++    <ThemeProvider syncRemote="authorized">
+       <App />
+     </ThemeProvider>,
+   );

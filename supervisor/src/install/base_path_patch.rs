@@ -322,6 +322,10 @@ fn relative_payload_path(value: &str) -> Result<&Path, String> {
         value,
         "agents/tools/agent_management.py"
             | "utils/startup_display.py"
+            | "agents/memory/proactive/proactive_responder.py"
+            | "envs/store.py"
+            | "tauri/entry.py"
+            | "utils/runtime_api.py"
             | "channel_protocol/models.py"
             | "official_channels/voice-0.1.0.zip"
     );
@@ -883,6 +887,10 @@ mod tests {
             "cli/http.py",
             "agents/tools/agent_management.py",
             "utils/startup_display.py",
+            "agents/memory/proactive/proactive_responder.py",
+            "envs/store.py",
+            "tauri/entry.py",
+            "utils/runtime_api.py",
             "channel_protocol/models.py",
             "official_channels/voice-0.1.0.zip",
             "pawapp/deps.py",

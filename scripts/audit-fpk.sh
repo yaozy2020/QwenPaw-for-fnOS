@@ -78,7 +78,7 @@ for base_version, directory in (shipping_patch(),):
     for entry in patch_manifest["files"]:
         relative = entry["path"]
         parts = relative.split("/")
-        if ((parts[0] not in {"app", "browser", "cli", "console", "pawapp"} and "/".join(parts) not in {"agents/tools/agent_management.py", "utils/startup_display.py", "channel_protocol/models.py", "official_channels/voice-0.1.0.zip"}) or len(parts) < 2
+        if ((parts[0] not in {"app", "browser", "cli", "console", "pawapp"} and "/".join(parts) not in {"agents/tools/agent_management.py", "utils/startup_display.py", "agents/memory/proactive/proactive_responder.py", "envs/store.py", "tauri/entry.py", "utils/runtime_api.py", "channel_protocol/models.py", "official_channels/voice-0.1.0.zip"}) or len(parts) < 2
                 or any(part in {"", ".", ".."} for part in parts) or "\\" in relative):
             raise ValueError(f"base-path patch payload path is invalid: {relative!r}")
         if not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
@@ -700,7 +700,7 @@ print("audit: base-path backend and prebuilt Console payload")
 report(app_payloads[f"{patch_root}/manifest.json"] == patch_manifest_bytes,
        "包内 base-path 补丁清单与构建源一致", "包内 base-path 补丁清单发生漂移")
 manifest_paths = [entry["path"] for entry in patch_manifest["files"]]
-report(all(path.startswith(("app/", "browser/", "cli/", "console/", "pawapp/")) or path in {"agents/tools/agent_management.py", "utils/startup_display.py", "channel_protocol/models.py", "official_channels/voice-0.1.0.zip"} for path in manifest_paths)
+report(all(path.startswith(("app/", "browser/", "cli/", "console/", "pawapp/")) or path in {"agents/tools/agent_management.py", "utils/startup_display.py", "agents/memory/proactive/proactive_responder.py", "envs/store.py", "tauri/entry.py", "utils/runtime_api.py", "channel_protocol/models.py", "official_channels/voice-0.1.0.zip"} for path in manifest_paths)
        and any(path.startswith("console/") for path in manifest_paths),
        "补丁包含后端与完整预构建 Console", "补丁清单缺少 Console 或包含未知路径")
 patch_bytes = 0

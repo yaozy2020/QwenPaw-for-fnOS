@@ -1590,6 +1590,8 @@ def case_legacy_upgrade_keep(parent, hashes, sample):
     with legacy_upgrade_fixture(parent, "legacy-upgrade-keep-" + sample[0], hashes) as fixture:
         if sample == LEGACY_UPGRADE_SAMPLES[0]:
             fixture.var.chmod(0o700)
+        if sample[1] in {"2.3.0", "2.2.2.post1"}:
+            stage_upgrade_patch(fixture, version="2.3.0.post1")
         seed_legacy_runtime(fixture, sample)
         seed_legacy_user_data(fixture, sample[3])
         before = upgrade_data_snapshot(fixture)
@@ -1643,61 +1645,6 @@ def case_legacy_upgrade_exact(parent, hashes, sample):
             require(client.connect_ex(("127.0.0.1", fixture.service_port)) != 0,
                     "stopped native runtime still owns its health listener")
         require_upgrade_data_preserved(fixture, before)
-
-
-def case_post1_transition(parent, hashes):
-    sample = next(sample for sample in LEGACY_UPGRADE_SAMPLES if sample[0] == "1.2")
-    with legacy_upgrade_fixture(parent, "post1-transition", hashes) as fixture:
-        seed_legacy_runtime(fixture, sample)
-        seed_legacy_user_data(fixture, sample[3])
-        fingerprint, contents = stage_upgrade_patch(fixture, version="2.3.0.post1")
-        stage_upgrade_python(fixture)
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        listener.settimeout(5)
-        mirror = f"http://127.0.0.1:{listener.getsockname()[1]}/simple"
-        (fixture.var / "pip-mirror").write_text(mirror + "\n")
-        before = upgrade_data_snapshot(fixture)
-
-        def serve_missing_post1():
-            try:
-                client, _ = listener.accept()
-                with client:
-                    client.recv(4096)
-                    body = b'<a href="qwenpaw-2.3.0.tar.gz">2.3.0</a>'
-                    client.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
-                                   + b"\r\nConnection: close\r\n\r\n" + body)
-            except OSError:
-                pass
-
-        thread = threading.Thread(target=serve_missing_post1, daemon=True)
-        thread.start()
-        try:
-            code, output = fixture.callback("upgrade")
-        finally:
-            listener.close()
-        require("本次迁移改用官方 PyPI" in output,
-                f"post1 transition did not report the official mirror fallback: {output[-1600:]}")
-        require(code == 0, f"post1 transition failed: {output[-1600:]}")
-        fixture.manager_identity()
-        task = fixture.wait_task()
-        require(task["seq"] == 1 and task["phase"] == "done" and not task["recovery_required"],
-                f"post1 transition did not commit cleanly: {task}")
-        require((fixture.venv / "installed").read_text().strip() == "2.3.0.post1",
-                "post1 transition kept the old runtime")
-        require(fixture.pin.read_text() == "2.3.0.post1\n", "post1 transition changed the wrong pin")
-        require((fixture.venv / BASE_PATH_MARKER).read_text() == fingerprint + "\n",
-                "post1 transition did not commit the payload fingerprint")
-        require((fixture.venv / "lib/python3.12/site-packages/qwenpaw/console/index.html").read_bytes()
-                == contents, "post1 transition did not activate the new Console")
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{fixture.service_port}/app/qwenpaw/web/api/version", timeout=2) as response:
-            require(json.loads(response.read())["version"] == "2.3.0.post1",
-                    "post1 transition health version mismatch")
-        fixture.wait_kernel()
-        require_upgrade_data_preserved(fixture, before)
-        fixture.stop_manager()
 
 
 def case_legacy_upgrade_failure(parent, hashes, failure):
@@ -1798,8 +1745,6 @@ def main():
                      lambda sample=sample: case_legacy_upgrade_keep(parent, hashes, sample), failures)
             run_case(f"legacy-upgrade {sample[0]} exact {sample[1]} rebuild preserves all user data and modes",
                      lambda sample=sample: case_legacy_upgrade_exact(parent, hashes, sample), failures)
-        run_case("healthy 2.3.0 transitions to post1 without losing user data",
-                 lambda: case_post1_transition(parent, hashes), failures)
         for failure in ("preflight", "bootstrap", "network"):
             run_case(f"legacy-upgrade {failure} failure rolls back runtime with zero data loss",
                      lambda failure=failure: case_legacy_upgrade_failure(parent, hashes, failure), failures)

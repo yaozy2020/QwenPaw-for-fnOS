@@ -182,19 +182,10 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
         let mut plan = RuntimePlan::Keep;
         if lifecycle == Lifecycle::Upgrade {
             if let PinState::Exact(version) = &pin {
-                let post1 = "2.3.0.post1";
-                if version == "2.3.0" && health["runtime"]["version"].as_str() == Some("2.3.0") {
-                    let channel = crate::install::InstallChannel::Exact(post1.into());
-                    if crate::install::base_path_patch::for_channel(&channel)?.is_some() {
-                        plan = RuntimePlan::Repair(post1.into());
-                    }
-                }
-                if plan == RuntimePlan::Keep {
-                    let channel = crate::install::InstallChannel::Exact(version.clone());
-                    if let Some(patch) = crate::install::base_path_patch::for_channel(&channel)? {
-                        if patch.needs_apply(Path::new(&cfg.kernel_venv))? {
-                            plan = RuntimePlan::Repair(version.clone());
-                        }
+                let channel = crate::install::InstallChannel::Exact(version.clone());
+                if let Some(patch) = crate::install::base_path_patch::for_channel(&channel)? {
+                    if patch.needs_apply(Path::new(&cfg.kernel_venv))? {
+                        plan = RuntimePlan::Repair(version.clone());
                     }
                 }
             }
@@ -228,14 +219,6 @@ fn run_runtime_install_flow(cfg: &Config, lifecycle: Lifecycle) -> Result<(), St
         }
         RuntimePlan::Repair(version) => {
             let mirror = mirror_for_install(cfg)?;
-            let (mirror, official_fallback) = post1_migration_mirror(&version, &mirror)?;
-            if official_fallback {
-                log_message(
-                    cfg,
-                    "当前镜像未提供 QwenPaw 2.3.0.post1，本次迁移改用官方 PyPI；原镜像设置保持不变",
-                    false,
-                );
-            }
             log_message(
                 cfg,
                 &format!("运行环境缺损，按精确版本钉 {version} 恢复"),
@@ -407,22 +390,6 @@ fn mirror_for_install(cfg: &Config) -> Result<String, String> {
         Ok(String::new())
     } else {
         crate::install::resolve_mirror(&mirror)
-    }
-}
-
-fn post1_migration_mirror(version: &str, mirror: &str) -> Result<(String, bool), String> {
-    if version != "2.3.0.post1" || mirror.is_empty() {
-        return Ok((mirror.to_string(), false));
-    }
-    let url = crate::version_index::index_url(mirror)
-        .map_err(|error| format!("无法确定 post1 镜像索引: {error}"))?;
-    let Ok(versions) = crate::version_index::fetch_versions(&url) else {
-        return Ok((mirror.to_string(), false));
-    };
-    if versions.contains_key("2.3.0.post1") {
-        Ok((mirror.to_string(), false))
-    } else {
-        Ok((String::new(), true))
     }
 }
 
@@ -1712,41 +1679,5 @@ mod tests {
             "https://target.example/simple\n"
         );
         fs::remove_dir_all(var).unwrap();
-    }
-
-    #[test]
-    fn post1_migration_uses_official_only_when_the_selected_mirror_lacks_post1() {
-        use std::io::{Read, Write};
-
-        fn index(body: &'static str) -> String {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).unwrap();
-            });
-            format!("http://{address}/simple")
-        }
-
-        let missing = index("<a href=\"qwenpaw-2.3.0.tar.gz\">2.3.0</a>");
-        assert_eq!(
-            post1_migration_mirror("2.3.0.post1", &missing).unwrap(),
-            (String::new(), true)
-        );
-        let available = index("<a href=\"qwenpaw-2.3.0.post1-py3-none-any.whl\">2.3.0.post1</a>");
-        assert_eq!(
-            post1_migration_mirror("2.3.0.post1", &available).unwrap(),
-            (available, false)
-        );
-        assert_eq!(
-            post1_migration_mirror("2.3.0", "https://custom.example/simple").unwrap(),
-            ("https://custom.example/simple".into(), false)
-        );
     }
 }

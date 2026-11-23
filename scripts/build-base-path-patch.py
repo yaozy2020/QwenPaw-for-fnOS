@@ -25,16 +25,19 @@ BACKEND_FILES = (
     "official_channels/voice-0.1.0.zip",
     "pawapp/deps.py",
 )
-EXTRA_CLIENTS = ("agents/tools/agent_management.py", "utils/startup_display.py")
+EXTRA_CLIENTS = ("agents/tools/agent_management.py", "utils/startup_display.py",
+                 "agents/memory/proactive/proactive_responder.py", "envs/store.py",
+                 "tauri/entry.py", "utils/runtime_api.py")
 POST1_FILES = ("app/fnos_entry.py", "cli/auto.py", "cli/cron_cmd.py", "cli/doctor_checks.py",
-               "cli/plugin_commands.py", "cli/process_utils.py", *EXTRA_CLIENTS)
+               "cli/plugin_commands.py", "cli/process_utils.py", "cli/agents_cmd.py", "cli/app_cmd.py",
+               "cli/channels_cmd.py", "cli/chats_cmd.py", "cli/skills_cmd.py", *EXTRA_CLIENTS)
 SOURCE_COMMITS = {
     "2.3.0": "0a21644e90d8ba37e20035b3bfb63880872cc2a2",
     "2.3.0.post1": "ee58cb1a64f2b21e825c525f73dc44bc7941edea",
 }
 SOURCE_PATCH_SHA256 = {
     "2.3.0": "c65666afb8f7c90e22d457b90f3d9a7e4be070e1b6e6c77d3c4b1710e46b3b20",
-    "2.3.0.post1": "9111b49874a421f8e5a60496f3c85b5ca45701dbeb6c5013a1bf03074243cd8a",
+    "2.3.0.post1": "08d37f679900813103355933a1bf03a14e735cfec188b593a2d6560dfc8d7612",
 }
 PREVIOUS_SHA256 = {
     "app/_app.py": ["38541ce134eb38f7ec64a82125365400cc2f3ca69ea5aef86b6f1ba42500877c"],
@@ -122,6 +125,22 @@ def add_previous_hashes(entry, relative, previous):
         entry["previous_sha256"] = sorted(values)
 
 
+def bundled_voice(source, original):
+    # The post1 wheel, not the plugin marketplace, defines the archive inventory.
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as wheel_zip, zipfile.ZipFile(out, "w") as patched:
+        for name in sorted(wheel_zip.namelist()):
+            parts = name.split("/")
+            if parts[0] != "voice" or any(p in ("", ".", "..") for p in parts) or "\\" in name:
+                raise ValueError(f"unexpected bundled Voice member: {name!r}")
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            patched.writestr(info, (source / "plugins/channel" / name).read_bytes(),
+                             compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+    return out.getvalue()
+
+
 def console_sources(console):
     if console.is_symlink() or not console.is_dir():
         raise ValueError("console payload must be a real directory")
@@ -178,9 +197,12 @@ def main():
         }
         for relative in (*BACKEND_FILES, *(POST1_FILES if args.version == "2.3.0.post1" else ())):
             patched_path = source / "src/qwenpaw" / relative
-            patched = patched_path.read_bytes()
             original_name = f"qwenpaw/{relative}"
             original = official.get(original_name)
+            if args.version == "2.3.0.post1" and relative == "official_channels/voice-0.1.0.zip":
+                patched = bundled_voice(source, official[original_name])
+            else:
+                patched = patched_path.read_bytes()
             if original == patched:
                 continue
             payload[relative] = patched
