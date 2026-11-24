@@ -13,10 +13,16 @@ const MIRROR_SPECS: readonly { value: string; labelKey: MessageKey }[] = [
   { value: "", labelKey: "mirror.pypi" },
 ];
 
+function canonicalMirror(value: string): string {
+  const normalized = value.replace(/\/+$/, "");
+  if (normalized === "https://pypi.org/simple") return "";
+  return MIRROR_SPECS.find(item => item.value && item.value.replace(/\/+$/, "") === normalized)?.value ?? value;
+}
+
 interface SettingsPanelOptions {
   state: ManagementState;
   api: Pick<ApiClient,
-    "changePort" | "webProxyPort" | "changeWebProxyPort" | "useNativeLogin" | "migrateEntry" | "resetAuth" | "getMirror" | "setMirror">;
+    "changePort" | "webProxyPort" | "changeWebProxyPort" | "migrateEntry" | "resetAuth" | "getMirror" | "setMirror">;
   showModal: ShowModal;
   showToast(message: string): void;
   errorMessage(error: unknown): string;
@@ -30,6 +36,7 @@ export function createSettingsPanel({
   api, state, showModal, showToast, errorMessage, supervisorReachable, fetchStatus, fetchLogs, fetchVersionList,
 }: SettingsPanelOptions) {
   let webProxyReadSeq = 0;
+  let statusRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   const mirror = reactive({ value: '', ready: false, open: false, saving: false });
   const mirrors = computed(() => MIRROR_SPECS.map(item => ({ value: item.value, label: t(item.labelKey) })));
   let mirrorRead = 0;
@@ -83,12 +90,13 @@ export function createSettingsPanel({
     try {
       showToast(t("settings.savingPort", { port: newPort }));
       const data = operationSucceeded(await api.changePort(newPort));
-      if (data.success === false) {
-        showToast(t("settings.changePortFailed", { error: data.message || t("settings.unknownError") }));
-      } else {
-        showToast(data.message || t("settings.portChanged", { port: newPort }));
-      }
-      setTimeout(() => { fetchStatus(); fetchLogs(); }, 2500);
+      showToast(data.message || t("settings.portChanged", { port: newPort }));
+      if (statusRefreshTimer !== null) clearTimeout(statusRefreshTimer);
+      statusRefreshTimer = setTimeout(() => {
+        statusRefreshTimer = null;
+        fetchStatus();
+        fetchLogs();
+      }, 2500);
     } catch (error) {
       showToast(t("settings.changePortFailed", { error: errorMessage(error) }));
     }
@@ -101,19 +109,16 @@ export function createSettingsPanel({
       if (seq !== webProxyReadSeq) return;
       const { data } = result;
       if (!result.ok || !data) {
-        state.proxyPasswordConfigured = null;
         state.proxyPort = null;
         setWebProxyScope(null);
         return;
       }
       state.entryLogin = data.entryLogin === true;
-      state.proxyPasswordConfigured = typeof data.passwordConfigured === "boolean" ? data.passwordConfigured : null;
       const validPort = Number.isInteger(data.port) && data.port > 0 && data.port <= 65535;
       state.proxyPort = validPort ? data.port : null;
       setWebProxyScope(typeof data.public === "boolean" ? data.public : null);
     } catch (error) {
       if (seq === webProxyReadSeq) {
-        state.proxyPasswordConfigured = null;
         state.proxyPort = null;
         setWebProxyScope(null);
       }
@@ -211,20 +216,6 @@ export function createSettingsPanel({
     }
   }
 
-  async function useNativeLogin(username: string, password: string): Promise<void> {
-    if (state.proxyPasswordConfigured !== true) return;
-    state.saving = true;
-    ++webProxyReadSeq;
-    try {
-      operationSucceeded(await api.useNativeLogin(username, password));
-      state.proxyPasswordConfigured = false;
-      showToast(t("settings.nativeLoginSwitched"));
-    } catch (error) {
-      showToast(t("settings.nativeLoginFailed", { error: errorMessage(error) }));
-      await fetchWebProxyPort();
-    }
-  }
-
   async function migrateEntry(): Promise<void> {
     if (state.entryLogin !== false || !await showModal({
       title: t("settings.migrateTitle"),
@@ -277,7 +268,7 @@ export function createSettingsPanel({
       const {data, ok} = await api.getMirror();
       if (request !== mirrorRead) return;
       mirror.ready = ok && data.success === true;
-      if (mirror.ready) mirror.value = data.mirror || '';
+      if (mirror.ready) mirror.value = canonicalMirror(data.mirror || '');
     } catch { if (request === mirrorRead) mirror.ready = false; }
   }
 
@@ -287,7 +278,6 @@ export function createSettingsPanel({
     changeWebProxyPort: () => runAction(changeWebProxyPort),
     setWebProxyPublic: (value: boolean) => runAction(() => setWebProxyPublic(value)),
     migrateEntry: () => runAction(migrateEntry),
-    useNativeLogin: (username: string, password: string) => runAction(() => useNativeLogin(username, password)),
     resetAuth: (password: string) => runAction(() => resetAuth(password)),
     loadMirror,
     mirror,
@@ -295,5 +285,9 @@ export function createSettingsPanel({
     toggleMirrorDropdown: () => { mirror.open = !mirror.open; if (mirror.open && !mirror.ready) void loadMirror(); },
     pickMirror,
     currentMirror: () => mirror.value,
+    destroy: () => {
+      if (statusRefreshTimer !== null) clearTimeout(statusRefreshTimer);
+      statusRefreshTimer = null;
+    },
   };
 }

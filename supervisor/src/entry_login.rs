@@ -166,7 +166,7 @@ async fn prove_owner(kernel: &KernelManager, token: String) -> Result<Record, Lo
         let r: Record = serde_json::from_slice(&body)
             .map_err(|_| (StatusCode::BAD_GATEWAY, "内核不支持迁移协议"))?;
         if r.v != 1
-            || r.instance != crate::proxy_auth::DEFAULT_INSTANCE
+            || r.instance != "default"
             || r.owner.trim().is_empty()
             || r.owner.len() > 256
             || r.owner.chars().any(char::is_control)
@@ -177,82 +177,4 @@ async fn prove_owner(kernel: &KernelManager, token: String) -> Result<Record, Lo
     })
     .await
     .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, "旧账号校验超时"))?
-}
-
-pub async fn confirm_native_login(
-    kernel: &KernelManager,
-    username: &str,
-    password: &str,
-) -> Result<(), LoginError> {
-    let unavailable = (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "请先启动含匹配适配的受管内核，再切换登录方式",
-    );
-    let denied = (
-        StatusCode::UNAUTHORIZED,
-        "未能验证 QwenPaw 原账号，请检查用户名和密码",
-    );
-    if !kernel.supports_native_proxy() {
-        return Err(unavailable);
-    }
-    let login = Request::post(format!("{}/api/auth/login", kernel.base_path()))
-        .header("x-fnos-entry-command", "native")
-        .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::json!({"username": username, "password": password, "expires_in": 30})
-                .to_string(),
-        ))
-        .map_err(|_| unavailable)?;
-    let check = async {
-        let reply = send(kernel, login).await.map_err(|_| unavailable)?;
-        match reply.status() {
-            StatusCode::OK => (),
-            s @ (StatusCode::LOCKED | StatusCode::TOO_MANY_REQUESTS) => {
-                return Err((s, "原账号登录尝试过多，请稍后重试"))
-            }
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(denied),
-            _ => return Err(unavailable),
-        }
-        #[derive(serde::Deserialize)]
-        struct Login {
-            username: String,
-            token: String,
-        }
-        let bytes = axum::body::to_bytes(Body::new(reply.into_body()), 8192)
-            .await
-            .map_err(|_| unavailable)?;
-        let login: Login = serde_json::from_slice(&bytes).map_err(|_| unavailable)?;
-        if login.username != username || login.token.is_empty() {
-            return Err(denied);
-        }
-        if prove_owner(kernel, login.token).await?.owner != username {
-            return Err(denied);
-        }
-        if selected(&kernel.entry_record()) {
-            // Read the existing desktop binding via the kernel's validated private transport.
-            let req = Request::get(format!("{}/api/auth/verify", kernel.base_path()))
-                .body(Body::empty())
-                .map_err(|_| unavailable)?;
-            let reply = send(kernel, req).await.map_err(|_| unavailable)?;
-            if reply.status() != StatusCode::OK {
-                return Err(unavailable);
-            }
-            #[derive(serde::Deserialize)]
-            struct Binding {
-                valid: bool,
-                username: String,
-            }
-            let bytes = axum::body::to_bytes(Body::new(reply.into_body()), 2048)
-                .await
-                .map_err(|_| unavailable)?;
-            let bound: Binding = serde_json::from_slice(&bytes).map_err(|_| unavailable)?;
-            if !bound.valid || bound.username != username {
-                return Err((StatusCode::CONFLICT, "原账号与已绑定的飞牛入口身份不符"));
-            }
-        }
-        Ok(())
-    };
-    tokio::time::timeout(Duration::from_secs(6), check)
-        .await
-        .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, "校验原账号超时"))?
 }

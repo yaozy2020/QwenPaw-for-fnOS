@@ -146,13 +146,26 @@
     document.getElementById("title").textContent = text.pubFailTitle;
     document.getElementById("message").textContent = text.pubFailMsg(detail);
   }
+  function cookieValue(cookie, name) {
+    var value;
+    var parts = cookie.split(";");
+    for (var i = 0; i < parts.length; i += 1) {
+      var separator = parts[i].indexOf("=");
+      if (separator < 0 || parts[i].slice(0, separator).trim() !== name) continue;
+      if (value !== undefined) return "";
+      value = parts[i].slice(separator + 1).trim();
+    }
+    return value;
+  }
+  function readCsrfToken(cookie) {
+    var host = cookieValue(cookie, "__Host-qwenpaw_csrf");
+    return host !== undefined ? host : (cookieValue(cookie, "qwenpaw_csrf") || "");
+  }
   try {
-    var csrf = document.cookie.split(";").map(function (part) { return part.trim(); }).find(function (part) {
-      return part.startsWith("__Host-qwenpaw_csrf=") || part.startsWith("qwenpaw_csrf=");
-    });
+    var csrf = readCsrfToken(document.cookie);
     fetch("/app/qwenpaw/api/authorized-dirs/result", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf ? csrf.slice(csrf.indexOf("=") + 1) : "" },
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
       body: JSON.stringify({ state: result.state, search: location.search }),
       keepalive: true
     }).then(function (response) {
@@ -192,6 +205,10 @@
     window.location.replace("/app/qwenpaw/#authorization");
   }
   document.getElementById("close").addEventListener("click", function () {
+    if (window.parent !== window) {
+      try { window.parent.postMessage({ type: "qwenpaw:authorized-directory-cancel", state: result.state }, location.origin); } catch (_) {}
+      return;
+    }
     returnToConsole();
     forceReturnConsole();
   });

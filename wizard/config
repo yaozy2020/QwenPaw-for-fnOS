@@ -17,12 +17,20 @@
                         "value": "debug"
                     },
                     {
+                        "label": "Trace - 跟踪信息",
+                        "value": "trace"
+                    },
+                    {
                         "label": "Warning - 警告信息",
                         "value": "warning"
                     },
                     {
                         "label": "Error - 错误信息",
                         "value": "error"
+                    },
+                    {
+                        "label": "Critical - 严重错误",
+                        "value": "critical"
                     }
                 ],
                 "rules": [

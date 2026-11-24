@@ -143,6 +143,9 @@ test("i18n: localizeBackendMessage translates known codes and falls back to raw 
   assert.equal(localizeBackendMessage("service_started", "QwenPaw 已启动", "en"), "QwenPaw started");
   assert.equal(localizeBackendMessage("service_started", "QwenPaw 已启动", "zh-CN"), "QwenPaw 已启动");
   assert.equal(localizeBackendMessage("port_in_use", "端口已被内核或管理器使用", "en"), "Port is already used by the kernel or supervisor");
+  assert.equal(localizeBackendMessage("csrf_refreshed", "Forbidden", "zh-CN"), "页面安全凭证已刷新，请重新执行操作");
+  assert.equal(localizeBackendMessage("csrf_refreshed", "Forbidden", "en"), "Security credential refreshed. Please retry the action.");
+  assert.equal(localizeBackendMessage("native_auth_adopted_restart_required", "Forbidden", "zh-CN"), "当前内核由管理服务重启后接管，请先在概览重启 QwenPaw 服务，再重置密码");
   assert.equal(localizeBackendMessage("unknown_code", "custom detail", "en"), "custom detail");
   assert.equal(localizeBackendMessage(undefined, "raw error", "en"), "raw error");
 });

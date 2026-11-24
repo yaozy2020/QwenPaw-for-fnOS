@@ -10,7 +10,7 @@ import { createInstallCoordinator } from "./installCoordinator";
 import { createInstallProgressPanel } from "./installProgressPanel";
 import { createLogPanel } from "./logPanel";
 import { createPollingLifecycle } from "./pollingLifecycle";
-import { createNavigation, type ConsoleView } from "./navigation";
+import { createConsoleRouter, createNavigation, type ConsoleView } from "./navigation";
 import { operationSucceeded } from "./apiResult";
 import { createPrompt } from "./modal";
 import { createSettingsPanel } from "./settingsPanel";
@@ -138,7 +138,8 @@ async function checkOnlineVersions(): Promise<void> {
 const pickVersion = versionPanel.pickVersion;
 const currentInstallAction = versionPanel.currentInstallAction;
 
-const statusPanel = createStatusPanel({ api, state: management, versionPanel, errorMessage, updateOverviewInstaller });
+const statusPanel = createStatusPanel({ api, state: management, versionPanel, errorMessage, updateOverviewInstaller,
+  visible: () => navigation.section === 'overview' || navigation.section === null });
 function fetchStatus(snapshot?: StatusResponse): Promise<void> { return statusPanel.refresh(snapshot); }
 function supervisorReachable(): boolean | null { return statusPanel.reachable(); }
 function recoveryReason(): string { return statusPanel.recoveryReason(); }
@@ -167,7 +168,8 @@ const showTaskDetails = installProgress.showTaskDetails;
 const updateTaskCenterButton = installProgress.updateTaskCenterButton;
 
 
-const navigation = createNavigation(enterView);
+const router = createConsoleRouter();
+const navigation = createNavigation(router, enterView);
 const logPanel = createLogPanel({ api, showToast, confirm: showModal, errorMessage, visible: () => navigation.section === 'logs' });
 const fetchLogs = logPanel.refresh;
 const clearTerminalLogs = logPanel.clear;
@@ -275,12 +277,17 @@ const panel = {
 export type PanelContext = typeof panel;
 const stopHostTitle = createHostTitle(() => (webEntry.open ? "" : navigation.title), trimApp);
 const app = createApp(App).provide(panelKey, panel);
+app.use(router);
+navigation.start();
 app.onUnmount(() => {
   stopHostTitle();
   navigation.stop();
   statusPolling.destroy();
   statusPanel.destroy();
   logPanel.destroy();
+  installProgress.destroy();
+  settingsPanel.destroy();
+  authorizedDirsPanel.destroy();
   statusEvents?.close();
   statusEvents = null;
   if (toastTimer !== null) {
@@ -304,6 +311,7 @@ function loadDeployment(): void {
   void fetchVersionList();
 }
 function enterView(view: ConsoleView | null): void {
+  statusPanel.viewChanged();
   logPanel.viewChanged();
   syncStatusEvents();
   if (view === null || view === 'version' || (view === 'overview' && needsInstaller())) loadDeployment();
@@ -316,11 +324,11 @@ function enterView(view: ConsoleView | null): void {
     void authorizedDirsPanel.refresh();
   }
 }
-navigation.start();
 fetchStatus();
 statusPolling.start();
 
 function resumeVisiblePage(): void {
+  statusPanel.viewChanged();
   if (document.hidden) {
     syncStatusEvents();
     return;

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, useTemplateRef } from 'vue';
-import NativeLoginDialog from './NativeLoginDialog.vue';
 import ResetPasswordDialog from './ResetPasswordDialog.vue';
 import type { ManagementState } from '../managementState';
 import { localeMode, setLocaleMode, t, type LocaleMode, type MessageKey } from '../i18n';
@@ -24,9 +23,8 @@ const uiStyleOptions: readonly { value: UiStyle; labelKey: MessageKey }[] = [
 ];
 
 const props = defineProps<{ state: ManagementState }>();
-const emit = defineEmits<{ servicePort: []; proxyPort: []; useNative: [username: string, password: string]; scope: [value: boolean]; reset: [password: string]; migrate: [] }>();
+const emit = defineEmits<{ servicePort: []; proxyPort: []; scope: [value: boolean]; reset: [password: string]; migrate: [] }>();
 const proxyKnown = computed(() => props.state.proxyPort !== null && props.state.proxyPublic !== null);
-const migration = useTemplateRef<InstanceType<typeof NativeLoginDialog>>('migration');
 const recovery = useTemplateRef<InstanceType<typeof ResetPasswordDialog>>('recovery');
 
 function changeScope(event: Event) {
@@ -71,11 +69,7 @@ function changeScope(event: Event) {
     <div class="info-row">
       <span class="info-label">{{ t('config.externalLogin') }}</span>
       <div class="row-inline">
-        <span id="proxyPasswordState" class="info-val" aria-live="polite">{{ state.proxyPasswordConfigured === true ? t('config.proxyPasswordLegacy') : state.proxyPasswordConfigured === false ? t('config.proxyPasswordNative') : t('config.proxyPasswordUnknown') }}</span>
-        <template v-if="state.proxyPasswordConfigured === true">
-          <button type="button" class="btn-outline btn-xs" :disabled="state.pending" @click="migration?.open()">{{ t('config.switchToNative') }}</button>
-          <NativeLoginDialog ref="migration" :disabled="state.pending || state.proxyPasswordConfigured !== true" @submit="(u, p) => emit('useNative', u, p)" />
-        </template>
+        <span id="proxyPasswordState" class="info-val">{{ t('config.proxyPasswordNative') }}</span>
       </div>
     </div>
     <label class="toggle-row">
@@ -92,9 +86,16 @@ function changeScope(event: Event) {
       <span id="valAdminStatus" class="info-val is-muted" :style="{ color: `var(--${state.auth.tone})` }">{{ state.auth.admin }}</span>
     </div>
     <p id="valAuthDesc" class="card-note">{{ state.auth.description }}</p>
+    <template v-if="state.entryLogin === true">
+      <div class="info-row" id="entryLoginState">
+        <span class="info-label">{{ t('config.desktopEntry') }}</span>
+        <span class="info-val is-muted">{{ t('config.desktopEntrySession') }}</span>
+      </div>
+      <p id="entryLoginDescription" class="card-note">{{ t('config.entryLoginDesc') }}</p>
+    </template>
   </div>
   <div class="card-actions">
-    <button type="button" class="btn-outline btn-sm btn-block" :disabled="state.entryLogin !== false || state.saving" :aria-disabled="state.pending" @click="emit('migrate')">{{ state.entryLogin ? t('config.entryMigrated') : t('config.migrateEntry') }}</button>
+    <button v-if="state.entryLogin !== true" type="button" class="btn-outline btn-sm btn-block" :disabled="state.entryLogin !== false || state.saving" :aria-disabled="state.pending" @click="emit('migrate')">{{ t('config.migrateEntry') }}</button>
     <button id="resetAuthBtn" type="button" class="btn-outline btn-sm btn-block" :disabled="state.pending" @click="!state.pending && recovery?.open()">{{ t('config.resetAdminPassword') }}</button>
     <ResetPasswordDialog ref="recovery" :disabled="state.pending" @submit="p => emit('reset', p)" />
   </div>

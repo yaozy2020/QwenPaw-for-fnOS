@@ -111,6 +111,7 @@ pub fn resolve_mirror(mirror: &str) -> Result<String, String> {
         "tsinghua" => "https://pypi.tuna.tsinghua.edu.cn/simple",
         "aliyun" => "https://mirrors.aliyun.com/pypi/simple/",
         "ustc" => "https://pypi.mirrors.ustc.edu.cn/simple/",
+        "tencent" => "https://mirrors.cloud.tencent.com/pypi/simple",
         value => value,
     };
     validate_mirror(resolved)?;
@@ -152,6 +153,10 @@ mod mirror_validation_tests {
         assert_eq!(
             resolve_mirror("ustc").unwrap(),
             "https://pypi.mirrors.ustc.edu.cn/simple/"
+        );
+        assert_eq!(
+            resolve_mirror("tencent").unwrap(),
+            "https://mirrors.cloud.tencent.com/pypi/simple"
         );
         assert_eq!(
             resolve_mirror("https://mirror.example/custom/simple").unwrap(),

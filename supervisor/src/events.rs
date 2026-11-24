@@ -1,29 +1,23 @@
-//! 状态广播:快照或失效通知的 broadcast 通道,axum SSE 直接订阅。
+//! 状态失效通知。订阅者合并尚未消费的通知，不保存快照或变更历史。
 
-use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 #[derive(Clone)]
 pub struct Events {
-    tx: broadcast::Sender<String>,
+    tx: watch::Sender<()>,
 }
 
 impl Events {
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(16);
+        let (tx, _) = watch::channel(());
         Self { tx }
     }
 
-    /// 广播一份快照 JSON(调用方已序列化);无订阅者时为空操作。
-    #[cfg(test)]
-    pub fn publish(&self, snapshot_json: String) {
-        let _ = self.tx.send(snapshot_json);
-    }
-
     pub fn invalidate(&self) {
-        let _ = self.tx.send(String::new());
+        let _ = self.tx.send(());
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe(&self) -> watch::Receiver<()> {
         self.tx.subscribe()
     }
 }

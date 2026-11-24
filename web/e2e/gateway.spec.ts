@@ -556,7 +556,7 @@ test("lost acceptance attaches without replay, polls identified logs and times o
   } finally {
     releaseInstall();
   }
-  await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+  await expect(page.locator("#upTitle")).toHaveText("QwenPaw 安装任务");
   await expect.poll(() => logQueries.length).toBeGreaterThan(0);
   expect(logQueries.every(query => query.seq === String(identity.seq) && query.instance === identity.instance)).toBe(true);
   await expect(page.locator("#upTerminal")).toContainText("matching task log");
@@ -803,7 +803,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
     expect(new Set(canceledEndpoints).size).toBe(canceledEndpoints.length);
   }
   await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
-  await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+  await expect(page.locator("#upTitle")).toHaveText("QwenPaw 安装任务");
   await expect.poll(() => installStatusRequests.length).toBeGreaterThan(beforeRebuildPoll);
   await expect.poll(async () => {
     const seen = await observations(request);
@@ -883,7 +883,7 @@ test("real Gateway Chromium flow persists, restores accepted install progress, h
     }).toBe(true);
     const attachedTask = lostReceiptTask!;
     await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
-    await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+    await expect(page.locator("#upTitle")).toHaveText("QwenPaw 安装任务");
     await expect.poll(() => installLogUrls.some(url => {
       const parsed = new URL(url);
       return parsed.searchParams.get("seq") === String(attachedTask.seq)

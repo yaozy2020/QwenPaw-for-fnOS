@@ -196,9 +196,6 @@ async fn forward_impl(
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     let (mut parts, body) = request.into_parts();
-    let mut rotated = parts
-        .extensions
-        .remove::<tokio::sync::watch::Receiver<()>>();
     let legacy_cleanup = (rewrite_paths
         && !migrated
         && method == Method::DELETE
@@ -253,19 +250,9 @@ async fn forward_impl(
             tokio::spawn(async move {
                 let _permit = permit;
                 let mut stream = upstream_body.into_data_stream();
-                let revocation = async {
-                    match rotated.as_mut() {
-                        Some(watch) => {
-                            let _ = watch.changed().await;
-                        }
-                        None => std::future::pending::<()>().await,
-                    }
-                };
-                tokio::pin!(revocation);
                 loop {
                     tokio::select! {
                         biased;
-                        _ = &mut revocation => break,
                         _ = sender.closed() => break,
                         chunk = stream.next() => {
                             let Some(chunk) = chunk else { break; };
@@ -516,7 +503,7 @@ enum RewriteKind {
     Css,
 }
 
-fn is_hashed_asset(path: &str) -> bool {
+pub(super) fn is_hashed_asset(path: &str) -> bool {
     let Some(filename) = path.strip_prefix("/assets/") else {
         return false;
     };
@@ -1069,7 +1056,7 @@ fn rewrite_set_cookie(value: &HeaderValue, rewrite_path: bool) -> Option<HeaderV
 fn is_internal_cookie(name: &str) -> bool {
     name.strip_prefix("__Host-")
         .unwrap_or(name)
-        .starts_with(crate::proxy_auth::COOKIE_PREFIX)
+        .starts_with("qwenpaw-proxy-")
         || matches!(
             name,
             "qwenpaw_csrf"

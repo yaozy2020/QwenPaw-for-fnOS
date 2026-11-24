@@ -116,43 +116,46 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
 # 顶层纯净白名单:清单/许可/图标 (mode 0644)
-cp "$PROJ_DIR/manifest" "$STAGE/manifest"
+cp "$PROJ_DIR/manifest" "$STAGE/manifest" || { echo "ERROR: 复制 manifest 失败"; exit 1; }
 cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE" || { echo "ERROR: 复制 LICENSE 失败"; exit 1; }
 cp "$PROJ_DIR/ICON.PNG" "$PROJ_DIR/ICON_256.PNG" "$STAGE/" || { echo "ERROR: 复制图标失败"; exit 1; }
-chmod 0644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE/ICON.PNG" "$STAGE/ICON_256.PNG"
+chmod 0644 "$STAGE/manifest" "$STAGE/LICENSE" "$STAGE/ICON.PNG" "$STAGE/ICON_256.PNG" || exit 1
 
 # cmd 目录白名单精准物化 (严禁任何未跟踪的测试/.pid残留入包)
 mkdir -p "$STAGE/cmd"
 for f in main install_init install_callback upgrade_init upgrade_callback uninstall_init uninstall_callback config_init config_callback; do
-  cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f"
-  chmod 0755 "$STAGE/cmd/$f"
+  cp "$PROJ_DIR/cmd/$f" "$STAGE/cmd/$f" || { echo "ERROR: 复制 cmd/$f 失败"; exit 1; }
+  chmod 0755 "$STAGE/cmd/$f" || exit 1
 done
-cp "$SUP_BIN_SRC" "$STAGE/cmd/qwenpaw-supervisor"
-chmod 0755 "$STAGE/cmd/qwenpaw-supervisor"
+cp "$SUP_BIN_SRC" "$STAGE/cmd/qwenpaw-supervisor" || { echo "ERROR: 复制监督者入口失败"; exit 1; }
+chmod 0755 "$STAGE/cmd/qwenpaw-supervisor" || exit 1
 
 # config 目录白名单精准物化 (mode 0644)
 mkdir -p "$STAGE/config"
-cp "$PROJ_DIR/config/privilege" "$STAGE/config/privilege"
+cp "$PROJ_DIR/config/privilege" "$STAGE/config/privilege" || { echo "ERROR: 复制 config/privilege 失败"; exit 1; }
 cp "$PROJ_DIR/config/resource" "$STAGE/config/resource" || { echo "ERROR: 复制 config/resource 失败"; exit 1; }
-chmod 0644 "$STAGE/config/privilege" "$STAGE/config/resource"
+chmod 0644 "$STAGE/config/privilege" "$STAGE/config/resource" || exit 1
 
 # wizard 目录白名单精准物化 (mode 0644)
 mkdir -p "$STAGE/wizard"
 for f in install upgrade config uninstall; do
-  [ -f "$PROJ_DIR/wizard/$f" ] && cp "$PROJ_DIR/wizard/$f" "$STAGE/wizard/$f" && chmod 0644 "$STAGE/wizard/$f"
+  if [ -f "$PROJ_DIR/wizard/$f" ]; then
+    cp "$PROJ_DIR/wizard/$f" "$STAGE/wizard/$f" || { echo "ERROR: 复制 wizard/$f 失败"; exit 1; }
+    chmod 0644 "$STAGE/wizard/$f" || exit 1
+  fi
 done
 
 # app 运行时白名单精准物化 (统一 Gateway 静态控制台与 4 个桌面图标)
 mkdir -p "$STAGE/app/ui/images" "$STAGE/app/www" "$STAGE/app/bin"
 
-cp "$PROJ_DIR/app/ui/config" "$STAGE/app/ui/config"
-chmod 0644 "$STAGE/app/ui/config"
+cp "$PROJ_DIR/app/ui/config" "$STAGE/app/ui/config" || { echo "ERROR: 复制 app/ui/config 失败"; exit 1; }
+chmod 0644 "$STAGE/app/ui/config" || exit 1
 
 # 复制 4 个桌面入口图标 (P1-2 修复)
 for icon in console_64.png console_256.png icon_64.png icon_256.png; do
   if [ -f "$PROJ_DIR/app/ui/images/$icon" ]; then
-    cp "$PROJ_DIR/app/ui/images/$icon" "$STAGE/app/ui/images/$icon"
-    chmod 0644 "$STAGE/app/ui/images/$icon"
+    cp "$PROJ_DIR/app/ui/images/$icon" "$STAGE/app/ui/images/$icon" || { echo "ERROR: 复制桌面图标 $icon 失败"; exit 1; }
+    chmod 0644 "$STAGE/app/ui/images/$icon" || exit 1
   else
     echo -e "${RED}ERROR: 必需桌面图标缺失: app/ui/images/$icon${NC}"
     exit 1
@@ -160,8 +163,8 @@ for icon in console_64.png console_256.png icon_64.png icon_256.png; do
 done
 
 # 监督者二进制入包 (mode 0755)
-cp "$SUP_BIN_SRC" "$STAGE/app/bin/qwenpaw-supervisor"
-chmod 0755 "$STAGE/app/bin/qwenpaw-supervisor"
+cp "$SUP_BIN_SRC" "$STAGE/app/bin/qwenpaw-supervisor" || { echo "ERROR: 复制监督者运行时失败"; exit 1; }
+chmod 0755 "$STAGE/app/bin/qwenpaw-supervisor" || exit 1
 
 # 控制台以编译产物覆盖并生成预压缩兄弟文件
 if [ ! -f "$PROJ_DIR/web/dist/index.html" ]; then
@@ -169,9 +172,9 @@ if [ ! -f "$PROJ_DIR/web/dist/index.html" ]; then
   exit 1
 fi
 CONSOLE_HTML="$STAGE/app/www/index.html"
-cp "$PROJ_DIR/web/dist/index.html" "$CONSOLE_HTML"
-cp "$PROJ_DIR/web/dist/auth-callback.html" "$STAGE/app/www/auth-callback.html"
-chmod 0644 "$CONSOLE_HTML" "$STAGE/app/www/auth-callback.html"
+cp "$PROJ_DIR/web/dist/index.html" "$CONSOLE_HTML" || { echo "ERROR: 复制控制台 HTML 失败"; exit 1; }
+cp "$PROJ_DIR/web/dist/auth-callback.html" "$STAGE/app/www/auth-callback.html" || { echo "ERROR: 复制授权回调 HTML 失败"; exit 1; }
+chmod 0644 "$CONSOLE_HTML" "$STAGE/app/www/auth-callback.html" || exit 1
 
 if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ]; then
   "$NODE_BIN" -e 'const {readFileSync,writeFileSync}=require("fs"),{gzipSync,brotliCompressSync,constants}=require("zlib");const f=process.argv[1],b=readFileSync(f);writeFileSync(f+".gz",gzipSync(b,{level:9}));writeFileSync(f+".br",brotliCompressSync(b,{params:{[constants.BROTLI_PARAM_QUALITY]:11}}))' "$CONSOLE_HTML" \
@@ -190,8 +193,8 @@ if [ ! -f "$PROJ_DIR/patches/$PATCH_NAME/manifest.json" ]; then
 fi
 PATCH_STAGE="$STAGE/app/www/patches/$PATCH_NAME"
 mkdir -p "$STAGE/app/www/patches"
-cp -R "$PROJ_DIR/patches/$PATCH_NAME" "$PATCH_STAGE"
-find "$PATCH_STAGE" -type f -exec chmod 0644 {} +
+cp -R "$PROJ_DIR/patches/$PATCH_NAME" "$PATCH_STAGE" || { echo "ERROR: 复制兼容补丁载荷失败"; exit 1; }
+find "$PATCH_STAGE" -type f -exec chmod 0644 {} + || exit 1
 
 # 统一所有目录为 0755 (P1-3 权限归一化)
 find "$STAGE" -type d -exec chmod 0755 {} +

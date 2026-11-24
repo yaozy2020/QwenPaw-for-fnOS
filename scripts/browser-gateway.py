@@ -673,7 +673,7 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
                   "upstreamHost": headers["Host"], "fetchSite": headers.get("Sec-Fetch-Site"),
                   "contentType": headers.get("Content-Type"), "csrfHeader": bool(headers.get("X-CSRF-Token")),
                   "csrfQuery": "_csrf=" in parsed.query,
-                  "body": {} if parsed.path in (API + "web-proxy/password", API + "web-proxy/use-native-login", API + "entry-login/migrate", API + "kernel/admin-password") else data, "receiptLost": False}
+                  "body": {} if parsed.path in (API + "entry-login/migrate", API + "kernel/admin-password") else data, "receiptLost": False}
         require(TOKEN.encode() not in body, "private token appeared in a browser request")
         connection = UnixHTTPConnection(fixture)
         try:

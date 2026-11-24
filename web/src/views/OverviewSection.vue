@@ -37,7 +37,7 @@ async function refreshDashboard() {
     </div>
     <div class="card-body">
       <div id="statusCardMount">
-        <StatusCard v-if="status.data" :data="status.data" :uptime="status.uptime" />
+        <StatusCard v-if="status.data" :data="status.data" :uptime="status.uptime" :cpu="status.cpu" :memKB="status.memKB" />
         <template v-else><div class="status-summary">
           <div class="status-head"><span class="status-dot" aria-hidden="true"></span><span class="status-text">{{ t('overview.connecting') }}</span></div>
           <p class="status-description">{{ t('overview.connectingDesc') }}</p>

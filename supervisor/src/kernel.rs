@@ -244,6 +244,12 @@ impl KernelManager {
         s.native_proxy_identity.is_some() && s.native_proxy_identity == s.tracked_identity
     }
 
+    pub fn native_proxy_restart_required(&self) -> bool {
+        !self.supports_native_proxy()
+            && self.status_now().running
+            && crate::entry_login::compatible(Path::new(&self.cfg.venv_dir))
+    }
+
     pub fn entry_record(&self) -> std::path::PathBuf {
         crate::entry_login::path(Path::new(&self.cfg.pid_file))
     }
@@ -1099,7 +1105,13 @@ mod tests {
         let dir = TestDir::new("display-version-change");
         let state = dir.state(crate::api::test_support::free_port());
         assert!(!state.kernel.installed());
-        assert!(state.kernel.state.lock().unwrap().version_cache_at.is_none());
+        assert!(state
+            .kernel
+            .state
+            .lock()
+            .unwrap()
+            .version_cache_at
+            .is_none());
         let python = install_python(&dir, &state, "");
         fs::write(&python, "#!/bin/sh\nd=$(dirname \"$0\"); v=$(cat \"$d/version\"); echo call >> \"$d/calls\"; while [ ! -f \"$d/release\" ]; do sleep .02; done; echo \"$v\"\n").unwrap();
         let bin = python.parent().unwrap();
@@ -1648,6 +1660,46 @@ time.sleep(3600)
             std::thread::sleep(Duration::from_millis(10));
         }
         crate::api::test_support::ChildGuard(child)
+    }
+
+    #[test]
+    fn adopted_compatible_kernel_requires_restart_for_native_password_recovery() {
+        let dir = crate::api::test_support::TestDir::new("adopted-native-password");
+        let port = crate::api::test_support::free_port();
+        let state = dir.state(port);
+        let python = install_discoverable_python(&dir, &state);
+        let child = spawn_discoverable_kernel(&dir, &python, port);
+        assert!(state.kernel.status_now().running);
+        assert!(!state.kernel.native_proxy_restart_required());
+
+        let app = std::path::Path::new(&state.home_dir)
+            .join("venv/lib/python3.11/site-packages/qwenpaw/app");
+        std::fs::create_dir_all(&app).unwrap();
+        for (name, bytes) in [
+            (
+                "fnos_entry.py",
+                include_bytes!(
+                    "../../patches/qwenpaw-2.3.0.post1-base-path/payload/app/fnos_entry.py"
+                )
+                .as_slice(),
+            ),
+            (
+                "auth.py",
+                include_bytes!("../../patches/qwenpaw-2.3.0.post1-base-path/payload/app/auth.py")
+                    .as_slice(),
+            ),
+            (
+                "_app.py",
+                include_bytes!("../../patches/qwenpaw-2.3.0.post1-base-path/payload/app/_app.py")
+                    .as_slice(),
+            ),
+        ] {
+            std::fs::write(app.join(name), bytes).unwrap();
+        }
+        assert!(state.kernel.native_proxy_restart_required());
+        assert!(!state.kernel.supports_native_proxy());
+        state.kernel.stop_sync();
+        drop(child);
     }
 
     #[test]

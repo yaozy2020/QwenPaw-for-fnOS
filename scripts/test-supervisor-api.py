@@ -341,6 +341,54 @@ def test_authentication_and_methods(fixture):
     print(f"PASS: {len(routes)} routes reject missing/wrong tokens and wrong methods with zero fixture side effects")
 
 
+def test_auth_status(fixture):
+    fixture.start()
+    response_file = fixture.root / "home/venv/.qwenpaw-test-runtime-auth-response"
+    cases = [
+        ("500 Internal Server Error", '{"enabled":false,"has_users":false}', "unknown"),
+        ("200 OK", '{}', "unknown"),
+        ("200 OK", '{"enabled":false,"has_users":null}', "unknown"),
+        ("200 OK", '{"enabled":false,"has_users":false}', "disabled"),
+        ("200 OK", '{"enabled":true,"has_users":false}', "uninitialized"),
+        ("200 OK", '{"enabled":true,"has_users":true}', "protected"),
+    ]
+    code, result = fixture.request("/start", {})
+    assert code == 200 and result["success"], result
+    for http_status, body, expected in cases:
+        response_file.unlink(missing_ok=True)
+        wait_for(lambda: fixture.request("/status")[1]["authStatus"] == "protected")
+        response_file.write_bytes((
+            f"HTTP/1.1 {http_status}\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+        ).encode())
+        wait_for(lambda: fixture.request("/status")[1]["authStatus"] == expected)
+        code, status = fixture.request("/status")
+        assert code == 200 and status["running"], status
+        assert status["authStatus"] == expected, (http_status, body, status)
+        assert status["authEnabled"] is (expected == "protected"), status
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{fixture.sup_port}/events",
+            headers={"X-Supervisor-Token": TOKEN},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+            assert response.headers.get_content_type() == "text/event-stream"
+            event = None
+            while True:
+                raw = response.readline()
+                assert raw, "stream ended before the snapshot"
+                line = raw.decode().strip()
+                if line.startswith("event:"):
+                    event = line.removeprefix("event:").strip()
+                if line.startswith("data:"):
+                    assert event == "snapshot", event
+                    snapshot = json.loads(line.removeprefix("data:"))
+                    assert snapshot["authStatus"] == expected, snapshot
+                    assert snapshot["authEnabled"] is (expected == "protected"), snapshot
+                    break
+    print("PASS: auth probe errors and incomplete fields stay unknown in /status and SSE; valid states preserved")
+
+
 def test_logs(fixture):
     fixture.start()
     path = fixture.root / "var/qwenpaw.log"
@@ -686,6 +734,7 @@ def main():
             cases = [
                 ("settings", test_settings),
                 ("auth-methods", test_authentication_and_methods),
+                ("auth-status", test_auth_status),
                 ("logs", test_logs),
                 ("settings-crash", test_settings_crash_recovery),
                 ("settings-disconnect", test_disconnected_settings_finishes_rollback),

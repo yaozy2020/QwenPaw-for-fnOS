@@ -1,3 +1,4 @@
+import { fetchWithTimeout, readCsrfToken } from "./api.ts";
 import { t } from "./i18n.ts";
 
 export interface ProjectDirEntry {
@@ -104,8 +105,7 @@ function upstreamToken(): string {
 
 function managementToken(): string {
   try {
-    const part = document.cookie.split(";").find((item) => item.trim().startsWith("__Host-qwenpaw_csrf=") || item.trim().startsWith("qwenpaw_csrf="));
-    return part ? part.slice(part.indexOf("=") + 1).trim() : "";
+    return readCsrfToken(document.cookie);
   } catch { return ""; }
 }
 
@@ -114,7 +114,7 @@ async function upstreamRequest(path: string, init: RequestInit = {}): Promise<Re
   const token = upstreamToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  return fetch(`/app/qwenpaw/web/api${path}`, { ...init, headers });
+  return fetchWithTimeout(`/app/qwenpaw/web/api${path}`, { ...init, headers }, 10_000);
 }
 
 function upstreamError(data: { detail?: unknown; message?: unknown }, fallback: string): Error {
@@ -145,7 +145,7 @@ async function saveProjectDirs(entries: ProjectDirEntry[]): Promise<void> {
 }
 
 export async function checkDirectory(path: string): Promise<DirectoryHealth> {
-  const response = await fetch("/app/qwenpaw/api/authorized-dirs/check", {
+  const response = await fetchWithTimeout("/app/qwenpaw/api/authorized-dirs/check", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-CSRF-Token": managementToken() },
     body: JSON.stringify({ path }),
@@ -171,7 +171,7 @@ function randomState(): string {
   try { return crypto.randomUUID(); } catch { return `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 }
 
-interface AuthSurface {
+export interface AuthSurface {
   closed: boolean;
   navigate(url: string): void;
   close(): void;
@@ -214,10 +214,10 @@ function openAuthorizationSurface(): AuthSurface {
   };
 }
 
-function waitForAuthorization(path: string): Promise<AuthResult> {
+function waitForAuthorization(path: string, providedSurface?: AuthSurface): Promise<AuthResult> {
   const state = randomState();
   const url = buildAuthorizationUrl(window.location.origin, state, CALLBACK_PATH, path);
-  const surface = openAuthorizationSurface();
+  const surface = providedSurface ?? openAuthorizationSurface();
   return new Promise((resolve, reject) => {
     let settled = false;
     let resultPolling = false;
@@ -248,7 +248,13 @@ function waitForAuthorization(path: string): Promise<AuthResult> {
     };
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
-      accept(event.data || {});
+      const payload = event.data || {};
+      if (payload.type === "qwenpaw:authorized-directory-cancel") {
+        if (payload.state === state) finish(new Error(t("authz.err.cancelled")));
+        return;
+      }
+      if (typeof payload.type === "string" && payload.type !== "qwenpaw:authorized-directory") return;
+      accept(payload);
     };
     const onStorage = (event: StorageEvent) => {
       if (event.key !== RESULT_KEY || !event.newValue) return;
@@ -315,12 +321,12 @@ export function clearStoredAuthorizationResult(): void {
 }
 
 export async function readAuthorizationResult(state: string): Promise<string> {
-  const response = await fetch(`/app/qwenpaw/api/authorized-dirs/result?state=${encodeURIComponent(state)}`, { cache: "no-store" });
+  const response = await fetchWithTimeout(`/app/qwenpaw/api/authorized-dirs/result?state=${encodeURIComponent(state)}`, { cache: "no-store" });
   if (!response.ok) return "";
   const data = await response.json().catch(() => ({}));
   return data.ok && typeof data.search === "string" ? data.search : "";
 }
 
-export async function authorizeDirectory(path = ""): Promise<AuthResult> {
-  return waitForAuthorization(path);
+export async function authorizeDirectory(path = "", surface?: AuthSurface): Promise<AuthResult> {
+  return waitForAuthorization(path, surface);
 }

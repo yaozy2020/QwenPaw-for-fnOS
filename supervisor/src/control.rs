@@ -417,16 +417,7 @@ fn handle_connection(mut stream: UnixStream, state: AppState, runtime: tokio::ru
                 }
             };
             runtime.block_on(async {
-                let outcome = crate::runtime_settings::apply(&state.core, patch).await;
-                if outcome.notify_observers {
-                    *state
-                        .auth_cache
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner()) =
-                        crate::api::AuthCache::default();
-                    state.events.invalidate();
-                }
-                outcome.result.map(|message| {
+                state.apply_runtime_settings(patch).await.map(|message| {
                     serde_json::json!({
                         "status": 200,
                         "ok": true,
@@ -929,7 +920,7 @@ mod tests {
             serde_json::json!({".url": {"qwenpaw.main": {"port": state.kernel.port().to_string()}}}).to_string(),
         )
         .unwrap();
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
         let guard = state.core.begin_operation().unwrap();
         let client = UnixStream::connect(&path).unwrap();
         let (server, _) = listener.accept().unwrap();
@@ -961,7 +952,7 @@ mod tests {
             fs::read_to_string(Path::new(&state.var_dir).join("qwenpaw-log-level")).unwrap(),
             "info\n"
         );
-        assert!(events.try_recv().is_ok());
+        assert!(events.has_changed().unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1215,7 +1206,7 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         let listener = bind_private_socket(&path).unwrap();
         let state = dir.state(crate::api::test_support::free_port());
         let runtime = tokio::runtime::Handle::current();
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
         install_python(
             &dir,
             &state,
@@ -1239,11 +1230,32 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         assert_eq!(response["success"], true);
         assert_eq!(response["running"], true);
         assert!(identity_is_valid);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         assert_eq!(
             state.install.snapshot().seq,
             response["seq"].as_u64().unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn private_settings_notifies_after_rollback_but_not_for_empty_patch() {
+        let dir = TestDir::new("control-settings-observers");
+        let state = dir.state(crate::api::test_support::free_port());
+        let listener = bind_private_socket(&socket_path(&dir, "control")).unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        let events = state.events.subscribe();
+
+        let response = exchange_request(&listener, &state, &runtime, b"{}");
+        assert_eq!(response["status"], 200);
+        assert_eq!(response["message"], "配置未更改");
+        assert!(!events.has_changed().unwrap());
+
+        fs::write(&state.ui_config_file, "invalid json").unwrap();
+        let response = exchange_request(&listener, &state, &runtime, br#"{"log_level":"debug"}"#);
+        assert_eq!(response["status"], 500);
+        assert!(events.has_changed().unwrap());
+        assert_eq!(state.kernel.log_level(), "info");
+        assert!(!Path::new(&state.var_dir).join("qwenpaw-log-level").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1275,13 +1287,13 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         let path = socket_path(&dir, "control");
         let listener = bind_private_socket(&path).unwrap();
         let runtime = tokio::runtime::Handle::current();
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
         let started = Instant::now();
         let response = exchange_request(&listener, &state, &runtime, br#"{"log_level":"info"}"#);
         let elapsed = started.elapsed();
 
         assert_eq!(response["status"], 200);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         assert_eq!(
             fs::read_to_string(Path::new(&state.var_dir).join("qwenpaw-log-level")).unwrap(),
             "info\n"

@@ -32,7 +32,7 @@ defineExpose({ open });
 </script>
 
 <template>
-  <dialog ref="dialog" class="about-dialog native-login-dialog" aria-labelledby="recoveryTitle" aria-describedby="recoveryHint" @close="clear">
+  <dialog ref="dialog" class="about-dialog reset-password-dialog" aria-labelledby="recoveryTitle" aria-describedby="recoveryHint" @close="clear">
     <form method="dialog" @submit.prevent="submit">
       <h3 id="recoveryTitle" class="modal-title">{{ t('resetPwd.title') }}</h3>
       <p id="recoveryHint" class="modal-msg">{{ t('resetPwd.hint') }}</p>

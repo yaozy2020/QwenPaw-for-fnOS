@@ -353,8 +353,7 @@ export function createInstallProgressPanel({
           raw.success = true;
           if (!upgradeLogsRendered) paintTaskLog([], () => t("progress.doneNoLogs"));
         }
-        const upModal = document.getElementById("upgradeModal");
-        if (upModal && !upModal.classList.contains("active")) {
+        if (!raw.open) {
           showToast(observed.outcome === "failed"
             ? t("progress.bgFailedToast", { action: resolveTitleAction() })
             : t("progress.bgDoneToast", { action: resolveTitleAction() }));
@@ -401,5 +400,10 @@ export function createInstallProgressPanel({
     updateTaskCenterButton,
     resume,
     restore,
+    destroy: () => {
+      ++upgradeRunId;
+      stopUpgradePolling();
+      document.documentElement.classList.remove("upgrade-modal-open");
+    },
   };
 }

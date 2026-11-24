@@ -290,7 +290,7 @@ async fn web_proxy_port_api_requires_token_and_reports_the_active_port() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response_json(response).await,
-        json!({"success": true, "port": port, "public": false, "passwordConfigured": false})
+        json!({"success": true, "port": port, "public": false})
     );
 }
 
@@ -393,7 +393,7 @@ async fn web_proxy_port_api_changes_access_and_preserves_it_when_omitted() {
         .unwrap();
     let (mut previous_port, _) = manager.state().await;
     state.web_proxy = Some(Arc::new(manager.clone()));
-    let mut events = state.events.subscribe();
+    let events = state.events.subscribe();
     let router = api::build_router(state.clone());
 
     for (body, expected_public) in [
@@ -409,7 +409,7 @@ async fn web_proxy_port_api_changes_access_and_preserves_it_when_omitted() {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         let new_port = response_json(response).await["port"].as_u64().unwrap() as u16;
         assert_ne!(new_port, previous_port);
         assert_eq!(manager.state().await, (new_port, expected_public));
@@ -432,7 +432,7 @@ async fn web_proxy_port_api_changes_access_and_preserves_it_when_omitted() {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response_json(response).await,
-            json!({"success": true, "port": new_port, "public": expected_public, "passwordConfigured": false})
+            json!({"success": true, "port": new_port, "public": expected_public})
         );
         assert!(wait_until_bindable(previous_port).await);
         previous_port = new_port;

@@ -17,7 +17,6 @@ mod management;
 mod mirror;
 mod platform;
 mod procfs;
-mod proxy_auth;
 mod release_notes;
 mod runtime;
 mod runtime_settings;
@@ -285,88 +284,7 @@ fn serve() {
     };
     logf("token file ready");
 
-    // 孤儿安装清理:监督者异常退出时 pip(独立进程组)可能仍存活并继续改 venv。
-    // 凭 install.pid 找到候选,核对 /proc cmdline 身份(防 PID 复用误杀)后整组回收。
-    let orphan_cleanup_result = cleanup_orphan_install(&cfg.var_dir);
-    if let Err(error) = &orphan_cleanup_result {
-        logf(&format!("孤儿安装进程清理失败: {error}"));
-        install.block_recovery(format!("孤儿安装进程清理失败: {error}"));
-        kernel.stop_sync();
-    }
-
-    // 临时文件残骸清扫:必须在事务恢复之前,否则 service_port.tmp.* 之类的
-    // 半截文件会被后续 create_new 撞上而让写入永久失败。
-    let swept = crate::install::sweep_stale_tmp_files(&cfg.var_dir);
-    if swept > 0 {
-        logf(&format!("已清扫 {swept} 个临时文件残留"));
-    }
-
-    // venv 事务恢复:上次被 SIGKILL/断电遗留的中间状态自愈(必须在收养内核与开放 API 前完成)
-    let pin_file = format!("{}/qwenpaw-version", cfg.var_dir);
-    // 回滚前先停掉可能由中断安装拉起的内核:只回滚磁盘会留下
-    // "进程新版 + 磁盘旧版"的错配,而该进程的依赖已被抽走。
-    let stop_for_recovery = {
-        let k = Arc::clone(&kernel);
-        move || k.stop_verified_sync()
-    };
-    let recovery_error = if !orphan_cleanup_permits_recovery(&orphan_cleanup_result) {
-        orphan_cleanup_result.err()
-    } else {
-        match install::recover_pending_transactions(
-            std::path::Path::new(&cfg.kernel_venv),
-            std::path::Path::new(&pin_file),
-            Some(&*logf),
-            &stop_for_recovery,
-        ) {
-            Ok(report) => {
-                if report.recovered > 0 {
-                    logf(&format!(
-                        "recovered {} pending venv transaction(s)",
-                        report.recovered
-                    ));
-                }
-                if report.is_ready() {
-                    None
-                } else {
-                    Some(report.pending.join("; "))
-                }
-            }
-            Err(e) => Some(format!("recover pending transactions error: {e}")),
-        }
-    };
-    if let Some(reason) = recovery_error {
-        logf(&reason);
-        install.block_recovery(reason);
-        kernel.stop_sync();
-    }
-
-    let settings_journal = std::path::Path::new(&cfg.var_dir).join("settings-transaction.json");
-    let settings_recovery = match settings_journal.try_exists() {
-        Ok(false) => Ok(false),
-        Ok(true) => {
-            kernel.stop_sync();
-            settings_transaction::recover(
-                std::path::Path::new(&cfg.var_dir),
-                std::path::Path::new(&cfg.ui_config_file),
-            )
-        }
-        Err(e) => Err(e),
-    };
-    match settings_recovery {
-        Ok(true) => {
-            let restored = Config::load();
-            kernel.set_port(restored.kernel_port);
-            let _ = kernel.set_log_level(&restored.kernel_log_level);
-            logf("recovery: 已恢复中断前的端口、日志级别与桌面配置");
-        }
-        Ok(false) => {}
-        Err(e) => {
-            let reason = format!("配置事务恢复失败: {e}");
-            logf(&reason);
-            install.block_recovery(reason);
-            kernel.stop_sync();
-        }
-    }
+    recover_before_registration(&cfg, &kernel, &install, logf.as_ref());
 
     let self_pid = std::process::id();
     let self_starttime = std::fs::read_to_string(format!("/proc/{self_pid}/stat"))
@@ -389,41 +307,7 @@ fn serve() {
         .build()
         .expect("tokio runtime");
 
-    let auth = std::path::Path::new(&cfg.share_dir)
-        .parent()
-        .map(|p| p.join(".qwenpaw.secret/auth.json"));
-    if let Some(auth) = auth {
-        let transaction = auth_reset::AuthReset::new(&auth, std::path::Path::new(&cfg.var_dir));
-        let recovered = transaction.pending().and_then(|pending| {
-            if pending {
-                kernel.stop_sync();
-                if !kernel.last_stop_clean() {
-                    return Err(std::io::Error::other("认证恢复前无法安全停止内核"));
-                }
-                transaction.recover()?;
-                logf("recovery: 认证重置记录已恢复");
-            }
-            Ok(())
-        });
-        if let Err(error) = recovered {
-            let reason = format!("认证恢复失败: {error}");
-            logf(&reason);
-            install.block_recovery(reason);
-            kernel.stop_sync();
-        }
-    }
-
-    let proxy_port =
-        match settings_transaction::recover_web_proxy(std::path::Path::new(&cfg.var_dir)) {
-            Ok(_) => Config::load().web_proxy_port,
-            Err(error) => {
-                let reason = format!("反代配置恢复失败: {error}");
-                logf(&reason);
-                install.block_recovery(reason);
-                kernel.stop_sync();
-                None // Keep management available without exposing an ambiguous listener.
-            }
-        };
+    let proxy_port = recover_after_registration(&cfg, &kernel, &install, logf.as_ref());
 
     if install.recovery_error().is_none() {
         if let Err(e) = api::sync_main_entry(
@@ -458,12 +342,9 @@ fn serve() {
     };
     let mut state = api::AppState {
         core: core.clone(),
-        proxy_auth: proxy_auth::ProxyAuth::load(
-            std::path::Path::new(&cfg.var_dir),
-            proxy_auth::DEFAULT_INSTANCE,
-        ),
         token,
         auth_cache: Arc::new(Mutex::new(api::AuthCache::default())),
+        metrics: Default::default(),
         web_proxy: None,
     };
     if let Some(port) = proxy_port {
@@ -601,6 +482,135 @@ fn serve() {
     // 主线程驻留(平台只关心进程活着)
     loop {
         std::thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+fn recover_before_registration(
+    cfg: &Config,
+    kernel: &KernelManager,
+    install: &InstallState,
+    logf: &dyn Fn(&str),
+) {
+    // 孤儿安装清理:监督者异常退出时 pip(独立进程组)可能仍存活并继续改 venv。
+    // 凭 install.pid 找到候选,核对 /proc cmdline 身份(防 PID 复用误杀)后整组回收。
+    let orphan_cleanup_result = cleanup_orphan_install(&cfg.var_dir);
+    if let Err(error) = &orphan_cleanup_result {
+        logf(&format!("孤儿安装进程清理失败: {error}"));
+        install.block_recovery(format!("孤儿安装进程清理失败: {error}"));
+        kernel.stop_sync();
+    }
+
+    // 临时文件残骸清扫:必须在事务恢复之前,否则 service_port.tmp.* 之类的
+    // 半截文件会被后续 create_new 撞上而让写入永久失败。
+    let swept = crate::install::sweep_stale_tmp_files(&cfg.var_dir);
+    if swept > 0 {
+        logf(&format!("已清扫 {swept} 个临时文件残留"));
+    }
+
+    // venv 事务恢复:上次被 SIGKILL/断电遗留的中间状态自愈(必须在收养内核与开放 API 前完成)
+    let pin_file = format!("{}/qwenpaw-version", cfg.var_dir);
+    // 回滚前先停掉可能由中断安装拉起的内核:只回滚磁盘会留下
+    // "进程新版 + 磁盘旧版"的错配,而该进程的依赖已被抽走。
+    let stop_for_recovery = || kernel.stop_verified_sync();
+    let recovery_error = if !orphan_cleanup_permits_recovery(&orphan_cleanup_result) {
+        orphan_cleanup_result.err()
+    } else {
+        match install::recover_pending_transactions(
+            std::path::Path::new(&cfg.kernel_venv),
+            std::path::Path::new(&pin_file),
+            Some(logf),
+            &stop_for_recovery,
+        ) {
+            Ok(report) => {
+                if report.recovered > 0 {
+                    logf(&format!(
+                        "recovered {} pending venv transaction(s)",
+                        report.recovered
+                    ));
+                }
+                if report.is_ready() {
+                    None
+                } else {
+                    Some(report.pending.join("; "))
+                }
+            }
+            Err(e) => Some(format!("recover pending transactions error: {e}")),
+        }
+    };
+    if let Some(reason) = recovery_error {
+        logf(&reason);
+        install.block_recovery(reason);
+        kernel.stop_sync();
+    }
+
+    let settings_journal = std::path::Path::new(&cfg.var_dir).join("settings-transaction.json");
+    let settings_recovery = match settings_journal.try_exists() {
+        Ok(false) => Ok(false),
+        Ok(true) => {
+            kernel.stop_sync();
+            settings_transaction::recover(
+                std::path::Path::new(&cfg.var_dir),
+                std::path::Path::new(&cfg.ui_config_file),
+            )
+        }
+        Err(e) => Err(e),
+    };
+    match settings_recovery {
+        Ok(true) => {
+            let restored = Config::load();
+            kernel.set_port(restored.kernel_port);
+            let _ = kernel.set_log_level(&restored.kernel_log_level);
+            logf("recovery: 已恢复中断前的端口、日志级别与桌面配置");
+        }
+        Ok(false) => {}
+        Err(e) => {
+            let reason = format!("配置事务恢复失败: {e}");
+            logf(&reason);
+            install.block_recovery(reason);
+            kernel.stop_sync();
+        }
+    }
+}
+
+fn recover_after_registration(
+    cfg: &Config,
+    kernel: &KernelManager,
+    install: &InstallState,
+    logf: &dyn Fn(&str),
+) -> Option<u16> {
+    let auth = std::path::Path::new(&cfg.share_dir)
+        .parent()
+        .map(|p| p.join(".qwenpaw.secret/auth.json"));
+    if let Some(auth) = auth {
+        let transaction = auth_reset::AuthReset::new(&auth, std::path::Path::new(&cfg.var_dir));
+        let recovered = transaction.pending().and_then(|pending| {
+            if pending {
+                kernel.stop_sync();
+                if !kernel.last_stop_clean() {
+                    return Err(std::io::Error::other("认证恢复前无法安全停止内核"));
+                }
+                transaction.recover()?;
+                logf("recovery: 认证重置记录已恢复");
+            }
+            Ok(())
+        });
+        if let Err(error) = recovered {
+            let reason = format!("认证恢复失败: {error}");
+            logf(&reason);
+            install.block_recovery(reason);
+            kernel.stop_sync();
+        }
+    }
+
+    match settings_transaction::recover_web_proxy(std::path::Path::new(&cfg.var_dir)) {
+        Ok(_) => Config::load().web_proxy_port,
+        Err(error) => {
+            let reason = format!("反代配置恢复失败: {error}");
+            logf(&reason);
+            install.block_recovery(reason);
+            kernel.stop_sync();
+            None // Keep management available without exposing an ambiguous listener.
+        }
     }
 }
 

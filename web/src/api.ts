@@ -75,6 +75,33 @@ export class ApiClientError extends Error {
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+export async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 5_000,
+  fetcher: FetchLike = globalThis.fetch.bind(globalThis),
+): Promise<Response> {
+  let controller: AbortController | undefined;
+  if (typeof globalThis.AbortController === "function") {
+    try { controller = new globalThis.AbortController(); } catch {}
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      try { controller?.abort(); } catch {}
+      reject(new ApiClientError("network", `API request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      fetcher(input, controller ? { ...init, signal: controller.signal } : init),
+      timedOut,
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 export interface ApiClientOptions {
   pathname: string;
   cookie?: () => string;
@@ -123,9 +150,8 @@ export interface ApiClient {
   readonly base: string;
   status(): Promise<ApiResult<StatusResponse>>;
   changePort(port: number): Promise<ApiResult<ApiMessageResponse>>;
-  webProxyPort(): Promise<ApiResult<{ port: number; public: boolean; passwordConfigured?: boolean | null; entryLogin?: boolean }>>;
+  webProxyPort(): Promise<ApiResult<{ port: number; public: boolean; entryLogin?: boolean }>>;
   changeWebProxyPort(port: number, publicAccess: boolean): Promise<ApiResult<ApiMessageResponse & { port: number }>>;
-  useNativeLogin(username: string, password: string): Promise<ApiResult<ApiMessageResponse>>;
   migrateEntry(token: string): Promise<ApiResult<ApiMessageResponse>>;
   resetAuth(password: string): Promise<ApiResult<ApiMessageResponse>>;
   uninstallKernel(): Promise<ApiResult<ApiMessageResponse>>;
@@ -237,10 +263,9 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     base,
     status: () => get<StatusResponse>("status"),
     changePort: (port) => post<ApiMessageResponse>("port", { port }),
-    webProxyPort: () => get<{ port: number; public: boolean; passwordConfigured?: boolean | null; entryLogin?: boolean }>("web-proxy/port"),
+    webProxyPort: () => get<{ port: number; public: boolean; entryLogin?: boolean }>("web-proxy/port"),
     changeWebProxyPort: (port, publicAccess) => post<ApiMessageResponse & { port: number }>("web-proxy/port", { port, public: publicAccess }),
     migrateEntry: (token) => post<ApiMessageResponse>("entry-login/migrate", {token}),
-    useNativeLogin: (username, password) => post<ApiMessageResponse>("web-proxy/use-native-login", { confirm: true, username, password }),
     resetAuth: (password) => post<ApiMessageResponse>("kernel/admin-password", { password }),
     uninstallKernel: () => post<ApiMessageResponse>("kernel/uninstall"),
     controlService: (action) => post<ApiMessageResponse>(action),

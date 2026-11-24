@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { formatUptime, isStatusSnapshot } from "../src/statusStore.ts";
+import { createStatusPanel } from "../src/statusPanel.ts";
+import { createManagementState } from "../src/managementState.ts";
 
 test('uptime folds seconds at 24 hours and truncates to the last completed minute', () => {
   for (const [seconds, expected] of [[59, '59秒'], [60, '1分 0秒'], [3600, '01:00:00'],
@@ -33,6 +35,33 @@ test("complete Rust status snapshots accept running, stopped and uninstalled sta
     phase: "installing", fetched: 0, message: "", error: "", seq: 42, instance: "worker-a",
     running: true, recovery_required: false, recovery_error: "",
   }, "validation must leave installation task identity untouched");
+});
+
+test("resource metrics do not replace the process snapshot object", async () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  globalThis.window = { setInterval, clearInterval };
+  globalThis.document = { hidden: false };
+  try {
+    const panel = createStatusPanel({
+      api: { status: async () => ({ ok: true, status: 200, data: snapshot }) },
+      state: createManagementState(),
+      versionPanel: { setCurrentRunningVersion() {} },
+      errorMessage: String,
+      updateOverviewInstaller() {},
+      visible: () => true,
+    });
+    await panel.refresh();
+    const before = panel.view.data;
+    panel.consumeMetrics(JSON.stringify({ pid: 421, startAt: snapshot.startAt, cpu: 12.5, memKB: 2048 }));
+    assert.equal(panel.view.data, before);
+    assert.equal(panel.view.cpu, 12.5);
+    assert.equal(panel.view.memKB, 2048);
+    panel.destroy();
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.document = originalDocument;
+  }
 });
 
 test("partial, failed, malformed and wrongly typed event data cannot become service state", () => {

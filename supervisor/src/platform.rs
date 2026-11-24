@@ -582,6 +582,7 @@ fn secure_upgrade_permissions(
         "web-proxy-transaction.json",
         "auth-reset.json",
         "kernel-uninstall.json",
+        "qwenpaw-config.log",
     ] {
         secure_management_file(&var.join(name), owner)?;
     }
@@ -882,20 +883,8 @@ fn config_init(var_dir: &str) -> (String, Vec<String>) {
         "warning" => "warning",
         "info" => "info",
         "debug" => "debug",
-        "trace" => {
-            diagnostics.push(
-                "[config_init] 落盘日志级别为 trace(向导无此档),面板回显为 debug;未改动落盘值"
-                    .into(),
-            );
-            "debug"
-        }
-        "critical" => {
-            diagnostics.push(
-                "[config_init] 落盘日志级别为 critical(向导无此档),面板回显为 error;未改动落盘值"
-                    .into(),
-            );
-            "error"
-        }
+        "trace" => "trace",
+        "critical" => "critical",
         "" => "info",
         invalid => {
             diagnostics.push(format!(
@@ -917,6 +906,7 @@ fn upgrade_init(var_dir: &str) -> String {
         Some(value) if value.contains("tsinghua") => "tsinghua".into(),
         Some(value) if value.contains("aliyun") => "aliyun".into(),
         Some(value) if value.contains("ustc") => "ustc".into(),
+        Some(value) if value.contains("tencent") => "tencent".into(),
         Some(value) if value.contains("pypi.org") || value.is_empty() => "official".into(),
         Some(value) => value,
     };
@@ -1101,6 +1091,7 @@ mod tests {
             var.join("qwenpaw-version"),
             var.join("settings-transaction.json"),
             var.join("web-proxy-transaction.json"),
+            var.join("qwenpaw-config.log"),
             home.join(".venv.transaction.1.2.json"),
         ];
         for path in &private {
@@ -1207,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn config_init_preserves_legacy_echo_mapping_and_does_not_rewrite_files() {
+    fn config_init_preserves_all_supported_log_levels_without_rewriting_files() {
         let var = temp_var("config-init");
         fs::create_dir_all(&var).unwrap();
         fs::write(var.join("service_port"), " 18 088 \nignored\n").unwrap();
@@ -1216,17 +1207,38 @@ mod tests {
         let (output, diagnostics) = config_init(var.to_str().unwrap());
         assert_eq!(
             output,
-            "wizard_port=18088\nservice_port=18088\nwizard_log_level=debug\n"
+            "wizard_port=18088\nservice_port=18088\nwizard_log_level=trace\n"
         );
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].contains("trace"));
+        assert!(diagnostics.is_empty());
         assert_eq!(fs::read(var.join("qwenpaw-log-level")).unwrap(), before);
 
         fs::write(var.join("qwenpaw-log-level"), "critical\n").unwrap();
         let (output, diagnostics) = config_init(var.to_str().unwrap());
-        assert!(output.ends_with("wizard_log_level=error\n"));
-        assert!(diagnostics[0].contains("critical"));
+        assert!(output.ends_with("wizard_log_level=critical\n"));
+        assert!(diagnostics.is_empty());
         fs::remove_dir_all(var).unwrap();
+    }
+
+    #[test]
+    fn wizard_choices_cover_shared_mirrors_and_all_supported_log_levels() {
+        for wizard in [
+            include_str!("../../wizard/install"),
+            include_str!("../../wizard/upgrade"),
+        ] {
+            for mirror in ["aliyun", "tsinghua", "ustc", "tencent", "official"] {
+                assert!(
+                    wizard.contains(&format!("\"value\": \"{mirror}\"")),
+                    "wizard is missing mirror {mirror}"
+                );
+            }
+        }
+        let config = include_str!("../../wizard/config");
+        for level in ["critical", "error", "warning", "info", "debug", "trace"] {
+            assert!(
+                config.contains(&format!("\"value\": \"{level}\"")),
+                "config wizard is missing log level {level}"
+            );
+        }
     }
 
     #[test]
@@ -1264,6 +1276,7 @@ mod tests {
             ("https://pypi.tuna.tsinghua.edu.cn/simple", "tsinghua"),
             ("https://mirrors.aliyun.com/pypi/simple/", "aliyun"),
             ("https://pypi.mirrors.ustc.edu.cn/simple/", "ustc"),
+            ("https://mirrors.cloud.tencent.com/pypi/simple", "tencent"),
             ("https://pypi.org/simple", "official"),
             ("https://pypi.org/aliyun", "aliyun"),
             ("", "official"),

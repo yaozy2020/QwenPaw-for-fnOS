@@ -468,8 +468,8 @@ run_env bash "$PKG/cmd/config_init" > "$T/config-init.out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] \
     && grep -Fxq "wizard_port=$INITIAL_PORT" "$T/config-init.out" \
     && grep -Fxq "service_port=$INITIAL_PORT" "$T/config-init.out" \
-    && grep -Fxq 'wizard_log_level=debug' "$T/config-init.out"; then
-    ok 'config-init 原生回显动态端口与 trace→debug'
+    && grep -Fxq 'wizard_log_level=trace' "$T/config-init.out"; then
+    ok 'config-init 原生无损回显动态端口与 trace'
 else
     bad "config-init 原生回显/退出异常: rc=$rc"
     show_output "$T/config-init.out"

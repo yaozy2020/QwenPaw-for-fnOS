@@ -8,8 +8,6 @@ export interface StatusData {
   running: boolean;
   pid: string;
   startAt: number | null; // epoch 秒
-  cpu: number | null; // 相邻进程采样的 CPU 百分比，首个样本暂无差值
-  memKB: number | null; // RSS
   degraded?: boolean; // true = 后端不可达(502/网络错误/会话过期),非"未安装"
   degradedDetail?: string;
   recoveryReason?: string;

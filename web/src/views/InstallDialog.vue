@@ -73,6 +73,7 @@ watch(() => view.open, async open => {
       <ol class="install-steps" id="upSteps" :aria-label="t('progress.stepsAria')">
         <InstallSteps v-bind="view.steps" />
       </ol>
+      <div class="upgrade-log-context" id="upLogContext">{{ t('progress.recentOutput') }}</div>
       <div class="upgrade-terminal-body" id="upTerminal"><LogLines :lines="view.lines" :empty="view.empty" success /></div>
       <div class="modal-actions">
         <!-- 常驻出口:任务执行中也能关掉弹窗(转后台继续跑),

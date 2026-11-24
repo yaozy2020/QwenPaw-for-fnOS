@@ -130,15 +130,17 @@ mod tests {
         let mut events = state.events.subscribe();
         let response = start(State(state.clone()), request(&state)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
+        events.mark_unchanged();
 
         let response = stop(State(state.clone()), request(&state)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
+        events.mark_unchanged();
 
         let response = restart(State(state.clone()), request(&state)).await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
     }
 
     #[tokio::test]

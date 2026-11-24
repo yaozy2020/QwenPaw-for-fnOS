@@ -1,5 +1,5 @@
 import { reactive } from "vue";
-import { t, type MessageKey } from "./i18n";
+import { t, type MessageKey } from "./i18n.ts";
 
 type AuthStateKey = "initial" | "uninitialized" | "protected" | "disabled" | "unknown" | "offline";
 
@@ -55,7 +55,6 @@ export function createManagementState() {
   return reactive({
     servicePort: "18088", serviceReachable: false, backupAvailable: false, auth: authStates.initial,
     proxyPort: null as number | null, proxyPublic: null as boolean | null, proxyDraft: false,
-    proxyPasswordConfigured: null as boolean | null,
     entryLogin: null as boolean | null,
     pending: false, saving: false,
   });

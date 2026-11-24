@@ -1,6 +1,11 @@
 /* QwenPaw 控制台 — 对齐 QwenPaw Console 品牌橙与暖中性色，现代卡片质感与清晰的状态层级
-   兼容基线 Chromium 84:不用 accent-color / aspect-ratio / inset / :is() / color-mix(),
-   :focus-visible 只在 @supports 守卫内使用 */
+   主要基线 Chrome/Edge 111、Firefox 114、Safari 16.4；只对已知兼容问题保留局部兜底，
+   不承诺旧版浏览器整体兼容；:focus-visible 保留 @supports 守卫 */
+
+.authorization-surface { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 2147483000; display: flex; flex-direction: column; background: var(--bg, #f3f3f0); }
+.authorization-surface-bar { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--card-border, #ded6cb); }
+.authorization-surface-cancel { min-height: 36px; padding: 4px 12px; }
+.authorization-surface-frame { flex: 1; width: 100%; border: 0; background: #fff; }
 
 /* 0. 全局令牌(主题无关) */
 :root {
@@ -1189,9 +1194,9 @@ html[data-theme="light"] .terminal-body { box-shadow: none; }
   background: var(--overlay);
   overscroll-behavior: contain;
 }
-.native-login-dialog { max-width: 440px; }
-.native-login-dialog form { display: grid; gap: var(--sp-4); text-align: start; }
-.native-login-dialog::backdrop { overflow: hidden; }
+.reset-password-dialog { max-width: 440px; }
+.reset-password-dialog form { display: grid; gap: var(--sp-4); text-align: start; }
+.reset-password-dialog::backdrop { overflow: hidden; }
 .about-header h2 { font-size: var(--fs-2xl); }
 .about-header p { margin-top: var(--sp-2); color: var(--text-sub); line-height: 1.7; }
 .about-links {
@@ -1234,7 +1239,7 @@ html[data-theme="light"] .terminal-body { box-shadow: none; }
   width: 95%;
   padding: var(--sp-5);
 }
-/* 安装步骤条:主题色表示已到达,红色标出停在哪一步 */
+/* 安装步骤条:绿色勾选已完成,橙色标出当前步,灰色表示待执行 */
 .install-steps {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1260,14 +1265,34 @@ html[data-theme="light"] .terminal-body { box-shadow: none; }
   flex-shrink: 0;
   opacity: 0.5;
 }
-.install-steps li[data-status="done"] { border-top-color: var(--primary-text); color: var(--text-sub); }
+.install-steps li[data-status="done"] { border-top-color: var(--success); color: var(--success); }
 .install-steps li[data-status="active"] { border-top-color: var(--primary-text); color: var(--primary-text); font-weight: 600; }
 .install-steps li[data-status="failed"] { border-top-color: var(--danger-text); color: var(--danger-text); font-weight: 600; }
 .install-steps li[data-status="done"] .step-mark,
 .install-steps li[data-status="failed"] .step-mark { opacity: 1; }
+.install-steps li[data-status="done"] .step-mark {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  background: transparent;
+}
+.install-steps li[data-status="done"] .step-mark::before {
+  content: "✓";
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
 .install-steps li[data-status="active"] .step-mark {
   opacity: 1;
   animation: pulse 2.2s var(--ease-out) infinite;
+}
+.upgrade-log-context {
+  margin-top: var(--sp-4);
+  margin-bottom: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
 }
 .upgrade-terminal-body {
   background: var(--terminal-bg) !important;
@@ -1564,7 +1589,7 @@ button:focus, a:focus, input:focus, [tabindex]:focus {
   .modal-overlay { padding: var(--sp-3); padding-top: calc(24px + env(safe-area-inset-top, 0px)); }
   .modal-box { padding: 18px; }
   #upgradeModal .modal-box { width: 100%; max-width: 100%; }
-  .upgrade-terminal-body { height: 260px; }
+  .upgrade-terminal-body { height: clamp(160px, 28vh, 220px); }
   button:not([hidden]), .btn { min-height: 44px; min-width: 44px; }
 }
 

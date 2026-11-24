@@ -352,7 +352,10 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     fn assert_installer_calls(dir: &TestDir, state: &AppState, index: &str) {
         let record = |name: &str| -> serde_json::Value {
             let bytes = std::fs::read(dir.0.join(name)).unwrap_or_else(|err| {
-                panic!("read {name}: {err}; installer error: {}", state.install.snapshot().error)
+                panic!(
+                    "read {name}: {err}; installer error: {}",
+                    state.install.snapshot().error
+                )
             });
             serde_json::from_slice(&bytes).unwrap()
         };
@@ -467,7 +470,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     async fn accepted_mirror_is_snapshotted_before_a_later_mirror_change() {
         let dir = TestDir::new("install-mirror-snapshot");
         let state = dir.state(crate::api::test_support::free_port());
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
         install_python_with_installer_recorder(&dir, &state);
         let bootstrap_started = dir.0.join("bootstrap-started");
         std::fs::write(dir.0.join("block-bootstrap"), "block").unwrap();
@@ -492,7 +495,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
         }
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         assert!(
             started,
             "accepted install should invoke bootstrap: {}",
@@ -773,7 +776,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
     async fn kernel_pin_publishes_after_persisting_the_new_pin() {
         let dir = TestDir::new("kernel-pin-notification");
         let state = dir.state(crate::api::test_support::free_port());
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
 
         let response = kernel_pin(State(state.clone()), pin_request(&state, "2.3.0")).await;
 
@@ -783,7 +786,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
                 .unwrap(),
             "2.3.0\n"
         );
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
     }
 
     #[tokio::test]
@@ -792,12 +795,12 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
         let state = dir.state(crate::api::test_support::free_port());
         let journal = std::path::Path::new(&state.var_dir).join("kernel-uninstall.json");
         std::fs::write(&journal, "pending").unwrap();
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
 
         let response = kernel_uninstall(State(state.clone()), uninstall_request(&state)).await;
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         let snapshot: serde_json::Value =
             serde_json::from_str(&crate::api::render_snapshot(&state)).unwrap();
         assert_eq!(snapshot["install"]["recovery_required"], true);
@@ -861,7 +864,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
         std::fs::create_dir_all(home.join("venv/bin")).unwrap();
         std::fs::write(home.join("venv/bin/python3"), "runtime").unwrap();
         std::fs::write(var.join("qwenpaw-version"), "2.3.0\n").unwrap();
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
 
         let response = kernel_uninstall(State(state.clone()), uninstall_request(&state)).await;
         let status = response.status();
@@ -870,7 +873,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(value["success"], false);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         assert!(!home.join("venv").exists());
         assert!(!var.join("qwenpaw-version").exists());
         assert!(message.contains("桌面入口更新失败"), "{message}");

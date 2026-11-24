@@ -12,12 +12,16 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::management::{ManagementCore, ManagementError, OperationGuard};
+use crate::{
+    management::{ManagementCore, ManagementError, OperationGuard},
+    runtime_settings::{self, SettingsPatch},
+};
 
 mod authorized_dirs;
 mod installation;
 mod lifecycle;
 mod logs;
+mod metrics;
 mod settings;
 mod status;
 
@@ -45,10 +49,27 @@ use status::{events, status};
 #[derive(Clone)]
 pub struct AppState {
     pub core: ManagementCore,
-    pub proxy_auth: Arc<crate::proxy_auth::ProxyAuth>,
     pub token: String,
     pub auth_cache: Arc<std::sync::Mutex<AuthCache>>,
+    pub metrics: metrics::MetricsFeed,
     pub web_proxy: Option<Arc<crate::gateway::WebProxyManager>>,
+}
+
+impl AppState {
+    pub(crate) async fn apply_runtime_settings(
+        &self,
+        patch: SettingsPatch,
+    ) -> Result<String, ManagementError> {
+        let outcome = runtime_settings::apply(&self.core, patch).await;
+        if outcome.notify_observers {
+            *self
+                .auth_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = AuthCache::default();
+            self.events.invalidate();
+        }
+        outcome.result
+    }
 }
 
 impl std::ops::Deref for AppState {
@@ -86,10 +107,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/web-proxy/port",
             get(settings::web_proxy_port_get).post(settings::web_proxy_port_set),
-        )
-        .route(
-            "/web-proxy/use-native-login",
-            post(settings::use_native_login),
         )
         .route("/entry-login/migrate", post(settings::entry_migrate))
         .route("/settings", post(settings))
@@ -448,12 +465,9 @@ pub(crate) mod test_support {
                     operations: Arc::new(tokio::sync::Mutex::new(())),
                     supervisor_port,
                 },
-                proxy_auth: crate::proxy_auth::ProxyAuth::load(
-                    &var,
-                    crate::proxy_auth::DEFAULT_INSTANCE,
-                ),
                 token: "test-token".into(),
                 auth_cache: Arc::new(std::sync::Mutex::new(AuthCache::default())),
+                metrics: Default::default(),
                 web_proxy: None,
             }
         }

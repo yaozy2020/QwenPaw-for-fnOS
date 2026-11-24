@@ -17,7 +17,7 @@ const panel = usePanel();
         {{ t('config.title') }}
       </h2>
     </div>
-    <div v-if="panel.visited.configuration" id="configurationFields"><ConfigurationFields :state="panel.management" @service-port="panel.settings.changeServicePort" @proxy-port="panel.settings.changeWebProxyPort" @scope="panel.settings.setWebProxyPublic" @use-native="panel.settings.useNativeLogin" @migrate="panel.settings.migrateEntry" @reset="panel.settings.resetAuth" /></div>
+    <div v-if="panel.visited.configuration" id="configurationFields"><ConfigurationFields :state="panel.management" @service-port="panel.settings.changeServicePort" @proxy-port="panel.settings.changeWebProxyPort" @scope="panel.settings.setWebProxyPublic" @migrate="panel.settings.migrateEntry" @reset="panel.settings.resetAuth" /></div>
   </section>
 
   <section class="card" id="authorization" tabindex="-1" data-mobile-panel="authorization" :hidden="panel.navigation.hides('authorization')" aria-labelledby="authorizationTitle">

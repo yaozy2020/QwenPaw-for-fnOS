@@ -7,6 +7,16 @@ const LOG_PAGE_SIZE = 100;
 const LOG_WINDOW_MAX = 2000;
 const LOG_REFRESH_MS = 15000;
 
+export interface SequencedLogEntry {
+  entry: LogEntry;
+  seq: number;
+}
+export type LogLineInput = LogEntry | SequencedLogEntry;
+
+function logEntryValue(entry: LogLineInput): LogEntry {
+  return typeof entry === "object" && entry !== null && "entry" in entry ? entry.entry : entry as LogEntry;
+}
+
 interface LogPanelOptions {
   api: Pick<ApiClient, "logs" | "clearLogs">;
   showToast(message: string): void;
@@ -15,18 +25,22 @@ interface LogPanelOptions {
   visible(): boolean;
 }
 
-function logKey(entry: LogEntry): string {
-  return typeof entry === "string" ? `s:${entry}` : `o:${JSON.stringify(entry)}`;
+function logKey(entry: LogLineInput): string {
+  const value = logEntryValue(entry);
+  return typeof value === "string" ? `s:${value}` : `o:${JSON.stringify(value)}`;
 }
 
-function sameLogEntry(left: LogEntry, right: LogEntry): boolean {
+function sameLogEntry(left: LogLineInput, right: LogLineInput): boolean {
   return left === right || logKey(left) === logKey(right);
 }
 
 // KMP O(n) 最长后缀-前缀重叠匹配，避免满窗口轮换时 O(n^2) 切片与序列化
-function mergeLogWindow(existing: LogEntry[], incoming: LogEntry[]): LogEntry[] {
-  if (!existing.length) return incoming.slice(-LOG_WINDOW_MAX);
-  if (!incoming.length) return existing;
+function mergeLogWindow(existing: SequencedLogEntry[], incoming: LogEntry[], nextSeq: number) {
+  if (!existing.length) {
+    const lines = incoming.map(entry => ({ entry, seq: nextSeq++ })).slice(-LOG_WINDOW_MAX);
+    return { lines, nextSeq, matched: 0 };
+  }
+  if (!incoming.length) return { lines: existing, nextSeq, matched: 0 };
   const maxOverlap = Math.min(existing.length, incoming.length);
   const pattern = new Array<string>(maxOverlap);
   for (let i = 0; i < maxOverlap; i += 1) pattern[i] = logKey(incoming[i]);
@@ -50,18 +64,23 @@ function mergeLogWindow(existing: LogEntry[], incoming: LogEntry[]): LogEntry[] 
     if (pattern[matched] === key) matched += 1;
   }
 
-  if (matched === 0) return incoming.slice(-LOG_WINDOW_MAX);
-  if (matched === incoming.length) return existing;
-  return [...existing, ...incoming.slice(matched)].slice(-LOG_WINDOW_MAX);
+  if (matched === 0) {
+    const lines = incoming.map(entry => ({ entry, seq: nextSeq++ })).slice(-LOG_WINDOW_MAX);
+    return { lines, nextSeq, matched };
+  }
+  if (matched === incoming.length) return { lines: existing, nextSeq, matched };
+  const appended = incoming.slice(matched).map(entry => ({ entry, seq: nextSeq++ }));
+  return { lines: [...existing, ...appended].slice(-LOG_WINDOW_MAX), nextSeq, matched };
 }
 
 export type LogLevelFilter = "all" | "warn" | "error";
 
-export function logEntryText(entry: LogEntry): string {
-  return typeof entry === "string" ? entry : entry.message || JSON.stringify(entry);
+export function logEntryText(entry: LogLineInput): string {
+  const value = logEntryValue(entry);
+  return typeof value === "string" ? value : value.message || JSON.stringify(value);
 }
 
-export function matchesLogFilter(entry: LogEntry, level: LogLevelFilter, query: string, normalized = false): boolean {
+export function matchesLogFilter(entry: LogLineInput, level: LogLevelFilter, query: string, normalized = false): boolean {
   const text = logEntryText(entry);
   if (level === "error" && !/ERROR|Error|failed|失败/.test(text)) return false;
   if (level === "warn" && !/ERROR|Error|failed|失败|WARN|Warning/.test(text)) return false;
@@ -71,23 +90,25 @@ export function matchesLogFilter(entry: LogEntry, level: LogLevelFilter, query: 
 }
 
 export function createLogPanel({ api, showToast, confirm, errorMessage, visible }: LogPanelOptions) {
-  let logLines: LogEntry[] = [];
-  let renderedLines: LogEntry[] | null = null;
+  let logLines: SequencedLogEntry[] = [];
+  let renderedLines: SequencedLogEntry[] | null = null;
+  let nextLogSeq = 0;
   let logClearGeneration = 0;
   let liveLogFetchSeq = 0;
   let followLatest = true;
   let disconnectDom: (() => void) | null = null;
   const raw = shallowReactive({
-    lines: [] as LogEntry[],
+    lines: [] as SequencedLogEntry[],
     exportBusy: false,
     hasError: false,
     level: 'all' as LogLevelFilter,
     query: '',
     autoScroll: true,
+    autoRefresh: true,
   });
   const view = {
     get lines() { return raw.lines; },
-    set lines(value: LogEntry[]) { raw.lines = value; },
+    set lines(value: SequencedLogEntry[]) { raw.lines = value; },
     get exportBusy() { return raw.exportBusy; },
     set exportBusy(value: boolean) { raw.exportBusy = value; },
     get error() { return raw.hasError ? t("logs.readError") : ""; },
@@ -97,10 +118,11 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     set query(value: string) { raw.query = value; },
     get autoScroll() { return raw.autoScroll; },
     set autoScroll(value: boolean) { raw.autoScroll = value; },
+    get autoRefresh() { return raw.autoRefresh; },
+    set autoRefresh(value: boolean) { raw.autoRefresh = value; },
   };
 
   let inLogs: boolean | undefined;
-  let autoRefresh = true;
 
   function render(): void {
     const terminal = document.getElementById("logTerminal");
@@ -119,13 +141,25 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     if (!canRead()) return;
     const generation = logClearGeneration;
     const mySeq = ++liveLogFetchSeq;
+    const requestedTail = logLines.length ? LOG_PAGE_SIZE : LOG_WINDOW_MAX;
     try {
-      const result = await api.logs(logLines.length ? LOG_PAGE_SIZE : LOG_WINDOW_MAX);
+      const result = await api.logs(requestedTail);
       if (!canRead() || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
       const data = result.data;
       if (result.ok && data.success && Array.isArray(data.logs)) {
+        let merged = mergeLogWindow(logLines, data.logs, nextLogSeq);
+        if (requestedTail === LOG_PAGE_SIZE && data.logs.length === LOG_PAGE_SIZE && merged.matched === 0) {
+          const complete = await api.logs(LOG_WINDOW_MAX);
+          if (!canRead() || generation !== logClearGeneration || mySeq !== liveLogFetchSeq) return;
+          if (!complete.ok || !complete.data.success || !Array.isArray(complete.data.logs)) {
+            raw.hasError = true;
+            return;
+          }
+          merged = mergeLogWindow(logLines, complete.data.logs, nextLogSeq);
+        }
         raw.hasError = false;
-        logLines = mergeLogWindow(logLines, data.logs);
+        logLines = merged.lines;
+        nextLogSeq = merged.nextSeq;
         render();
       } else raw.hasError = true;
     } catch (error) {
@@ -189,17 +223,17 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     inLogs = next;
     ++liveLogFetchSeq;
     if (!next) { polling.stop(); return; }
-    if (autoRefresh) polling.start();
+    if (raw.autoRefresh) polling.start();
     void polling.refresh();
   }
 
   function setAutoRefresh(enable: boolean): void {
-    autoRefresh = enable;
+    view.autoRefresh = enable;
     if (enable && visible()) polling.start();
     else polling.stop();
   }
 
-  async function copyLogs(entries?: LogEntry[]): Promise<void> {
+  async function copyLogs(entries?: LogLineInput[]): Promise<void> {
     const source = entries ?? (
       view.level === "all" && !view.query.trim()
         ? view.lines
@@ -264,8 +298,8 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
   }
   return {
     view, connect, refresh,
-    watching: () => autoRefresh && visible() && !document.hidden,
-    notifyChange: () => { if (autoRefresh && visible() && !document.hidden) void polling.refresh(); },
+    watching: () => raw.autoRefresh && visible() && !document.hidden,
+    notifyChange: () => { if (raw.autoRefresh && visible() && !document.hidden) void polling.refresh(); },
     viewChanged,
     clear,
     destroy: () => {

@@ -415,6 +415,88 @@ test("callback reports result publication failure and stays open", async () => {
   }
 });
 
+test("embedded callback close asks the parent to cancel the matching authorization", async () => {
+  const html = await readFile(new URL("../src/auth-callback.html", import.meta.url), "utf8");
+  const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+  const originalFetch = globalThis.fetch;
+  const elements = Object.fromEntries(["title", "message", "path", "close"].map(id => [id, {
+    textContent: "", hidden: true, listeners: {}, addEventListener(name, callback) { this.listeners[name] = callback; },
+  }]));
+  const messages = [];
+  const window = {
+    location: { search: "?status=success&method=pickUserFile&state=embedded-state&path=%5B%22%2Fvol1%2Fwork%22%5D", origin: "https://nas.example" },
+    localStorage: { setItem() {} },
+    opener: null,
+    closed: false,
+    close() { this.closed = true; },
+    setTimeout() {},
+    parent: { postMessage(message, origin) { messages.push({ message, origin }); } },
+  };
+  globalThis.fetch = async () => new Response("{}", { status: 503 });
+  try {
+    new Function("window", "document", "location", source)(
+      window,
+      { getElementById: id => elements[id], cookie: "" },
+      window.location,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    elements.close.listeners.click();
+    assert.equal(window.closed, false);
+    assert.deepEqual(messages, [{
+      message: { type: "qwenpaw:authorized-directory-cancel", state: "embedded-state" },
+      origin: "https://nas.example",
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("callback uses host-first CSRF parsing and rejects duplicate cookie names", async () => {
+  const html = await readFile(new URL("../src/auth-callback.html", import.meta.url), "utf8");
+  const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source);
+  const originalFetch = globalThis.fetch;
+  for (const [cookie, expected] of [
+    ["qwenpaw_csrf=legacy; __Host-qwenpaw_csrf=host-token", "host-token"],
+    ["__Host-qwenpaw_csrf=first; __Host-qwenpaw_csrf=second; qwenpaw_csrf=legacy", ""],
+  ]) {
+    const elements = Object.fromEntries(["title", "message", "path", "close"].map(id => [id, {
+      textContent: "", hidden: true, addEventListener() {},
+    }]));
+    const win = {
+      location: { search: "?status=success&method=authorizeUserFile&state=en-1", origin: "https://nas.example" },
+      navigator: { language: "en-US", languages: ["en-US"] },
+      localStorage: { getItem() { return null; }, setItem() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {} }),
+      addEventListener() {},
+      opener: null,
+      closed: false,
+      close() {},
+      setTimeout() {},
+    };
+    win.parent = win;
+    let csrf;
+    globalThis.fetch = async (_url, init) => {
+      csrf = init.headers["X-CSRF-Token"];
+      return new Response("{}", { status: 200 });
+    };
+    try {
+      new Function("window", "document", "location", source)(win, {
+        title: "", cookie,
+        documentElement: { lang: "", setAttribute() {} },
+        querySelector() { return null; },
+        getElementById: id => elements[id],
+      }, win.location);
+      await Promise.resolve();
+      assert.equal(csrf, expected);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
 test("callback renders English copy and tracks system theme changes dynamically", async () => {
   const html = await readFile(new URL("../src/auth-callback.html", import.meta.url), "utf8");
   const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];

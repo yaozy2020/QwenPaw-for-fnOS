@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { LogEntry } from '../api';
-const props = defineProps<{ lines: LogEntry[]; empty: string; success?: boolean }>();
+import { logEntryText, type LogLineInput } from '../logPanel';
+const props = defineProps<{ lines: LogLineInput[]; empty: string; success?: boolean }>();
 
 interface RenderedLine {
   text: string;
   cls: string;
 }
 interface LogChunk {
+  key: number;
   items: RenderedLine[];
-  raw: LogEntry[];
+  raw: LogLineInput[];
 }
 
 function lineClass(text: string, success?: boolean) {
@@ -18,10 +19,14 @@ function lineClass(text: string, success?: boolean) {
   return success && /成功|Successfully/.test(text) ? 'log-success' : 'log-info';
 }
 
-let prevChunks: LogChunk[] = [];
+let prevChunks = new Map<number, LogChunk>();
 let prevSuccess: boolean | undefined;
 
-function sameSlice(raw: LogEntry[], lines: LogEntry[], start: number, end: number): boolean {
+function lineSequence(line: LogLineInput, index: number): number {
+  return typeof line === 'object' && line !== null && 'entry' in line ? line.seq : index;
+}
+
+function sameSlice(raw: LogLineInput[], lines: LogLineInput[], start: number, end: number): boolean {
   if (raw.length !== end - start) return false;
   for (let i = 0; i < raw.length; i += 1) {
     if (raw[i] !== lines[start + i]) return false;
@@ -32,28 +37,31 @@ function sameSlice(raw: LogEntry[], lines: LogEntry[], start: number, end: numbe
 const chunks = computed(() => {
   const lines = props.lines;
   const success = props.success;
-  const reuse = prevSuccess === success;
+  const reusable = prevSuccess === success;
   const result: LogChunk[] = [];
-  for (let i = 0, chunkIndex = 0; i < lines.length; i += 50, chunkIndex += 1) {
-    const end = Math.min(i + 50, lines.length);
-    const previous = reuse ? prevChunks[chunkIndex] : undefined;
+  for (let i = 0; i < lines.length;) {
+    const key = Math.floor(lineSequence(lines[i], i) / 50);
+    let end = i + 1;
+    while (end < lines.length && Math.floor(lineSequence(lines[end], end) / 50) === key) end += 1;
+    const previous = reusable ? prevChunks.get(key) : undefined;
     if (previous && sameSlice(previous.raw, lines, i, end)) {
       result.push(previous);
-      continue;
+    } else {
+      const raw = lines.slice(i, end);
+      const items = raw.map(line => {
+        const text = logEntryText(line);
+        return { text, cls: lineClass(text, success) };
+      });
+      result.push({ key, raw, items });
     }
-    const raw = lines.slice(i, end);
-    const items = raw.map(line => {
-      const text = typeof line === 'string' ? line : line.message || JSON.stringify(line);
-      return { text, cls: lineClass(text, success) };
-    });
-    result.push({ raw, items });
+    i = end;
   }
-  prevChunks = result;
+  prevChunks = new Map(result.map(chunk => [chunk.key, chunk]));
   prevSuccess = success;
   return result;
 });
 </script>
 <template>
   <span v-if="!chunks.length" class="log-empty">{{ empty }}</span>
-  <div v-for="(chunk, index) in chunks" :key="index" v-memo="[chunk]" class="log-chunk"><div v-for="(line, offset) in chunk.items" :key="offset" :class="line.cls">{{ line.text }}</div></div>
+  <div v-for="chunk in chunks" :key="chunk.key" v-memo="[chunk]" class="log-chunk"><div v-for="(line, offset) in chunk.items" :key="offset" :class="line.cls">{{ line.text }}</div></div>
 </template>

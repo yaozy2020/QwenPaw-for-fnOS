@@ -9,6 +9,7 @@ import ConfirmPrompt from "./views/ConfirmPrompt.vue";
 import InstallDialog from "./views/InstallDialog.vue";
 import AboutDialog from "./views/AboutDialog.vue";
 import WebOverlay from "./views/WebOverlay.vue";
+import AuthorizationSurface from "./views/AuthorizationSurface.vue";
 import { useTemplateRef } from 'vue';
 import { usePanel } from "./panelContext";
 const panel = usePanel();
@@ -31,4 +32,5 @@ const about = useTemplateRef<InstanceType<typeof AboutDialog>>('about');
   <InstallDialog />
   <AboutDialog ref="about" />
   <WebOverlay />
+  <AuthorizationSurface />
 </template>

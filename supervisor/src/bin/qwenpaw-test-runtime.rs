@@ -121,7 +121,10 @@ fn run_code_probe(code: &OsStr, control: Option<&Path>) -> io::Result<()> {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             while hold.exists() {
                 if std::time::Instant::now() >= deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "fixture metadata held"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "fixture metadata held",
+                    ));
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -548,6 +551,11 @@ fn handle_request(mut stream: TcpStream, venv: &Path, pid: u32) -> io::Result<()
         let body = format!("{{\"version\":{}}}", json_string(&version));
         write_response(&mut stream, "200 OK", "application/json", body.as_bytes())
     } else if method == "GET" && path == "/api/auth/status" {
+        match fs::read(venv.join(".qwenpaw-test-runtime-auth-response")) {
+            Ok(response) => return stream.write_all(&response),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         write_response(
             &mut stream,
             "200 OK",

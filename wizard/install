@@ -17,7 +17,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "选择 NAS 下载 QwenPaw 内核时使用的源。安装后可在控制台更换。"
+                "helpText": "选择 NAS 下载 QwenPaw 内核时使用的源，仅首次安装或尚未配置下载源时生效；保留数据重装会沿用已有下载源。安装后可在控制台查看或更换。"
             },
             {
                 "type": "select",
@@ -36,6 +36,10 @@
                     {
                         "label": "中科大镜像源",
                         "value": "ustc"
+                    },
+                    {
+                        "label": "腾讯云镜像源",
+                        "value": "tencent"
                     },
                     {
                         "label": "PyPI 官方源",

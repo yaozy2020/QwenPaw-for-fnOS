@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { formatMem, type StatusData } from '../statusStore';
 import { currentLocale, t } from '../i18n';
-const props = defineProps<{ data: StatusData; uptime: string }>();
+const props = defineProps<{ data: StatusData; uptime: string; cpu: number | null; memKB: number | null }>();
 const unavailable = computed(() => props.data.degraded);
 const running = computed(() => !unavailable.value && props.data.installed !== false && props.data.running);
 const state = computed(() => unavailable.value || props.data.recoveryReason ? 'degraded' : props.data.installed === false ? 'uninstalled' : running.value ? 'running' : 'stopped');
@@ -18,7 +18,8 @@ const description = computed(() => {
   return running.value ? t('status.desc.running') : t('status.desc.stopped');
 });
 const stats = computed(() => {
-  const { cpu, memKB, pid } = props.data;
+  const { cpu, memKB } = props;
+  const { pid } = props.data;
   return [
     ['cpu', t('overview.cpu'), running.value && typeof cpu === 'number' ? `${cpu.toFixed(1)}%` : '-'],
     ['mem', t('overview.memory'), running.value ? formatMem(memKB) : '-'],

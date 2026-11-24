@@ -121,12 +121,13 @@ async function fixture(t, options = {}) {
       return route.fulfill({ json: { success: true, logs: state.installLogs } });
     }
     if (path === "logs") {
-      state.liveLogQueries.push(Number(url.searchParams.get("tail")));
+      const tail = Number(url.searchParams.get("tail"));
+      state.liveLogQueries.push(tail);
       const logs = structuredClone(state.logs);
       if (state.logsHeld) await state.logsHeld;
-      return route.fulfill({ json: { success: true, logs } });
+      return route.fulfill({ json: { success: true, logs: logs.slice(-tail) } });
     }
-    if (path === "mirror") return route.fulfill({ json: { success: true, mirror: "" } });
+    if (path === "mirror") return route.fulfill({ json: { success: true, mirror: state.mirror ?? "" } });
     return route.fulfill({ status: 404, json: { success: false } });
   });
   return { page, state };
@@ -525,6 +526,31 @@ browserTest("overview attaches to an existing install without fetching versions 
   assert.ok(!state.requestPaths.some(({path}) => path === "kernel/versions"));
 });
 
+browserTest("mobile install dialog separates task state from recent diagnostic output", async t => {
+  const { page } = await fixture(t, {
+    viewport: { width: 390, height: 844 },
+    status: { success: true, installed: true, running: true, install: { running: true } },
+    install: { success: true, upgrading: true, running: true, seq: 7, instance: "other-device", phase: "starting" },
+    installLogs: ["+ zstandard==0.25.0"],
+  });
+  await page.goto(origin + prefix);
+  await page.locator("#overviewRunningInstall").click();
+  await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
+  await expect(page.locator("#upTitle")).toHaveText("QwenPaw 安装任务");
+  await expect(page.locator("#upSubTitle")).toContainText("关闭页面不会取消安装");
+  await expect(page.locator("#upLogContext")).toContainText("阶段以任务状态为准");
+  await expect(page.locator('#upSteps [data-step="starting"]')).toHaveAttribute("aria-current", "step");
+  await expect(page.locator('#upSteps [data-step="downloading"]')).toHaveAttribute("data-status", "done");
+  await expect(page.locator('#upSteps [data-step="installing"]')).toHaveAttribute("data-status", "done");
+  const completedMark = await page.locator('#upSteps [data-step="downloading"] .step-mark').evaluate(element => getComputedStyle(element, "::before").content);
+  assert.ok(completedMark.includes("✓"), "completed steps need a non-color cue");
+  const terminal = await box(page.locator("#upTerminal"));
+  const modal = await box(page.locator("#upgradeModal .modal-box"));
+  assert.ok(terminal.height <= 220, `terminal height ${terminal.height}`);
+  assert.ok(modal.y >= 0 && modal.y + modal.height <= 844, `modal bounds ${JSON.stringify(modal)}`);
+  await page.screenshot({ path: join(screenshotDirectory, "install-dialog-mobile-390.png") });
+});
+
 browserTest("mobile running overview presents a labelled conversation action and compact metrics", async t => {
   const { page } = await fixture(t, { viewport: { width: 360, height: 800 }, status: runningStatus });
   await page.goto(origin + prefix);
@@ -630,6 +656,32 @@ browserTest("running uptime ticks locally without another status request", async
   assert.equal(state.statusRequests, requests, "local ticking must not add a network request");
 });
 
+browserTest("leaving overview pauses uptime and returning restarts one timer", async t => {
+  const { page } = await fixture(t, {
+    status: runningStatus,
+    initScript: () => {
+      window.uptimeTimers = new Set();
+      const create = window.setInterval;
+      const clear = window.clearInterval;
+      window.setInterval = (...args) => {
+        const id = create(...args);
+        if (args[1] === 1000) window.uptimeTimers.add(id);
+        return id;
+      };
+      window.clearInterval = id => {
+        window.uptimeTimers.delete(id);
+        clear(id);
+      };
+    },
+  });
+  await page.goto(origin + prefix);
+  await expect.poll(() => page.evaluate(() => window.uptimeTimers.size)).toBe(1);
+  await page.locator('#mobileSectionNav [data-section="configuration"]').click();
+  await expect.poll(() => page.evaluate(() => window.uptimeTimers.size)).toBe(0);
+  await page.locator('#mobileSectionNav [data-section="overview"]').click();
+  await expect.poll(() => page.evaluate(() => window.uptimeTimers.size)).toBe(1);
+});
+
 browserTest("mobile log terminal fills the page and preserves manual scrolling", async t => {
   const { page, state } = await fixture(t, {
     viewport: { width: 390, height: 844 },
@@ -724,6 +776,45 @@ browserTest("log windows remain bounded and rotation replaces unrelated history"
   await page.evaluate(() => window.fetchLogs());
   await expect(terminal.locator(".log-chunk > div")).toHaveCount(1);
   await expect(terminal).toHaveText("轮转后的日志");
+});
+
+browserTest("a full disjoint log tail refetches the complete window before dropping history", async t => {
+  const logs = Array.from({ length: 2000 }, (_, index) => `行 ${index + 1}`);
+  const { page, state } = await fixture(t, { viewport: desktop, logs });
+  await page.goto(origin + prefix + "#logs");
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
+  state.logs = Array.from({ length: 2101 }, (_, index) => `行 ${index + 1}`);
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
+  await expect(terminal.locator(".log-chunk > div").first()).toHaveText("行 102");
+  await expect(terminal.locator(".log-chunk > div").last()).toHaveText("行 2101");
+  assert.deepEqual(state.liveLogQueries, [2000, 100, 2000]);
+});
+
+browserTest("full log rotation preserves unchanged middle chunk DOM nodes", async t => {
+  const logs = Array.from({ length: 2000 }, (_, index) => `行 ${index + 1}`);
+  const { page, state } = await fixture(t, { viewport: desktop, logs });
+  await page.goto(origin + prefix + "#logs");
+  const terminal = page.locator("#logTerminal");
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
+  await terminal.evaluate(element => {
+    window.stableLogChunk = element.querySelectorAll(".log-chunk")[20];
+    window.logChunkMutations = [];
+    window.logChunkObserver = new MutationObserver(records => {
+      window.logChunkMutations.push(...records.map(record => record.type));
+    });
+    window.logChunkObserver.observe(window.stableLogChunk, { subtree: true, childList: true, characterData: true });
+  });
+  state.logs = [...logs.slice(-99), "行 2001"];
+  await page.evaluate(() => window.fetchLogs());
+  await expect(terminal.locator(".log-chunk > div")).toHaveCount(2000);
+  const preserved = await terminal.evaluate(element => ({
+    mutations: window.logChunkMutations,
+    first: window.stableLogChunk.firstElementChild.textContent,
+    last: window.stableLogChunk.lastElementChild.textContent,
+  }));
+  assert.deepEqual(preserved, { mutations: [], first: "行 1001", last: "行 1050" });
 });
 
 browserTest("offscreen log chunks skip rendering work without discarding history", async t => {
@@ -1015,12 +1106,12 @@ browserTest("i18n: live locale switch updates transient error banners and active
   await expect(page.locator("#versionSourceStatus")).toContainText("The current download source is unavailable");
 
   await page.locator("#installRunningTip").click();
-  await expect(page.locator("#upTitle")).toHaveText("Viewing active install task…");
+  await expect(page.locator("#upTitle")).toHaveText("QwenPaw Install Task");
   await expect(page.locator("#upTerminal")).toContainText("Downloading dependencies…");
   await page.locator("#btnUpMinimize").click();
   await page.locator("#localeToggleBtn").click();
   await page.locator("#taskCenterButton").click();
-  await expect(page.locator("#upTitle")).toHaveText("正在查看进行中的安装任务...");
+  await expect(page.locator("#upTitle")).toHaveText("QwenPaw 安装任务");
   await expect(page.locator("#upTerminal")).toContainText("正在下载依赖包...");
 });
 
@@ -2011,7 +2102,7 @@ browserTest("page reconstruction resumes only the stored task identity without a
   await expect(page.locator("#taskCenterButton")).toBeVisible();
   await page.reload();
   await expect(page.locator("#upgradeModal")).toHaveClass(/active/);
-  await expect(page.locator("#upTitle")).toContainText("正在查看进行中的安装任务");
+  await expect(page.locator("#upTitle")).toContainText("QwenPaw 安装任务");
   assert.equal(state.posts.filter(post => post.path === "kernel/install").length, 1);
   await expect.poll(() => state.logQueries.length).toBeGreaterThan(0);
   assert.ok(state.logQueries.every(query => query.seq === "42" && query.instance === "worker-a"));
@@ -2083,6 +2174,19 @@ browserTest("terminal completion preserves received task output when the final l
   await expect(page.locator("#upTitle")).toContainText("顺利完成");
   await expect(page.locator("#upTerminal")).not.toContainText("正在安装内核");
   await expect(page.locator("#upTerminal")).toContainText("本任务日志");
+});
+
+browserTest("single-page fallback keeps overview uptime ticking without starting log reads", async t => {
+  const { page, state } = await fixture(t, {
+    status: { ...runningStatus, startAt: Math.floor(Date.now() / 1000) - 3665 },
+    initScript: () => { history.replaceState = () => { throw new Error("blocked history"); }; },
+  });
+  await page.goto(origin + prefix);
+  const metric = page.locator("#statusCardMount .stat").filter({ hasText: "运行时间" }).locator(".stat-value");
+  await expect(metric).not.toHaveText("—");
+  const initial = await metric.innerText();
+  await expect.poll(() => metric.innerText(), { timeout: 3000 }).not.toBe(initial);
+  assert.deepEqual(state.liveLogQueries, []);
 });
 
 browserTest("navigation initialization failure preserves working management controls", async t => {
@@ -2399,6 +2503,50 @@ browserTest("settings actions: reauthorization locks row actions and checks once
   assert.deepEqual(state.projectWrites ?? [], []);
 });
 
+browserTest("embedded authorization surface is an accessible dialog with initial focus and Escape cleanup", async t => {
+  const { page } = await fixture(t, {
+    status: runningStatus,
+    projectDirs: [{ path: "/vol1/work" }],
+    initScript: () => { Object.defineProperty(window, "parent", { value: {} }); },
+  });
+  await page.goto(origin + prefix + "#authorization");
+  const reauth = page.getByRole("button", { name: "重新授权" });
+  await reauth.click();
+  const dialog = page.getByRole("dialog", { name: "飞牛目录授权", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveAttribute("aria-modal", "true");
+  const cancel = dialog.getByRole("button", { name: "取消", exact: true });
+  await expect(cancel).toBeFocused();
+  await expect(dialog.locator("iframe")).toHaveAttribute("src", /authorize-user-file/);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(reauth).toBeFocused();
+});
+
+browserTest("embedded authorization cancel message closes only the matching operation", async t => {
+  const { page } = await fixture(t, {
+    status: runningStatus,
+    projectDirs: [{ path: "/vol1/work" }],
+    initScript: () => { Object.defineProperty(window, "parent", { value: {} }); },
+  });
+  await page.goto(origin + prefix + "#authorization");
+  const reauth = page.getByRole("button", { name: "重新授权" });
+  await reauth.click();
+  const dialog = page.getByRole("dialog", { name: "飞牛目录授权", exact: true });
+  const src = await dialog.locator("iframe").getAttribute("src");
+  const state = new URL(src, origin).searchParams.get("state");
+  await page.evaluate(state => {
+    window.postMessage({ type: "unrelated-message", state }, location.origin);
+    window.postMessage({ type: "qwenpaw:authorized-directory-cancel", state: "wrong-state" }, location.origin);
+  }, state);
+  await expect(dialog).toBeVisible();
+  await page.evaluate(state => {
+    window.postMessage({ type: "qwenpaw:authorized-directory-cancel", state }, location.origin);
+  }, state);
+  await expect(dialog).toHaveCount(0);
+  await expect(reauth).toBeFocused();
+});
+
 browserTest("settings actions: cancelling public access restores the private toggle without a write", async t => {
   const { page, state } = await fixture(t, {status: runningStatus});
   await page.goto(origin + prefix + "#configuration");
@@ -2428,36 +2576,40 @@ browserTest("settings actions: double removal keeps confirmation focus and only 
   assert.deepEqual(state.projectDirs, [keep]);
 });
 
-browserTest('fresh and unknown proxy state never offer shell password or migration', async t => {
-  const {page, state} = await fixture(t, {proxy: {port:43126, public:false, passwordConfigured:false}});
-  for (const status of [false, null]) {
-    state.proxy.passwordConfigured = status;
-    await page.goto(origin + prefix + '#configuration'); await page.reload();
-    await expect(page.locator('#proxyPasswordState')).toHaveText(status === false ? 'QwenPaw 原生账号' : '无法确认');
-    await expect(page.getByRole('button', {name:/设置反代密码|更换反代密码|切换为原生登录/})).toHaveCount(0);
-  }
-  assert.deepEqual(state.posts, []);
+browserTest("configuration distinguishes the fnOS desktop entry from standalone proxy login", async t => {
+  const { page } = await fixture(t, {
+    status: runningStatus,
+    proxy: { success: true, port: 43126, public: false, entryLogin: true },
+  });
+  await page.goto(origin + prefix + "#configuration");
+  await expect(page.getByText("内核回环端口", { exact: true })).toBeVisible();
+  await expect(page.getByText("独立反代登录方式", { exact: true })).toBeVisible();
+  await expect(page.locator("#entryLoginState")).toContainText("飞牛桌面入口");
+  await expect(page.locator("#entryLoginState")).toContainText("使用飞牛管理员会话");
+  await expect(page.locator("#entryLoginDescription")).toHaveText("飞牛桌面入口使用飞牛管理员身份；独立 Web 反代使用 QwenPaw 原生账号。");
+  await expect(page.getByRole("button", { name: "已切换为入口登录", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重置 QwenPaw 管理员密码", exact: true })).toBeVisible();
+  await page.screenshot({ path: join(screenshotDirectory, "configuration-entry-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('#uiStyleGroup [data-ui-style-option="miuix"]').click();
+  await page.screenshot({ path: join(screenshotDirectory, "configuration-entry-mobile-miuix-390.png"), fullPage: true });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  const reset = await box(page.locator("#resetAuthBtn"));
+  assert.ok(reset.height >= 44, `reset touch target ${reset.height}`);
+  await page.locator('#localeModeGroup [data-locale-option="en"]').click();
+  await expect(page.getByText("Kernel Loopback Port", { exact: true })).toBeVisible();
+  await expect(page.getByText("Standalone Proxy Login", { exact: true })).toBeVisible();
+  await expect(page.locator("#entryLoginState")).toContainText("fnOS Desktop Entry");
+  await expect(page.locator("#entryLoginDescription")).toContainText("standalone Web proxy uses your QwenPaw native account");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
 });
 
-browserTest('legacy proxy migration is explicit, cancellable, and only sends the native password once', async t => {
-  const {page, state} = await fixture(t, {proxy:{port:43126, public:false, passwordConfigured:true}, viewport:{width:375,height:812}});
+browserTest('standalone proxy only offers native login, including upgraded installations', async t => {
+  const {page, state} = await fixture(t, {proxy: {port:43126, public:false, passwordConfigured:true}});
   await page.goto(origin + prefix + '#configuration');
-  const open = page.getByRole('button', {name:'切换为原生登录'});
-  await open.click();
-  const dialog = page.getByRole('dialog', {name:'切换为原生登录'});
-  await expect(dialog.getByRole('button', {name:'取消'})).toBeFocused();
-  await dialog.getByLabel('QwenPaw 密码').fill('discarded');
-  await page.keyboard.press('Escape'); await expect(open).toBeFocused();
-  assert.deepEqual(state.posts, []);
-  await open.click();
-  const password = dialog.getByLabel('QwenPaw 密码');
-  await expect(password).toHaveValue(''); await expect(password).toHaveAttribute('autocomplete','current-password');
-  const value = ' native fixture 🔒 ';
-  await dialog.getByLabel('QwenPaw 用户名').fill('owner'); await password.fill(value);
-  await dialog.getByRole('button',{name:'验证并切换'}).click();
   await expect(page.locator('#proxyPasswordState')).toHaveText('QwenPaw 原生账号');
-  assert.deepEqual(state.posts,[{path:'web-proxy/use-native-login',body:{confirm:true,username:'owner',password:value},csrf:'test-token'}]);
-  await expect(open).toHaveCount(0);
+  await expect(page.getByRole('button', {name:/设置反代密码|更换反代密码|切换为原生登录/})).toHaveCount(0);
+  assert.deepEqual(state.posts, []);
 });
 
 browserTest('log panel filters by level and keyword without extra requests and copies filtered lines', async t => {
@@ -2501,6 +2653,20 @@ browserTest('log panel filters by level and keyword without extra requests and c
   await expect(terminal).toContainText('INFO boot completed');
   await expect(page.locator('#logFilterCount')).toHaveCount(0);
   assert.equal(state.logRequests, beforeReads);
+});
+
+browserTest('mirror dropdown canonicalizes official and preset trailing-slash URLs', async t => {
+  for (const [mirror, label] of [
+    ['https://pypi.org/simple', 'PyPI 官方源'],
+    ['https://pypi.org/simple/', 'PyPI 官方源'],
+    ['https://pypi.tuna.tsinghua.edu.cn/simple/', '清华大学镜像源'],
+  ]) {
+    const { page } = await fixture(t, { status: runningStatus, mirror });
+    await page.goto(origin + prefix);
+    await page.locator('#mirrorToggleBtn').click();
+    await expect(page.locator('#mirrorLabel')).toHaveText(label);
+    await expect(page.locator('#mirrorDropdown .history-item[aria-pressed="true"]')).toContainText(label);
+  }
 });
 
 browserTest('mirror dropdown supports keyboard navigation and restores focus on Escape', async t => {

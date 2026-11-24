@@ -8,12 +8,12 @@
             },
             {
                 "type": "tips",
-                "helpText": "重建运行环境或应用匹配版本的兼容补丁时可能需要从下方镜像下载；已有账号不会因升级被清空。"
+                "helpText": "重建运行环境或应用匹配版本的兼容补丁时可能需要下载；已有下载源会继续沿用，下方选择仅在尚未配置时用于初始化。可在控制台查看或更换。"
             },
             {
                 "type": "select",
                 "field": "wizard_pypi_mirror",
-                "label": "PyPI 安装源（仅运行环境重建时使用）",
+                "label": "PyPI 安装源（已有配置会保留）",
                 "initValue": "aliyun",
                 "options": [
                     {
@@ -27,6 +27,10 @@
                     {
                         "label": "中科大镜像源",
                         "value": "ustc"
+                    },
+                    {
+                        "label": "腾讯云镜像源",
+                        "value": "tencent"
                     },
                     {
                         "label": "PyPI 官方源",

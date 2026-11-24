@@ -9,7 +9,7 @@ use axum::{
     },
 };
 use serde_json::json;
-use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
+use tokio_stream::{wrappers::WatchStream, Stream, StreamExt};
 
 use super::{check_token, err_json, AppState};
 use crate::install::phase_wire;
@@ -26,6 +26,29 @@ fn auth_probe_path(state: &AppState) -> &'static str {
     } else {
         "/app/qwenpaw/web/api/auth/status"
     }
+}
+
+fn parse_auth_response(response: &[u8]) -> Option<&'static str> {
+    let response = std::str::from_utf8(response).ok()?;
+    let (headers, body) = response.split_once("\r\n\r\n")?;
+    let mut status_line = headers.lines().next()?.split_whitespace();
+    if !matches!(status_line.next()?, "HTTP/1.0" | "HTTP/1.1") {
+        return None;
+    }
+    if !StatusCode::from_bytes(status_line.next()?.as_bytes())
+        .ok()?
+        .is_success()
+    {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let enabled = value.get("enabled")?.as_bool()?;
+    let has_users = value.get("has_users")?.as_bool()?;
+    Some(match (enabled, has_users) {
+        (true, false) => "uninitialized",
+        (true, true) => "protected",
+        (false, _) => "disabled",
+    })
 }
 
 fn auth_status(state: &AppState, running: bool, port: u16) -> String {
@@ -54,25 +77,8 @@ fn auth_status(state: &AppState, running: bool, port: u16) -> String {
             if stream.write_all(req.as_bytes()).is_ok() {
                 let mut buf = Vec::new();
                 if stream.read_to_end(&mut buf).is_ok() {
-                    let response = String::from_utf8_lossy(&buf);
-                    if let Some(body_idx) = response.find("\r\n\r\n") {
-                        if let Ok(value) =
-                            serde_json::from_str::<serde_json::Value>(&response[body_idx + 4..])
-                        {
-                            let enabled = value
-                                .get("enabled")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            let has_users = value
-                                .get("has_users")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            status = match (enabled, has_users) {
-                                (true, false) => "uninitialized",
-                                (true, true) => "protected",
-                                _ => "disabled",
-                            };
-                        }
+                    if let Some(probed) = parse_auth_response(&buf) {
+                        status = probed;
                     }
                 }
             }
@@ -158,7 +164,7 @@ pub(super) async fn status(
         .into_response()
 }
 
-/// SSE events are invalidation signals: always emit a fresh full snapshot, including after lag.
+/// SSE sends a fresh full snapshot for pending invalidations, not a history of changes.
 pub(super) async fn events(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -169,12 +175,16 @@ pub(super) async fn events(
         // 且 EventSource 层面无法区分"连上了但被拒"与正常流。
         return err_json(StatusCode::UNAUTHORIZED, "invalid token");
     }
+    // Subscribe before the first read so a change during rendering stays pending.
     let rx = state.events.subscribe();
     let first = render_snapshot_blocking(state.clone()).await;
     let log_path = (req.uri().query() == Some("watch=logs")).then(|| state.kernel_log.clone());
-    let metrics = (req.uri().query() == Some("watch=metrics")).then(|| state.kernel.clone());
+    let metrics = (req.uri().query() == Some("watch=metrics")).then(|| {
+        let kernel = state.kernel.clone();
+        state.metrics.subscribe(move || kernel.metrics_now())
+    });
     let updates_state = state;
-    let snap_stream = BroadcastStream::new(rx).then(move |_| {
+    let snap_stream = WatchStream::from_changes(rx).then(move |()| {
         let state = updates_state.clone();
         async move {
             let snapshot = render_snapshot_blocking(state).await;
@@ -182,37 +192,23 @@ pub(super) async fn events(
         }
     });
     let first_stream = tokio_stream::once(Ok(Event::default().event("snapshot").data(first)));
-    let snapshots = first_stream.chain(snap_stream);
-    let merged: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
+    let updates: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
         if let Some(path) = log_path {
-            Box::pin(snapshots.merge(log_changes(path, std::time::Duration::from_secs(2))))
-        } else if let Some(kernel) = metrics {
-            use std::time::Duration;
-            let period = Duration::from_secs(1);
-            let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let samples = tokio_stream::wrappers::IntervalStream::new(timer)
-                .then(move |_| {
-                    let kernel = kernel.clone();
-                    async move {
-                        let (pid, start, cpu, mem) =
-                            tokio::task::spawn_blocking(move || kernel.metrics_now())
-                                .await
-                                .ok()?;
-                        let start = start
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs());
-                        Some(Ok(Event::default().event("metrics").data(
-                            json!({"pid":pid,"startAt":start,"cpu":cpu,"memKB":mem}).to_string(),
-                        )))
-                    }
-                })
-                .filter_map(|sample| sample);
-            Box::pin(snapshots.merge(samples))
+            Box::pin(snap_stream.merge(log_changes(path, std::time::Duration::from_secs(2))))
+        } else if let Some(metrics) = metrics {
+            let samples = metrics.map(|(pid, start, cpu, mem)| {
+                let start = start
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                Ok(Event::default()
+                    .event("metrics")
+                    .data(json!({"pid":pid,"startAt":start,"cpu":cpu,"memKB":mem}).to_string()))
+            });
+            Box::pin(snap_stream.merge(samples))
         } else {
-            Box::pin(snapshots)
+            Box::pin(snap_stream)
         };
-    Sse::new(merged)
+    Sse::new(first_stream.chain(updates))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -246,6 +242,52 @@ fn log_changes(
 mod tests {
     use super::*;
     use crate::api::test_support::TestDir;
+
+    #[tokio::test]
+    async fn settings_handler_refreshes_auth_display_and_events_only_when_needed() {
+        let dir = TestDir::new("settings-observers");
+        let state = dir.state(crate::api::test_support::free_port());
+        let ui = json!({".url": {"qwenpaw.main": {"port": state.kernel.port().to_string()}}});
+        std::fs::write(&state.ui_config_file, ui.to_string()).unwrap();
+
+        for (body, expected_status, refresh) in [
+            ("{}", StatusCode::OK, false),
+            (r#"{"log_level":"verbose"}"#, StatusCode::BAD_REQUEST, false),
+            (r#"{"log_level":"debug"}"#, StatusCode::OK, true),
+            (r#"{"log_level":"debug"}"#, StatusCode::OK, true),
+            (
+                r#"{"log_level":"warning"}"#,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                true,
+            ),
+        ] {
+            if expected_status == StatusCode::INTERNAL_SERVER_ERROR {
+                std::fs::write(&state.ui_config_file, "invalid json").unwrap();
+            }
+            let now = std::time::Instant::now();
+            *state.auth_cache.lock().unwrap() = AuthCache {
+                at: Some(now),
+                status: "protected".into(),
+            };
+            let events = state.events.subscribe();
+            let request = Request::post("/settings")
+                .header("X-Supervisor-Token", &state.token)
+                .body(axum::body::Body::from(body))
+                .unwrap();
+
+            let response = crate::api::settings::settings(State(state.clone()), request).await;
+
+            assert_eq!(response.status(), expected_status, "{body}");
+            assert_eq!(events.has_changed().unwrap(), refresh, "{body}");
+            let cache = state.auth_cache.lock().unwrap();
+            assert_eq!(cache.at, (!refresh).then_some(now), "{body}");
+            assert_eq!(cache.status, if refresh { "" } else { "protected" });
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("var/qwenpaw-log-level")).unwrap(),
+            "debug\n"
+        );
+    }
 
     #[tokio::test]
     async fn subscribed_log_file_wakes_on_write_and_removal_but_not_idle_ticks() {
@@ -350,9 +392,8 @@ mod tests {
             })
             .await;
 
-            state
-                .events
-                .publish(r#"{"success":false,"marker":"during-first-snapshot"}"#.into());
+            state.install.block_recovery("during first snapshot".into());
+            state.events.invalidate();
             release_tx.send(()).unwrap();
             let response = response_future.await;
             assert_eq!(response.status(), StatusCode::OK);
@@ -368,40 +409,174 @@ mod tests {
                 .expect("event published during first snapshot was lost")
                 .unwrap()
                 .unwrap();
-            let update = snapshot_from_frame(&update);
-            assert_eq!(update["success"], true);
-            assert!(update.get("marker").is_none());
+            assert_eq!(
+                snapshot_from_frame(&update)["install"]["recovery_error"],
+                "during first snapshot"
+            );
             blocker.await.unwrap();
         });
     }
 
     #[tokio::test]
-    async fn events_emit_a_fresh_snapshot_after_broadcast_lag() {
-        let dir = TestDir::new("events-broadcast-lag");
+    async fn events_coalesce_pending_invalidations_into_one_fresh_snapshot() {
+        use std::time::Duration;
+
+        let dir = TestDir::new("events-coalesce");
         let state = dir.state(crate::api::test_support::free_port());
         let response = events(State(state.clone()), event_request(&state)).await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        let deadline = Duration::from_secs(2);
+        let first = tokio::time::timeout(deadline, stream.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot_from_frame(&first)["success"], true);
+        assert_eq!(
+            snapshot_from_frame(&first)["install"]["recovery_required"],
+            false
+        );
 
         for index in 0..17 {
             state
-                .events
-                .publish(serde_json::json!({"marker": index}).to_string());
+                .install
+                .block_recovery(format!("recovery change {index}"));
+            state.events.invalidate();
         }
-        let update = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        let update = tokio::time::timeout(deadline, stream.next())
             .await
-            .expect("lag must cause a current full snapshot")
+            .expect("pending changes must cause a current full snapshot")
             .unwrap()
             .unwrap();
-        let update = snapshot_from_frame(&update);
-        assert_eq!(update["success"], true);
-        assert!(update.get("marker").is_none());
+        assert_eq!(
+            snapshot_from_frame(&update)["install"]["recovery_error"],
+            "recovery change 16"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), stream.next())
+                .await
+                .is_err(),
+            "pending notifications must not replay redundant snapshots"
+        );
+
+        state.install.block_recovery("later change".into());
+        state.events.invalidate();
+        let next = tokio::time::timeout(deadline, stream.next())
+            .await
+            .expect("a new change must wake the stream again")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot_from_frame(&next)["install"]["recovery_error"],
+            "later change"
+        );
+    }
+
+    fn probe_response(response: String, delay: std::time::Duration) -> String {
+        use std::io::{BufRead, Write};
+
+        let dir = TestDir::new("auth-response");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = dir.state(port);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request, "GET /api/auth/status HTTP/1.1\r\n");
+            loop {
+                let mut header = String::new();
+                assert_ne!(reader.read_line(&mut header).unwrap(), 0);
+                if header == "\r\n" {
+                    break;
+                }
+            }
+            std::thread::sleep(delay);
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let status = auth_status(&state, true, port);
+        server.join().unwrap();
+        status
+    }
+
+    fn probe_json(status_line: &str, body: &str) -> String {
+        probe_response(
+            format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+            std::time::Duration::ZERO,
+        )
+    }
+
+    #[test]
+    fn auth_probe_rejects_unsuccessful_http_responses() {
+        for status in [
+            "HTTP/1.1 301 Moved Permanently",
+            "HTTP/1.1 401 Unauthorized",
+            "HTTP/1.1 403 Forbidden",
+            "HTTP/1.1 404 Not Found",
+            "HTTP/1.1 405 Method Not Allowed",
+            "HTTP/1.1 500 Internal Server Error",
+            "INVALID 200 OK",
+        ] {
+            assert_eq!(
+                probe_json(status, r#"{"enabled":false,"has_users":false}"#),
+                "unknown",
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_probe_requires_both_boolean_fields() {
+        for body in [
+            "{}",
+            r#"{"enabled":false}"#,
+            r#"{"has_users":false}"#,
+            r#"{"enabled":true}"#,
+            r#"{"enabled":"false","has_users":false}"#,
+            r#"{"enabled":false,"has_users":0}"#,
+            r#"{"enabled":null,"has_users":false}"#,
+            r#"{"enabled":true,"has_users":null}"#,
+            "[]",
+            "not JSON",
+        ] {
+            assert_eq!(probe_json("HTTP/1.1 200 OK", body), "unknown", "{body}");
+        }
+    }
+
+    #[test]
+    fn auth_probe_preserves_valid_auth_states() {
+        for (body, expected) in [
+            (r#"{"enabled":false,"has_users":false}"#, "disabled"),
+            (r#"{"enabled":false,"has_users":true}"#, "disabled"),
+            (r#"{"enabled":true,"has_users":false}"#, "uninitialized"),
+            (r#"{"enabled":true,"has_users":true}"#, "protected"),
+        ] {
+            assert_eq!(probe_json("HTTP/1.1 200 OK", body), expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn auth_probe_timeout_and_unavailable_kernel_are_unknown() {
+        assert_eq!(
+            probe_response(
+                "HTTP/1.1 200 OK\r\n\r\n{\"enabled\":false,\"has_users\":false}".into(),
+                std::time::Duration::from_millis(600),
+            ),
+            "unknown"
+        );
+        let dir = TestDir::new("auth-unavailable");
+        let port = crate::api::test_support::free_port();
+        let state = dir.state(port);
+        assert_eq!(auth_status(&state, true, port), "unknown");
+        *state.auth_cache.lock().unwrap() = AuthCache::default();
+        assert_eq!(auth_status(&state, false, port), "unknown");
     }
 
     #[test]

@@ -222,16 +222,16 @@ if [ "$INIT_READY" -eq 1 ]; then
         bad "config_init 默认回显异常: $out6a"
     fi
 
-    # 6.2 config_init 自定义落盘值回显 (动态端口与 debug 日志级别)
+    # 6.2 config_init 自定义落盘值回显 (动态端口与 trace 日志级别)
     mkdir -p "${T}/cfg_var2"
     printf '%s\n' "$INIT_SERVICE_PORT" > "${T}/cfg_var2/service_port"
-    echo "debug" > "${T}/cfg_var2/qwenpaw-log-level"
+    echo "trace" > "${T}/cfg_var2/qwenpaw-log-level"
     out6b="$(env TRIM_PKGVAR="${T}/cfg_var2" TRIM_APPDEST="$INIT_DEST" \
         SUPERVISOR_PORT="$INIT_SUP_PORT" TRIM_SERVICE_PORT="$INIT_SERVICE_PORT" \
         bash "$ROOT/cmd/config_init")"
     if echo "$out6b" | grep -q "wizard_port=${INIT_SERVICE_PORT}" \
         && echo "$out6b" | grep -q "service_port=${INIT_SERVICE_PORT}" \
-        && echo "$out6b" | grep -q "wizard_log_level=debug"; then
+        && echo "$out6b" | grep -q "wizard_log_level=trace"; then
         ok "config_init 动态端口与日志级别回显正常 (避免设置弹窗覆盖重置)"
     else
         bad "config_init 自定义回显异常: $out6b"

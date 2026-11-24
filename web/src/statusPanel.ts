@@ -1,10 +1,10 @@
 import type { ApiClient, StatusResponse } from "./api";
 import { shallowReactive, watch } from "vue";
-import type { StatusData } from "./statusStore";
-import { formatUptime, isStatusSnapshot } from "./statusStore";
-import type { createVersionPanel } from "./versionPanel";
-import { authPresentation, type ManagementState } from "./managementState";
-import { currentLocale, t } from "./i18n";
+import type { StatusData } from "./statusStore.ts";
+import { formatUptime, isStatusSnapshot } from "./statusStore.ts";
+import type { createVersionPanel } from "./versionPanel.ts";
+import { authPresentation, type ManagementState } from "./managementState.ts";
+import { currentLocale, t } from "./i18n.ts";
 
 interface StatusPanelOptions {
   state: ManagementState;
@@ -12,12 +12,13 @@ interface StatusPanelOptions {
   versionPanel: ReturnType<typeof createVersionPanel>;
   errorMessage(error: unknown): string;
   updateOverviewInstaller(): void;
+  visible(): boolean;
 }
 
 type CheckedState = "idle" | "ok" | "error";
 type VersionState = "initial" | "installed" | "pending" | "uninstalled" | "unavailable";
 
-export function createStatusPanel({ api, state, versionPanel, errorMessage, updateOverviewInstaller }: StatusPanelOptions) {
+export function createStatusPanel({ api, state, versionPanel, errorMessage, updateOverviewInstaller, visible }: StatusPanelOptions) {
   let statusReqSeq = 0;
   let lastEventRecoveryAt = -Infinity;
   let eventRecovery: Promise<void> | null = null;
@@ -25,6 +26,8 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
     reachable: null as boolean | null,
     recovery: "",
     data: null as StatusData | null,
+    cpu: null as number | null,
+    memKB: null as number | null,
     busyInstall: false,
     versionState: "initial" as VersionState,
     versionValue: "",
@@ -36,6 +39,8 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
     get reachable() { return raw.reachable; },
     get recovery() { return raw.recovery; },
     get data() { return raw.data; },
+    get cpu() { return raw.cpu; },
+    get memKB() { return raw.memKB; },
     get busyInstall() { return raw.busyInstall; },
     get uptime() { return raw.uptime; },
     get version() {
@@ -56,10 +61,11 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
 
   let uptimeTimer: ReturnType<typeof setInterval> | null = null;
   function syncUptimeTimer(): void {
-    const running = !!raw.data?.startAt;
+    const running = !!raw.data?.startAt && visible() && !document.hidden;
     if (running && uptimeTimer === null) {
       uptimeTimer = window.setInterval(() => {
-        if (!document.hidden) updateUptime();
+        if (visible() && !document.hidden) updateUptime();
+        else syncUptimeTimer();
       }, 1000);
     } else if (!running && uptimeTimer !== null) {
       window.clearInterval(uptimeTimer);
@@ -109,8 +115,9 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
         raw.versionValue = "";
       }
       raw.data = { installed: data.installed, recoveryReason: raw.recovery, running: !!data.running,
-        pid: String(data.pid ?? "-"), startAt: data.running && data.startAt ? data.startAt : null,
-        cpu: typeof data.cpu === "number" ? data.cpu : null, memKB: typeof data.memKB === "number" ? data.memKB : null };
+        pid: String(data.pid ?? "-"), startAt: data.running && data.startAt ? data.startAt : null };
+      raw.cpu = typeof data.cpu === "number" ? data.cpu : null;
+      raw.memKB = typeof data.memKB === "number" ? data.memKB : null;
       raw.checkedState = "ok";
       raw.checkedAt = new Date();
       versionPanel.setCurrentRunningVersion(data.installed ? data.version || "" : "");
@@ -126,7 +133,9 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
       raw.busyInstall = false;
       raw.versionState = "unavailable";
       raw.versionValue = "";
-      raw.data = { installed: null, running: false, pid: "-", startAt: null, cpu: null, memKB: null, degraded: true, degradedDetail: errorMessage(error) };
+      raw.data = { installed: null, running: false, pid: "-", startAt: null, degraded: true, degradedDetail: errorMessage(error) };
+      raw.cpu = null;
+      raw.memKB = null;
       state.servicePort = t("status.unavailable");
       state.auth = authPresentation("offline");
     }
@@ -168,10 +177,15 @@ export function createStatusPanel({ api, state, versionPanel, errorMessage, upda
         if (String(m.pid) !== current.pid || m.startAt !== current.startAt ||
           !(m.cpu === null || (Number.isFinite(m.cpu) && m.cpu >= 0 && m.cpu <= 100)) ||
           !Number.isSafeInteger(m.memKB) || m.memKB < 0) return;
-        raw.data = { ...current, cpu: m.cpu, memKB: m.memKB };
+        raw.cpu = m.cpu;
+        raw.memKB = m.memKB;
       } catch { /* A partial resource frame never changes process or action state. */ }
     },
     recoverEvents: recoverInvalidEvent,
+    viewChanged: () => {
+      if (visible() && !document.hidden) updateUptime();
+      else syncUptimeTimer();
+    },
     destroy: () => {
       stopLocaleWatch();
       if (uptimeTimer !== null) {

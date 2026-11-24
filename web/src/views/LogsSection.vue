@@ -89,7 +89,7 @@ const emptyText = computed(() => {
         <div class="terminal-controls">
           <button v-if="panel.navigation.section === null" type="button" class="btn-outline btn-sm" @click="panel.logs.refresh(true)">{{ t('logs.refresh') }}</button>
           <label v-else class="check-label">
-            <input type="checkbox" id="autoRefreshCheck" checked @change="panel.toggleAutoRefresh(($event.target as HTMLInputElement).checked)"> {{ t('logs.autoRefresh') }}
+            <input type="checkbox" id="autoRefreshCheck" v-model="view.autoRefresh" @change="panel.toggleAutoRefresh(view.autoRefresh)"> {{ t('logs.autoRefresh') }}
           </label>
           <button type="button" class="btn-outline btn-sm" id="copyLogsBtn" :disabled="!visibleLines.length" @click="panel.copyLogs(visibleLines)">{{ t('logs.copyFiltered') }}</button>
           <button type="button" class="btn-outline btn-sm" id="clearLogsBtn" @click="panel.clearTerminalLogs()">{{ t('logs.clearLogs') }}</button>

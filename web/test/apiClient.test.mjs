@@ -4,6 +4,7 @@ import {
   ApiClientError,
   createApiClient,
   deriveApiBase,
+  fetchWithTimeout,
   readCsrfToken,
 } from "../src/api.ts";
 
@@ -31,6 +32,16 @@ test("readCsrfToken rejects duplicated CSRF cookie names", () => {
   assert.equal(readCsrfToken("__Host-qwenpaw_csrf=first; __Host-qwenpaw_csrf=second"), "");
   assert.equal(readCsrfToken("__Host-qwenpaw_csrf=first; __Host-qwenpaw_csrf=second; qwenpaw_csrf=legacy"), "");
   assert.equal(readCsrfToken("qwenpaw_csrf=first; qwenpaw_csrf=second"), "");
+});
+
+test("fetchWithTimeout aborts a stalled request", async () => {
+  let signal;
+  const pending = fetchWithTimeout("/app/qwenpaw/api/authorized-dirs/check", { method: "POST" }, 15, async (_url, init) => {
+    signal = init.signal;
+    return new Promise(() => {});
+  });
+  await assert.rejects(pending, /timed out after 15ms/);
+  assert.equal(signal.aborted, true);
 });
 
 test("HTTP 409 JSON remains available to callers with its status", async () => {

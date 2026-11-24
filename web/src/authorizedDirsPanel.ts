@@ -10,6 +10,7 @@ import {
   readStoredAuthorizationResult,
   unlinkAuthorizedDirectory,
   type ProjectDirEntry,
+  type AuthSurface,
 } from "./authorizedDirs";
 
 interface AuthorizedDirsPanelOptions {
@@ -25,7 +26,14 @@ export function createAuthorizedDirsPanel({ showToast, confirm, sdk = new TrimAp
   const raw = reactive({
     busy: false, confirmingRemove: "", canOpen: canOpenDirectory(), entries: null as ProjectDirEntry[] | null,
     listErrorText: emptyText as () => string, messageText: emptyText as () => string, error: false,
+    surfaceOpen: false, surfaceUrl: "about:blank", surfaceTrigger: null as HTMLElement | null,
   });
+  const authorizationSurface: AuthSurface = {
+    get closed() { return !raw.surfaceOpen; },
+    navigate(url) { raw.surfaceUrl = url; raw.surfaceOpen = true; },
+    close() { raw.surfaceOpen = false; raw.surfaceUrl = "about:blank"; },
+  };
+  const surfaceForWindow = () => window.parent !== window ? authorizationSurface : undefined;
   const state = {
     get busy() { return raw.busy; },
     get confirmingRemove() { return raw.confirmingRemove; },
@@ -34,6 +42,12 @@ export function createAuthorizedDirsPanel({ showToast, confirm, sdk = new TrimAp
     get listError() { return raw.listErrorText(); },
     get message() { return raw.messageText(); },
     get error() { return raw.error; },
+    surface: {
+      get open() { return raw.surfaceOpen; },
+      get url() { return raw.surfaceUrl; },
+      get trigger() { return raw.surfaceTrigger; },
+      close: authorizationSurface.close,
+    },
   };
 
   function setStage(message: () => string, error = false): void {
@@ -71,10 +85,11 @@ export function createAuthorizedDirsPanel({ showToast, confirm, sdk = new TrimAp
 
   async function add(): Promise<void> {
     if (raw.busy) return;
+    raw.surfaceTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     raw.busy = true;
     setStage(() => t("authz.opening"));
     try {
-      const result = await authorizeDirectory();
+      const result = await authorizeDirectory("", surfaceForWindow());
       if (!result.paths.length) throw new Error(t("authz.noSelectableDir"));
       const firstPath = result.paths[0];
       setStage(() => t("authz.receivedBinding", { path: firstPath }));
@@ -135,9 +150,10 @@ export function createAuthorizedDirsPanel({ showToast, confirm, sdk = new TrimAp
 
   async function reauthorize(path: string): Promise<void> {
     if (raw.busy) return;
+    raw.surfaceTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     raw.busy = true;
     try {
-      await authorizeDirectory(path);
+      await authorizeDirectory(path, surfaceForWindow());
       const health = await checkDirectory(path);
       await readEntries();
       showToast(health.readable && health.writable ? t("authz.reauthOk") : t("authz.reauthLimited"));
@@ -191,7 +207,15 @@ export function createAuthorizedDirsPanel({ showToast, confirm, sdk = new TrimAp
     }
   }
 
-  window.addEventListener("flutterInAppWebViewPlatformReady", () => { raw.canOpen = canOpenDirectory(); });
-  return { state, refresh, restorePending, add, openDirectory, reauthorize, remove };
+  const onPlatformReady = () => { raw.canOpen = canOpenDirectory(); };
+  window.addEventListener("flutterInAppWebViewPlatformReady", onPlatformReady);
+  return {
+    state, refresh, restorePending, add, openDirectory, reauthorize, remove,
+    destroy: () => {
+      window.removeEventListener("flutterInAppWebViewPlatformReady", onPlatformReady);
+      authorizationSurface.close();
+      raw.surfaceTrigger = null;
+    },
+  };
 }
 export type AuthorizedDirsState = ReturnType<typeof createAuthorizedDirsPanel>["state"];

@@ -1009,6 +1009,68 @@ class GatewayUDSTests(unittest.TestCase):
         self.assertEqual(placeholder.read_bytes(), b"ordinary probe placeholder must remain\n")
         self.assert_gateway_probe(f)
 
+    def test_metrics_subscribers_follow_the_running_kernel_after_restart(self):
+        f = self.fixture
+        f.install_runtime()
+        f.start()
+        csrf = f.csrf()
+        self.assertTrue(response_json(f.request(API + "/start", "POST", csrf, {}))["success"])
+        f.remember_tree()
+
+        def next_frame(response, deadline):
+            fields = {}
+            while time.monotonic() < deadline:
+                line = response.readline(65536)
+                self.assertTrue(line, "SSE ended before the next frame")
+                if not line.strip():
+                    if "event" in fields and "data" in fields:
+                        return fields["event"], json.loads(fields["data"])
+                    fields.clear()
+                else:
+                    key, _, value = line.decode().partition(":")
+                    fields[key] = value.strip()
+            self.fail("SSE did not deliver a complete frame")
+
+        def subscribe():
+            connection = UnixHTTPConnection(f.gateway, timeout=5)
+            self.addCleanup(connection.close)
+            connection.request("GET", API + "/events?watch=metrics", headers=ADMIN)
+            response = connection.getresponse()
+            self.addCleanup(response.close)
+            self.assertEqual(response.status, 200)
+            self.assertIn("text/event-stream", response.getheader("content-type", ""))
+            event, snapshot = next_frame(response, time.monotonic() + 5)
+            self.assertEqual(event, "snapshot")
+            self.assertTrue(snapshot["running"], snapshot)
+            return response, (int(snapshot["pid"]), snapshot["startAt"])
+
+        def next_metrics(response, expected=None):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                kind, data = next_frame(response, deadline)
+                if kind == "metrics":
+                    self.assertEqual(set(data), {"pid", "startAt", "cpu", "memKB"})
+                    identity = (data["pid"], data["startAt"])
+                    if expected is None or identity == expected:
+                        return identity
+            self.fail(f"metrics did not report expected kernel {expected}")
+
+        first, old = subscribe()
+        self.assertEqual(next_metrics(first), old)
+        second, same = subscribe()
+        self.assertEqual(same, old)
+        self.assertEqual(next_metrics(second), old)
+
+        result = response_json(f.request(API + "/restart", "POST", csrf, {}))
+        self.assertTrue(result["success"], result)
+        self.assertNotEqual(result["pid"], old[0])
+        f.remember_tree()
+        new_connection, current = subscribe()
+        self.assertEqual(current[0], result["pid"])
+        self.assertEqual(next_metrics(new_connection), current)
+        for response in (first, second):
+            self.assertEqual(next_metrics(response, expected=current), current)
+
     def test_sse_connections_cannot_starve_management_or_readiness(self):
         f = self.fixture
         f.start()

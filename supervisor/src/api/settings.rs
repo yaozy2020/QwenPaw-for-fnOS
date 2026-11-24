@@ -11,8 +11,8 @@ use serde_json::json;
 
 use super::{
     begin_operation, check_token, err_json, err_json_code, management_error_response, AppState,
-    AuthCache,
 };
+
 pub(super) async fn kernel_reset_auth(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -42,6 +42,13 @@ pub(super) async fn kernel_reset_auth(
         )
     };
     if !state.kernel.supports_native_proxy() {
+        if state.kernel.native_proxy_restart_required() {
+            return err_json_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "native_auth_adopted_restart_required",
+                "当前内核由管理服务重启后接管，请先在概览重启 QwenPaw 服务，再重置密码",
+            );
+        }
         return unavailable();
     }
     let Ok(request) = Request::post(format!(
@@ -134,7 +141,8 @@ pub(super) async fn mirror_set(
         Err(error) => return err_json(StatusCode::BAD_REQUEST, &error.to_string()),
     };
     match state.core.set_mirror(&request.mirror) {
-        Ok(()) => Json(json!({"success": true, "code": "mirror_saved", "message": "下载源已保存"})).into_response(),
+        Ok(()) => Json(json!({"success": true, "code": "mirror_saved", "message": "下载源已保存"}))
+            .into_response(),
         Err(error) => management_error_response(error),
     }
 }
@@ -157,7 +165,7 @@ pub(super) async fn web_proxy_port_get(
         return err_json(StatusCode::NOT_FOUND, "Web 反代未启用");
     };
     let (port, public) = manager.state().await;
-    let mut data = json!({"success":true,"port":port,"public":public,"passwordConfigured":state.proxy_auth.password_status()});
+    let mut data = json!({"success":true,"port":port,"public":public});
     if crate::entry_login::selected(&state.kernel.entry_record()) {
         data["entryLogin"] = json!(true);
     }
@@ -195,63 +203,6 @@ pub(super) async fn entry_migrate(
     }
 }
 
-pub(super) async fn use_native_login(
-    State(state): State<AppState>,
-    req: Request<axum::body::Body>,
-) -> axum::response::Response {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Input {
-        confirm: bool,
-        username: String,
-        password: String,
-    }
-    if !check_token(&state.token, &req) {
-        return err_json(StatusCode::UNAUTHORIZED, "invalid token");
-    }
-    let _operation = match begin_operation(&state) {
-        Ok(g) => g,
-        Err(response) => return *response,
-    };
-    match state.proxy_auth.password_status() {
-        Some(true) => (),
-        Some(false) => return err_json(StatusCode::CONFLICT, "当前没有旧反代密码需要切换"),
-        None => {
-            return err_json(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "旧反代密码记录不可读，未切换",
-            )
-        }
-    }
-    let Ok(body) = axum::body::to_bytes(req.into_body(), 8192).await else {
-        return err_json(StatusCode::BAD_REQUEST, "请求无效");
-    };
-    let Ok(input) = serde_json::from_slice::<Input>(&body) else {
-        return err_json(StatusCode::BAD_REQUEST, "需要确认切换并提供原账号");
-    };
-    if !input.confirm
-        || input.username.trim().is_empty()
-        || input.username.len() > 256
-        || input.password.is_empty()
-    {
-        return err_json(StatusCode::BAD_REQUEST, "需要确认切换并提供原账号");
-    }
-    if let Err((status, message)) =
-        crate::entry_login::confirm_native_login(&state.kernel, &input.username, &input.password)
-            .await
-    {
-        return err_json(status, message);
-    }
-    if state.proxy_auth.clear_password().is_err() {
-        return err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "旧密码记录变更未确认，请重新检查配置",
-        );
-    }
-    state.events.invalidate();
-    Json(json!({"success":true})).into_response()
-}
-
 pub(super) async fn web_proxy_port_set(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
@@ -287,7 +238,11 @@ pub(super) async fn web_proxy_port_set(
         );
     }
     let Some(manager) = state.web_proxy.clone() else {
-        return err_json_code(StatusCode::NOT_FOUND, "web_proxy_disabled", "Web 反代未启用");
+        return err_json_code(
+            StatusCode::NOT_FOUND,
+            "web_proxy_disabled",
+            "Web 反代未启用",
+        );
     };
     let public = match request.public {
         Some(public) => public,
@@ -346,15 +301,7 @@ async fn settings_request(
     if let Err(error) = patch.validate(state.supervisor_port) {
         return management_error_response(error);
     }
-    let outcome = crate::runtime_settings::apply(&state.core, patch).await;
-    if outcome.notify_observers {
-        *state
-            .auth_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = AuthCache::default();
-        state.events.invalidate();
-    }
-    match outcome.result {
+    match state.apply_runtime_settings(patch).await {
         Ok(message) => Json(json!({"ok": true, "success": true, "message": message,
             "port": state.kernel.port(), "log_level": state.kernel.log_level()}))
         .into_response(),
@@ -456,49 +403,6 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
-    #[tokio::test]
-    async fn settings_handler_invalidates_after_success_and_rollback() {
-        let dir = TestDir::new("settings-observers");
-        let state = dir.state(crate::api::test_support::free_port());
-        std::fs::write(
-            &state.ui_config_file,
-            json!({".url": {"qwenpaw.main": {"port": state.kernel.port().to_string()}}})
-                .to_string(),
-        )
-        .unwrap();
-
-        let mut events = state.events.subscribe();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/settings")
-            .header("X-Supervisor-Token", &state.token)
-            .body(axum::body::Body::from(
-                json!({"log_level": "debug"}).to_string(),
-            ))
-            .unwrap();
-        let response = settings(State(state.clone()), request).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
-
-        std::fs::write(&state.ui_config_file, "invalid json").unwrap();
-        let mut events = state.events.subscribe();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/settings")
-            .header("X-Supervisor-Token", &state.token)
-            .body(axum::body::Body::from(
-                json!({"log_level": "warning"}).to_string(),
-            ))
-            .unwrap();
-        let response = settings(State(state.clone()), request).await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(events.try_recv().unwrap(), "");
-        assert_eq!(
-            std::fs::read_to_string(dir.0.join("var/qwenpaw-log-level")).unwrap(),
-            "debug\n"
-        );
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn settings_response_does_not_wait_for_slow_auth_snapshot() {
         let dir = TestDir::new("settings-slow-auth-snapshot");
@@ -524,7 +428,7 @@ mod tests {
             json!({".url": {"qwenpaw.main": {"port": port.to_string()}}}).to_string(),
         )
         .unwrap();
-        let mut events = state.events.subscribe();
+        let events = state.events.subscribe();
         let request = Request::builder()
             .method("POST")
             .uri("/settings")
@@ -539,7 +443,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(events.try_recv().unwrap(), "");
+        assert!(events.has_changed().unwrap());
         assert!(
             elapsed < Duration::from_millis(275),
             "settings response waited for the slow auth probe in snapshot rendering: {elapsed:?}"

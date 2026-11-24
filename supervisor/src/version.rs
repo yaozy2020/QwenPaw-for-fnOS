@@ -16,10 +16,10 @@ pub struct Pep440Version {
     pub raw: String,
     pub epoch: u64,
     pub release: Vec<u64>,
-    pub stage: u8, // 0=dev, 1=alpha, 2=beta, 3=rc, 4=final, 5=post
+    pub stage: u8, // 0=dev-only, 1=alpha, 2=beta, 3=rc, 4=final; post/dev are separate
     pub stage_num: u64,
-    pub post_num: u64,
-    pub dev_num: u64,
+    pub post_num: Option<u64>,
+    pub dev_num: Option<u64>,
 }
 
 impl PartialOrd for Pep440Version {
@@ -43,20 +43,24 @@ impl Ord for Pep440Version {
                 return a.cmp(&b);
             }
         }
-        // 2. 阶段比对 (dev < a < b < rc < final < post)
+        // 2. dev-only < alpha < beta < rc < final；组合后缀另行比较
         if self.stage != other.stage {
             return self.stage.cmp(&other.stage);
         }
-        // 3. 阶段号比对 (b2 > b1, rc2 > rc1)
         if self.stage_num != other.stage_num {
             return self.stage_num.cmp(&other.stage_num);
         }
-        // 4. post 编号比对
+        // 无 post < post；a1.post1 仍属于 alpha 阶段
         if self.post_num != other.post_num {
             return self.post_num.cmp(&other.post_num);
         }
-        // 5. dev 编号比对
-        self.dev_num.cmp(&other.dev_num)
+        // 同阶段与 post 下，dev 早于非 dev
+        match (self.dev_num, other.dev_num) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
     }
 }
 
@@ -121,31 +125,48 @@ impl Pep440Version {
             rest = rest[1..].to_string();
         }
 
-        let mut stage = 4u8; // 默认为 final
+        let mut stage = 4u8;
         let mut stage_num = 0u64;
-        let mut post_num = 0u64;
-        let mut dev_num = 0u64;
+        let mut post_num = None;
+        let mut dev_num = None;
 
         if !rest.is_empty() {
-            if rest.contains("post") {
-                stage = 5;
-                post_num = extract_number(&rest);
-            } else if rest.contains("dev") {
+            let original_rest = rest.clone();
+            let mut remainder = rest.as_str();
+            let mut has_pre = false;
+            for (prefix, pre_stage) in [
+                ("alpha", 1u8),
+                ("beta", 2),
+                ("pre", 3),
+                ("rc", 3),
+                ("a", 1),
+                ("b", 2),
+                ("c", 3),
+            ] {
+                if let Some((tail, number)) = consume_prefixed_number(remainder, prefix) {
+                    stage = pre_stage;
+                    stage_num = number;
+                    has_pre = true;
+                    remainder = strip_suffix_separator(tail);
+                    break;
+                }
+            }
+            if let Some((tail, number)) = consume_prefixed_number(remainder, "post") {
+                post_num = Some(number);
+                remainder = strip_suffix_separator(tail);
+            }
+            if let Some((tail, number)) = consume_prefixed_number(remainder, "dev") {
+                dev_num = Some(number);
+                remainder = tail;
+                if !has_pre && post_num.is_none() {
+                    stage = 0;
+                }
+            }
+            if !remainder.is_empty() {
                 stage = 0;
-                dev_num = extract_number(&rest);
-            } else if rest.starts_with("rc") || rest.starts_with('c') || rest.starts_with("pre") {
-                stage = 3;
-                stage_num = extract_number(&rest);
-            } else if rest.starts_with('b') || rest.starts_with("beta") {
-                stage = 2;
-                stage_num = extract_number(&rest);
-            } else if rest.starts_with('a') || rest.starts_with("alpha") {
-                stage = 1;
-                stage_num = extract_number(&rest);
-            } else {
-                // 其他情况兜底归入 dev (0)
-                stage = 0;
-                stage_num = extract_number(&rest);
+                stage_num = extract_number(&original_rest);
+                post_num = None;
+                dev_num = None;
             }
         }
 
@@ -161,8 +182,28 @@ impl Pep440Version {
     }
 
     pub fn is_beta(&self) -> bool {
-        self.stage < 4
+        self.stage < 4 || self.dev_num.is_some()
     }
+}
+
+fn strip_suffix_separator(value: &str) -> &str {
+    if value.starts_with(['.', '-', '_']) {
+        &value[1..]
+    } else {
+        value
+    }
+}
+
+fn consume_prefixed_number<'a>(value: &'a str, prefix: &str) -> Option<(&'a str, u64)> {
+    let tail = value.strip_prefix(prefix)?;
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    let (digits, remainder) = tail.split_at(digits);
+    let number = digits.bytes().fold(0u64, |number, byte| {
+        number
+            .saturating_mul(10)
+            .saturating_add((byte - b'0') as u64)
+    });
+    Some((remainder, number))
 }
 
 fn extract_number(s: &str) -> u64 {
@@ -310,6 +351,34 @@ mod tests {
         assert!(rc.is_beta());
         assert!(!final_v.is_beta());
         assert!(!post.is_beta());
+    }
+
+    #[test]
+    fn pep440_combined_pre_post_and_dev_segments_keep_their_order() {
+        let ordered = [
+            "2.3.0.dev1",
+            "2.3.0a1.dev1",
+            "2.3.0a1",
+            "2.3.0a1.post1.dev1",
+            "2.3.0a1.post1",
+            "2.3.0b1",
+            "2.3.0b1.post1",
+            "2.3.0",
+            "2.3.0.post1.dev1",
+            "2.3.0.post1",
+        ]
+        .map(|raw| Pep440Version::parse(raw).unwrap());
+        for pair in ordered.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} must precede {}",
+                pair[0].raw,
+                pair[1].raw
+            );
+        }
+        assert!(Pep440Version::parse("2.3.0b1.post1").unwrap().is_beta());
+        assert!(Pep440Version::parse("2.3.0.post1.dev1").unwrap().is_beta());
+        assert!(!Pep440Version::parse("2.3.0.post1").unwrap().is_beta());
     }
 
     #[test]

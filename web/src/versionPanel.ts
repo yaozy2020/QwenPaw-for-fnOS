@@ -1,6 +1,6 @@
 import type { ApiClient, VersionItem } from "./api";
 import { shallowReactive } from "vue";
-import { t, type MessageKey } from "./i18n";
+import { t, type MessageKey } from "./i18n.ts";
 
 export type InstallActionKind = "install" | "reinstall" | "downgrade" | "upgrade";
 
@@ -17,6 +17,58 @@ interface VersionPanelOptions {
 }
 
 const emptyText = () => "";
+
+function parseVersionForCompare(value: string): number[] {
+  if (!value) return [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const clean = value.replace(/^v/, "").trim();
+  const match = clean.match(/^(\d+)\.(\d+)(?:\.(\d+))?(.*)$/);
+  if (!match) return [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  const patch = Number.parseInt(match[3] || "0", 10);
+  const originalSuffix = match[4] || "";
+  let suffix = originalSuffix.replace(/^[._-]/, "").toLowerCase();
+  let stage = 4;
+  let num = 0;
+  let post: number | null = null;
+  let dev: number | null = null;
+  let hasPre = false;
+  const pre = suffix.match(/^(alpha|beta|pre|rc|a|b|c)(\d*)/);
+  if (pre) {
+    stage = ({ alpha: 1, a: 1, beta: 2, b: 2, pre: 3, rc: 3, c: 3 } as Record<string, number>)[pre[1]];
+    num = Number.parseInt(pre[2] || "0", 10);
+    hasPre = true;
+    suffix = suffix.slice(pre[0].length).replace(/^[._-]/, "");
+  }
+  const postMatch = suffix.match(/^post(\d*)/);
+  if (postMatch) {
+    post = Number.parseInt(postMatch[1] || "0", 10);
+    suffix = suffix.slice(postMatch[0].length).replace(/^[._-]/, "");
+  }
+  const devMatch = suffix.match(/^dev(\d*)/);
+  if (devMatch) {
+    dev = Number.parseInt(devMatch[1] || "0", 10);
+    suffix = suffix.slice(devMatch[0].length);
+    if (!hasPre && post === null) stage = 0;
+  }
+  if (suffix) {
+    stage = 0;
+    num = Number.parseInt(originalSuffix.replace(/\D/g, "") || "0", 10);
+    post = null;
+    dev = null;
+  }
+  return [major, minor, patch, stage, num, post === null ? 0 : 1, post ?? 0, dev === null ? 1 : 0, dev ?? 0];
+}
+
+export function compareVersion(v1: string, v2: string): number {
+  const left = parseVersionForCompare(v1);
+  const right = parseVersionForCompare(v2);
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] > right[index]) return 1;
+    if (left[index] < right[index]) return -1;
+  }
+  return 0;
+}
 
 export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
   const raw = shallowReactive({
@@ -40,40 +92,6 @@ export function createVersionPanel({ api, showToast }: VersionPanelOptions) {
   };
   let listRequest = 0;
   let pendingInstallAction: InstallActionKind | '' = '';
-
-  function compareVersion(v1: string, v2: string): number {
-    function parse(value: string): number[] {
-      if (!value) return [0, 0, 0, 0, 0];
-      const clean = value.replace(/^v/, "").trim();
-      const match = clean.match(/^(\d+)\.(\d+)(?:\.(\d+))?(.*)$/);
-      if (!match) return [0, 0, 0, 0, 0];
-      const major = Number.parseInt(match[1], 10);
-      const minor = Number.parseInt(match[2], 10);
-      const patch = Number.parseInt(match[3] || "0", 10);
-      const extra = match[4] || "";
-      let stage = 4;
-      let num = 0;
-      if (extra.includes(".post")) {
-        stage = 5;
-        num = Number.parseInt(extra.replace(/\D/g, "") || "0", 10);
-      } else if (extra) {
-        const suffix = extra.replace(/^[.-]/, "").toLowerCase();
-        if (suffix.startsWith("dev")) stage = 0;
-        else if (suffix.startsWith("a") || suffix.startsWith("alpha")) stage = 1;
-        else if (suffix.startsWith("b") || suffix.startsWith("beta")) stage = 2;
-        else if (suffix.startsWith("rc") || suffix.startsWith("c") || suffix.startsWith("pre")) stage = 3;
-        num = Number.parseInt(suffix.replace(/\D/g, "") || "0", 10);
-      }
-      return [major, minor, patch, stage, num];
-    }
-    const left = parse(v1);
-    const right = parse(v2);
-    for (let index = 0; index < 5; index++) {
-      if (left[index] > right[index]) return 1;
-      if (left[index] < right[index]) return -1;
-    }
-    return 0;
-  }
 
   function listedAction(current: string, selected: string) {
     return current === raw.actionsFor ? raw.list.find(item => item.version === selected)?.action : undefined;

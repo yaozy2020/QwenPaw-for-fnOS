@@ -434,30 +434,11 @@ pub fn web_tcp_router_with_access(app: AppState, public: bool) -> Router {
     };
     Router::new()
         .route(
-            "/_qwenpaw_proxy/login",
-            axum::routing::post(password_gate::login)
-                .layer(axum::extract::DefaultBodyLimit::max(2048)),
-        )
-        .route(
-            "/_qwenpaw_proxy/login.css",
-            axum::routing::get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("gateway/proxy_login.css"),
-                )
-            }),
-        )
-        .route(
-            "/_qwenpaw_proxy/login.js",
-            axum::routing::get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("gateway/proxy_login.js"),
-                )
-            }),
+            "/_qwenpaw_proxy/*retired",
+            axum::routing::any(|| async { StatusCode::NOT_FOUND }),
         )
         .fallback(web_tcp_dispatch)
-        .layer(axum::middleware::from_fn(password_gate::cache_policy))
+        .layer(axum::middleware::from_fn(tcp_policy::cache_policy))
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
 }
@@ -466,30 +447,14 @@ async fn web_tcp_dispatch(
     State(state): State<GatewayState>,
     mut request: Request<Body>,
 ) -> Response {
-    let rotated = state.app.proxy_auth.rotated.subscribe();
-    let native = match state.app.proxy_auth.password_status() {
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "旧反代密码记录不可读，独立入口已关闭。请管理员从备份恢复原记录，再重启应用。",
-            )
-                .into_response()
-        }
-        Some(false) => true,
-        Some(true) if password_gate::authorized(&state, request.headers()) => false,
-        Some(true) => return password_gate::challenge(&state),
-    };
-    if native {
-        request.extensions_mut().insert(web_proxy::NativeVisitor);
-    }
+    request.extensions_mut().insert(web_proxy::NativeVisitor);
     if !matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
-    ) && !password_gate::same_origin_write(request.headers())
+    ) && !tcp_policy::same_origin_write(request.headers())
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    request.extensions_mut().insert(rotated);
     let path = request.uri().path().to_owned();
     if let Err(status) = web_proxy::validate_path(&path) {
         return status.into_response();
@@ -501,18 +466,7 @@ async fn web_tcp_dispatch(
         )
             .into_response();
     }
-    let document = request.method() == Method::GET
-        && request
-            .headers()
-            .get(header::ACCEPT)
-            .and_then(|h| h.to_str().ok())
-            .is_some_and(|a| a.contains("text/html"))
-        && matches!(path.as_str(), "/" | "/app/qwenpaw/web/");
-    let response = web_proxy::forward_root(&state, request, &path).await;
-    if !native && document && response.status() == StatusCode::SERVICE_UNAVAILABLE {
-        return (StatusCode::SERVICE_UNAVAILABLE, "反代登录已通过，但 QwenPaw Web 尚不可用。请从飞牛控制台确认内核已启动；若已迁移且刚重启过监督者，请重启受管内核后刷新。").into_response();
-    }
-    response
+    web_proxy::forward_root(&state, request, &path).await
 }
 
 async fn dispatch(
@@ -674,13 +628,23 @@ async fn dispatch(
                 Ok(value) => value,
                 Err(()) => return forbidden("invalid csrf"),
             };
-            if !cookie
+            let timestamp = now();
+            let paired = cookie
                 .as_deref()
                 .zip(supplied.as_deref())
-                .is_some_and(|(cookie, supplied)| {
-                    constant_time_eq(cookie, supplied) && csrf.valid(cookie, now())
-                })
-            {
+                .is_some_and(|(cookie, supplied)| constant_time_eq(cookie, supplied));
+            let valid = paired
+                && cookie
+                    .as_deref()
+                    .is_some_and(|cookie| csrf.valid(cookie, timestamp));
+            if !valid {
+                if paired
+                    && cookie
+                        .as_deref()
+                        .is_some_and(|cookie| csrf.expired(cookie, timestamp))
+                {
+                    return csrf_refreshed(&csrf);
+                }
                 return forbidden("invalid csrf");
             }
         }
@@ -1010,26 +974,33 @@ impl Csrf<'_> {
     }
 
     fn valid(&self, token: &str, timestamp: u64) -> bool {
+        let Some(issued) = self.valid_signature(token) else {
+            return false;
+        };
+        issued <= timestamp && timestamp - issued <= CSRF_LIFETIME
+    }
+
+    fn expired(&self, token: &str, timestamp: u64) -> bool {
+        self.valid_signature(token)
+            .is_some_and(|issued| issued <= timestamp && timestamp - issued > CSRF_LIFETIME)
+    }
+
+    fn valid_signature(&self, token: &str) -> Option<u64> {
         let fields: Vec<_> = token.split('.').collect();
         if fields.len() != 3
             || fields[1].len() != 64
             || fields[2].len() != 64
             || !fields[1].bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return false;
+            return None;
         }
-        let Ok(issued) = fields[0].parse::<u64>() else {
-            return false;
-        };
-        if issued > timestamp || timestamp - issued > CSRF_LIFETIME {
-            return false;
-        }
-        let Some(tag) = unhex(fields[2]) else {
-            return false;
-        };
+        let issued = fields[0].parse::<u64>().ok()?;
+        let tag = unhex(fields[2])?;
         let payload = format!("{}.{}", fields[0], fields[1]);
         let key = hmac::Key::new(hmac::HMAC_SHA256, self.secret.as_bytes());
-        hmac::verify(&key, &self.message(&payload), &tag).is_ok()
+        hmac::verify(&key, &self.message(&payload), &tag)
+            .is_ok()
+            .then_some(issued)
     }
 }
 
@@ -1074,6 +1045,32 @@ fn retryable_overload() -> Response {
     response
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+fn csrf_refreshed(csrf: &Csrf<'_>) -> Response {
+    let token = match csrf.issue(now()) {
+        Ok(token) => token,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let cookie = format!(
+        "{}={token}; Path=/; SameSite=Lax{}",
+        cookie_name(csrf.secure),
+        if csrf.secure { "; Secure" } else { "" }
+    );
+    let Ok(cookie) = HeaderValue::from_str(&cookie) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut response = (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "success": false,
+            "code": "csrf_refreshed",
+            "message": "页面安全凭证已刷新，请重新执行操作"
+        })),
+    )
+        .into_response();
+    response.headers_mut().append(header::SET_COOKIE, cookie);
     response
 }
 
@@ -1196,8 +1193,8 @@ fn csrf_input(
     Ok(supplied)
 }
 
-mod password_gate;
 mod probe;
+mod tcp_policy;
 mod web_proxy;
 mod web_proxy_manager;
 pub use web_proxy_manager::WebProxyManager;
