@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { logEntryText, type LogLineInput } from '../logPanel';
-const props = defineProps<{ lines: LogLineInput[]; empty: string; success?: boolean }>();
+const props = defineProps<{ lines: LogLineInput[]; empty: string; success?: boolean; highlight?: string }>();
 
+interface HighlightPart {
+  text: string;
+  match: boolean;
+}
 interface RenderedLine {
   text: string;
   cls: string;
+  parts?: HighlightPart[];
 }
 interface LogChunk {
   key: number;
@@ -19,8 +24,27 @@ function lineClass(text: string, success?: boolean) {
   return success && /成功|Successfully/.test(text) ? 'log-success' : 'log-info';
 }
 
+function splitHighlight(text: string, keyword: string): HighlightPart[] | undefined {
+  if (!keyword) return undefined;
+  const lower = text.toLowerCase();
+  const len = keyword.length;
+  let index = lower.indexOf(keyword);
+  if (index === -1) return undefined;
+  const parts: HighlightPart[] = [];
+  let cursor = 0;
+  while (index !== -1) {
+    if (index > cursor) parts.push({ text: text.slice(cursor, index), match: false });
+    parts.push({ text: text.slice(index, index + len), match: true });
+    cursor = index + len;
+    index = lower.indexOf(keyword, cursor);
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor), match: false });
+  return parts;
+}
+
 let prevChunks = new Map<number, LogChunk>();
 let prevSuccess: boolean | undefined;
+let prevHighlight = '';
 
 function lineSequence(line: LogLineInput, index: number): number {
   return typeof line === 'object' && line !== null && 'entry' in line ? line.seq : index;
@@ -37,7 +61,8 @@ function sameSlice(raw: LogLineInput[], lines: LogLineInput[], start: number, en
 const chunks = computed(() => {
   const lines = props.lines;
   const success = props.success;
-  const reusable = prevSuccess === success;
+  const highlight = props.highlight?.trim().toLowerCase() ?? '';
+  const reusable = prevSuccess === success && prevHighlight === highlight;
   const result: LogChunk[] = [];
   for (let i = 0; i < lines.length;) {
     const key = Math.floor(lineSequence(lines[i], i) / 50);
@@ -50,7 +75,8 @@ const chunks = computed(() => {
       const raw = lines.slice(i, end);
       const items = raw.map(line => {
         const text = logEntryText(line);
-        return { text, cls: lineClass(text, success) };
+        const parts = splitHighlight(text, highlight);
+        return parts ? { text, cls: lineClass(text, success), parts } : { text, cls: lineClass(text, success) };
       });
       result.push({ key, raw, items });
     }
@@ -58,10 +84,11 @@ const chunks = computed(() => {
   }
   prevChunks = new Map(result.map(chunk => [chunk.key, chunk]));
   prevSuccess = success;
+  prevHighlight = highlight;
   return result;
 });
 </script>
 <template>
   <span v-if="!chunks.length" class="log-empty">{{ empty }}</span>
-  <div v-for="chunk in chunks" :key="chunk.key" v-memo="[chunk]" class="log-chunk"><div v-for="(line, offset) in chunk.items" :key="offset" :class="line.cls">{{ line.text }}</div></div>
+  <div v-for="chunk in chunks" :key="chunk.key" v-memo="[chunk]" class="log-chunk"><div v-for="(line, offset) in chunk.items" :key="offset" :class="line.cls"><template v-if="line.parts"><template v-for="(part, partIndex) in line.parts" :key="partIndex"><mark v-if="part.match" class="log-highlight">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></template><template v-else>{{ line.text }}</template></div></div>
 </template>

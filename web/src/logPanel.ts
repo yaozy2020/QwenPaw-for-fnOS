@@ -189,25 +189,36 @@ export function createLogPanel({ api, showToast, confirm, errorMessage, visible 
     }
   }
 
-  async function exportLogs(): Promise<void> {
+  async function exportLogs(filteredEntries?: LogLineInput[]): Promise<void> {
     if (view.exportBusy) return;
     view.exportBusy = true;
     try {
-      const result = await api.logs(LOG_WINDOW_MAX);
-      if (!result.ok || !result.data.success || !Array.isArray(result.data.logs)) {
-        throw new Error(result.data.message || t("logs.readFailedStatus", { status: result.status }));
+      let entries: LogLineInput[];
+      if (filteredEntries !== undefined) {
+        if (!filteredEntries.length) {
+          showToast(t("logs.nothingToExport"));
+          return;
+        }
+        entries = filteredEntries;
+      } else {
+        const result = await api.logs(LOG_WINDOW_MAX);
+        if (!result.ok || !result.data.success || !Array.isArray(result.data.logs)) {
+          throw new Error(result.data.message || t("logs.readFailedStatus", { status: result.status }));
+        }
+        entries = result.data.logs;
       }
-      const content = result.data.logs.map(logEntryText).join("\n") + "\n";
+      const content = entries.map(logEntryText).join("\n") + "\n";
       const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
       const link = document.createElement("a");
       link.href = url;
-      link.download = `qwenpaw-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
+      const prefix = filteredEntries !== undefined ? "qwenpaw-filtered" : "qwenpaw";
+      link.download = `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
       link.hidden = true;
       document.body.appendChild(link);
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showToast(t("logs.exportedToast", { count: result.data.logs.length }));
+      showToast(t("logs.exportedToast", { count: entries.length }));
     } catch (error) {
       showToast(t("logs.exportFailed", { error: errorMessage(error) }));
     } finally {

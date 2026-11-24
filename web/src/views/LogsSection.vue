@@ -73,7 +73,7 @@ const emptyText = computed(() => {
           <label class="check-label log-follow-control">
             <input type="checkbox" id="autoScrollCheck" v-model="view.autoScroll" @change="panel.logs.setAutoScroll(view.autoScroll)"> {{ t('logs.autoScroll') }}
           </label>
-          <button type="button" class="btn-outline btn-sm" id="exportLogsBtn" :disabled="view.exportBusy" :aria-busy="view.exportBusy || undefined" @click="panel.exportLogs()">{{ t('logs.export') }}</button>
+          <button type="button" class="btn-outline btn-sm" id="exportLogsBtn" :disabled="view.exportBusy || (filtering && !visibleLines.length)" :aria-busy="view.exportBusy || undefined" @click="panel.exportLogs(filtering ? visibleLines : undefined)">{{ filtering ? t('logs.exportFiltered') : t('logs.export') }}</button>
         </div>
       </div>
     </div>
@@ -108,6 +108,6 @@ const emptyText = computed(() => {
       </div>
     </details>
     <div v-if="view.error" role="status" class="notice notice-warn">{{ view.error }} <button type="button" class="btn-outline" @click="panel.logs.refresh(panel.navigation.section === null)">{{ t('logs.retry') }}</button></div>
-    <div class="terminal-body" id="logTerminal" role="log" :aria-label="t('logs.terminalAria')" aria-live="off" tabindex="0"><LogLines :lines="visibleLines" :empty="emptyText" /></div>
+    <div class="terminal-body" id="logTerminal" role="log" :aria-label="t('logs.terminalAria')" aria-live="off" tabindex="0"><LogLines :lines="visibleLines" :empty="emptyText" :highlight="normalizedQuery" /></div>
   </section>
 </template>

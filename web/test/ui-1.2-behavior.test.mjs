@@ -1153,6 +1153,11 @@ browserTest("about dialog exposes troubleshooting and official links with native
   }
   await dialog.locator("summary").first().click();
   await expect(dialog.locator("details").first()).toHaveAttribute("open", "");
+  await dialog.locator("#aboutCloseIconBtn").click();
+  await expect(dialog).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await expect(dialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible();
   await expect(trigger).toBeFocused();
@@ -2644,7 +2649,16 @@ browserTest('log panel filters by level and keyword without extra requests and c
   await page.locator('#logSearchInput').fill('gateway');
   await expect(terminal).toContainText('ERROR gateway timeout');
   await expect(terminal).not.toContainText('WARN slow mirror response');
+  await expect(terminal.locator('mark.log-highlight')).toHaveText(['gateway']);
   await expect(page.locator('#logFilterCount')).toHaveText('显示 1 / 4 行');
+  await expect(page.locator('#exportLogsBtn')).toHaveText('导出筛选');
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('#exportLogsBtn').click();
+  const download = await downloadPromise;
+  assert.match(download.suggestedFilename(), /^qwenpaw-filtered-.*\.log$/);
+  const exported = await readFile(await download.path(), 'utf8');
+  assert.equal(exported, 'ERROR gateway timeout on /api/status\n');
 
   await page.locator('#copyLogsBtn').click();
   await expect(page.locator('#toast')).toContainText('已复制 1 行日志');
@@ -2652,6 +2666,8 @@ browserTest('log panel filters by level and keyword without extra requests and c
 
   await page.locator('#clearLogFilterBtn').click();
   await expect(terminal).toContainText('INFO boot completed');
+  await expect(terminal.locator('mark.log-highlight')).toHaveCount(0);
+  await expect(page.locator('#exportLogsBtn')).toHaveText('导出');
   await expect(page.locator('#logFilterCount')).toHaveCount(0);
   assert.equal(state.logRequests, beforeReads);
 });

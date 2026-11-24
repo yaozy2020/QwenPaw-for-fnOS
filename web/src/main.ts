@@ -1,4 +1,5 @@
 import "./style.css";
+import "./styles/miuix.css";
 import { createManagementState } from "./managementState";
 import { createApp, reactive } from "vue";
 import App from "./App.vue";

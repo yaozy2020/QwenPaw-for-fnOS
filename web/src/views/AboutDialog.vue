@@ -23,8 +23,15 @@ defineExpose({ open });
   <dialog ref="dialog" id="aboutDialog" class="about-dialog" aria-labelledby="aboutTitle">
     <div class="about-header">
       <div class="about-title-row">
-        <h2 id="aboutTitle">{{ t('about.title') }}</h2>
-        <span id="aboutVersion" class="about-version">{{ t('about.versionBadge', { version: appVersion }) }}</span>
+        <div class="about-title-group">
+          <h2 id="aboutTitle">{{ t('about.title') }}</h2>
+          <span id="aboutVersion" class="about-version">{{ t('about.versionBadge', { version: appVersion }) }}</span>
+        </div>
+        <button type="button" class="btn-outline icon-button about-close-btn" id="aboutCloseIconBtn" :title="t('common.close')" :aria-label="t('common.close')" @click="close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12"/>
+          </svg>
+        </button>
       </div>
       <p>{{ t('about.desc') }}</p>
     </div>
