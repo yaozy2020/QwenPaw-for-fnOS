@@ -1261,13 +1261,43 @@ touch "$QWENPAW_WORKING_DIR/config.json"
     #[tokio::test(flavor = "multi_thread")]
     async fn private_settings_response_does_not_wait_for_status_snapshot() {
         use crate::api::test_support::{
-            free_port, install_python, serve_reserved_port, KernelGuard, TestDir,
+            free_port, install_python, release_port_reservation, KernelGuard, TestDir,
         };
+        use std::{io::Read, sync::mpsc};
 
         let dir = TestDir::new("control-settings-snapshot-delay");
         let port = free_port();
         let state = dir.state(port);
-        let _server = serve_reserved_port(port);
+        let listener = release_port_reservation(port);
+        let (auth_started_tx, auth_started_rx) = mpsc::channel();
+        let (release_auth_tx, release_auth_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let size = stream.read(&mut request).unwrap();
+                if index == 1 {
+                    assert!(request[..size].starts_with(b"GET /api/auth/status "));
+                    auth_started_tx.send(()).unwrap();
+                    release_auth_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                }
+                let body: &[u8] = if index == 0 {
+                    assert!(request[..size].starts_with(b"GET /api/version "));
+                    br#"{"version":"2.3.0"}"#
+                } else {
+                    br#"{"enabled":true,"has_users":true}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
         let _kernel = KernelGuard(Arc::clone(&state.kernel));
         install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
         state.kernel.spawn().unwrap();
@@ -1284,23 +1314,28 @@ touch "$QWENPAW_WORKING_DIR/config.json"
         )
         .unwrap();
 
+        let snapshot_state = state.clone();
+        let snapshot = thread::spawn(move || crate::api::render_snapshot(&snapshot_state));
+        auth_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
         let path = socket_path(&dir, "control");
         let listener = bind_private_socket(&path).unwrap();
         let runtime = tokio::runtime::Handle::current();
         let events = state.events.subscribe();
-        let started = Instant::now();
         let response = exchange_request(&listener, &state, &runtime, br#"{"log_level":"info"}"#);
-        let elapsed = started.elapsed();
+        let snapshot_was_blocked = !snapshot.is_finished();
+        release_auth_tx.send(()).unwrap();
+        snapshot.join().unwrap();
+        server.join().unwrap();
 
+        assert!(snapshot_was_blocked, "snapshot must remain blocked on auth");
         assert_eq!(response["status"], 200);
         assert!(events.has_changed().unwrap());
         assert_eq!(
             fs::read_to_string(Path::new(&state.var_dir).join("qwenpaw-log-level")).unwrap(),
             "info\n"
-        );
-        assert!(
-            elapsed < Duration::from_millis(275),
-            "control settings response waited for status rendering: {elapsed:?}"
         );
     }
 
