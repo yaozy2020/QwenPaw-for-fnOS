@@ -432,15 +432,6 @@ async fn verify_upstream_session(
         .body(Body::empty())
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     let cookie = headers.get(header::COOKIE);
-    let has_cookie = cookie
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value.split(';').any(|cookie| {
-                cookie.split_once('=').is_some_and(|(name, value)| {
-                    !name.trim().is_empty() && !value.trim().is_empty()
-                })
-            })
-        });
     let authorization = match super::unique_header(headers, header::AUTHORIZATION.as_str()) {
         Ok(Some(value))
             if value
@@ -452,9 +443,6 @@ async fn verify_upstream_session(
         Ok(None) => None,
         _ => return Err(StatusCode::UNAUTHORIZED),
     };
-    if !has_cookie && authorization.is_none() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
     if let Some(cookie) = cookie {
         request.headers_mut().insert(header::COOKIE, cookie.clone());
     }
@@ -488,8 +476,10 @@ async fn verify_upstream_session(
         }
         let session: VerifiedSession =
             serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_GATEWAY)?;
-        // Standard kernels also return valid:true with no username when auth is disabled.
-        if session.valid && !session.username.trim().is_empty() {
+        // Standard kernels use an exactly empty username to indicate disabled auth.
+        let auth_disabled = session.username.is_empty();
+        let named_user = !session.username.trim().is_empty();
+        if session.valid && (auth_disabled || named_user) {
             Ok(())
         } else {
             Err(StatusCode::UNAUTHORIZED)

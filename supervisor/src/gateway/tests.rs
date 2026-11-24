@@ -1685,6 +1685,9 @@ async fn legacy_proxy_password_does_not_replace_native_authentication() {
     )
     .await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let verify = captured.recv().await.unwrap();
+    assert_eq!(verify.uri, "/api/auth/verify");
+    assert!(!verify.headers.contains_key(header::COOKIE));
     assert!(captured.try_recv().is_err());
     headers.insert(
         header::AUTHORIZATION,
@@ -1791,6 +1794,9 @@ async fn start_config_auth_upstream(
         .core
         .kernel
         .set_port(listener.local_addr().unwrap().port());
+    let auth_disabled = Path::new(&state.var_dir)
+        .join("fixture-auth-disabled")
+        .exists();
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let app = Router::new().fallback(move |request: Request<Body>| {
         let sender = sender.clone();
@@ -1822,6 +1828,9 @@ async fn start_config_auth_upstream(
                     .split(';')
                     .any(|cookie| cookie.trim() == format!("qwenpaw_session={value}"))
             };
+            if auth_disabled {
+                return Json(json!({"valid": true, "username": ""})).into_response();
+            }
             if has_session("slow-both") {
                 tokio::time::sleep(Duration::from_millis(1300)).await;
                 let (sender, receiver) = tokio::sync::mpsc::channel(1);
@@ -1919,7 +1928,7 @@ async fn tcp_config_anonymous_and_forged_sessions_never_reach_config() {
         HeaderValue::from_static("ost=fnos; supervisor-token=secret; __Host-qwenpaw_csrf=internal"),
     );
     for (label, headers, expected_cookie, expect_verify, expect_bearer) in [
-        ("anonymous", HeaderMap::new(), None, false, false),
+        ("anonymous", HeaderMap::new(), None, true, false),
         (
             "wrong",
             config_cookie("wrong"),
@@ -1928,7 +1937,7 @@ async fn tcp_config_anonymous_and_forged_sessions_never_reach_config() {
             false,
         ),
         ("forged", forged, Some("qwenpaw_session=forged"), true, true),
-        ("internal only", internal_only, None, false, false),
+        ("internal only", internal_only, None, true, false),
     ] {
         let response = tcp_web_request(
             addr,
@@ -2097,9 +2106,10 @@ async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
     )
     .await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
     assert!(
         captured.try_recv().is_err(),
-        "unauthenticated preview reached upstream"
+        "unauthenticated preview reached upstream content"
     );
 
     let mut browser_login = HeaderMap::new();
@@ -2196,7 +2206,7 @@ async fn same_port_public_switch_survives_an_idle_sse_connection() {
 }
 
 #[tokio::test]
-async fn tcp_config_rejects_missing_session_without_calling_upstream() {
+async fn tcp_config_rejects_missing_session_after_upstream_verification() {
     let (_dir, state, _) = fixture("tcp-config-auth-no-session");
     let (mut captured, upstream) = start_web_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
@@ -2209,9 +2219,10 @@ async fn tcp_config_rejects_missing_session_without_calling_upstream() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
     assert!(
         captured.try_recv().is_err(),
-        "missing session reached upstream"
+        "missing session reached config"
     );
     server.abort();
     upstream.abort();
@@ -2369,12 +2380,43 @@ async fn tcp_config_bearer_session_is_verified_without_requiring_a_cookie() {
 }
 
 #[tokio::test]
+async fn tcp_auth_disabled_allows_config_without_a_session() {
+    let (_dir, state, _) = fixture("tcp-config-auth-disabled");
+    fs::write(
+        Path::new(&state.var_dir).join("fixture-auth-disabled"),
+        "disabled",
+    )
+    .unwrap();
+    let (mut captured, upstream) = start_config_auth_upstream(&state).await;
+    let manager = WebProxyManager::start(state, 0, true).await.unwrap();
+    let (port, public) = manager.state().await;
+    assert!(public);
+    let addr = ([127, 0, 0, 1], port).into();
+
+    let response = tcp_web_request(
+        addr,
+        Method::GET,
+        "/api/config/channels",
+        HeaderMap::new(),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let verify = captured.recv().await.unwrap();
+    assert_eq!(verify.uri, "/api/auth/verify");
+    assert!(!verify.headers.contains_key(header::COOKIE));
+    assert!(!verify.headers.contains_key(header::AUTHORIZATION));
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/config/channels");
+    drop(manager);
+    upstream.abort();
+}
+
+#[tokio::test]
 async fn tcp_config_rejects_non_success_and_broken_or_oversized_verify_responses() {
     let (_dir, state, _) = fixture("tcp-config-auth-upstream-errors");
     let (mut captured, upstream) = start_config_auth_upstream(&state).await;
     let (addr, server) = start_tcp_web_proxy(state).await;
     for (session, expected) in [
-        ("anonymous-principal", StatusCode::UNAUTHORIZED),
         ("blank-principal", StatusCode::UNAUTHORIZED),
         ("invalid-principal", StatusCode::UNAUTHORIZED),
         ("no-principal", StatusCode::BAD_GATEWAY),
@@ -2442,7 +2484,8 @@ async fn tcp_config_encoded_paths_cannot_bypass_verify() {
         let response =
             tcp_web_request(addr, Method::GET, path, HeaderMap::new(), Body::empty()).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
-        assert!(captured.try_recv().is_err(), "{path} reached upstream");
+        assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
+        assert!(captured.try_recv().is_err(), "{path} reached config");
     }
     let other = tcp_web_request(
         addr,
@@ -2453,6 +2496,7 @@ async fn tcp_config_encoded_paths_cannot_bypass_verify() {
     )
     .await;
     assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(captured.recv().await.unwrap().uri, "/api/auth/verify");
     assert!(captured.try_recv().is_err());
     server.abort();
     upstream.abort();

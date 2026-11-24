@@ -1,6 +1,6 @@
 # QwenPaw for fnOS
 
-[![Version](https://img.shields.io/badge/version-1.5.7-4-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
+[![Version](https://img.shields.io/badge/version-1.5.8-1-blue)](https://github.com/yaozy2020/QwenPaw-for-fnOS/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![fnOS](https://img.shields.io/badge/fnOS-%E2%89%A5%201.2.0800-orange)](https://www.fnnas.com/)
 
@@ -68,6 +68,7 @@
 
 ## 当前版本与兼容边界
 
+- **1.5.8-1 日志与鉴权兼容更新**：日志搜索命中内容高亮，支持导出当前级别与关键字筛选结果；关于弹窗展示当前外壳版本并扩充常见问题；修复禁用 QwenPaw 鉴权时独立反代误拒请求的问题；拆分多语言与 Miuix 样式以便维护。
 - **1.5.7-4 复核加固**：正式 FPK 编译排除崩溃注入和测试 peer 开关，故障恢复测试改用独立 `test-hooks` 构建；公开反代收紧带 Cookie 的浏览器写请求，保留无 Cookie 的 JSON/Bearer API 兼容；入口记录 IO 异常不再误报已迁移，临时文件清扫限定受管状态文件的新旧命名。构建 registry 可由环境变量覆盖，并补充版本与打包工具链说明。
 - **1.5.7-3 入口与安装弹窗优化**：配置页明确区分飞牛桌面入口和独立 Web 反代的登录方式，内核回环端口不再被描述为用户登录入口；已迁移实例用静态状态替代“已切换”禁用按钮。安装弹窗区分完成、当前和待执行步骤，说明关闭页面不会取消 NAS 后台任务，并将终端标记为最近诊断输出；移动端日志高度随视口压缩。
 - **1.5.7-2 复核修复**：修复独立反代静态缓存、CSRF 过期恢复、组合版本排序、日志窗口与导航细节，统一五源和配置向导六档日志，完善收养内核密码恢复提示及安装卸载引导。
