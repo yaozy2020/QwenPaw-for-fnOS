@@ -22,6 +22,8 @@ fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台�
 
 **当前独立反代契约**：只使用 QwenPaw 原生鉴权，不读写旧反代密码文件，不接受旧会话，不授予桌面绑定身份。下列旧版密码兼容说明仅作历史记录。
 
+**1.5.8-1 日志与鉴权兼容候选：** 日志搜索命中高亮并导出当前筛选结果；关于弹窗展示外壳版本和扩充双语 FAQ；多语言与 Miuix 样式拆分。独立反代在上游明确禁用鉴权时接受 `valid:true` 的精确空用户名响应，无凭证也先经上游 verify；启用鉴权、空白用户名、缺字段和畸形响应仍失败关闭。源码提交 `8d19b73`。候选 `build/candidates/1.5.8-1-logs-auth/qwenpaw-1.5.8-1-x86.fpk`，SHA256 `d12400c06b92ca53ca8c0f3f964e07a10cc243e541442c182d2dacee6da1fe06`。前端 207 项、类型检查、Rust 442+13、严格 Clippy、7 项 preflight、musl Gateway 25 项通过及 2 项环境条件跳过、Chromium Gateway 12 项通过及 1 项条件跳过、FPK 审计通过。未做本版 fnOS 真机或真实手机验收。
+
 **1.5.7-4 复核加固候选：** 普通 Release 与 FPK 编译排除崩溃注入和测试 peer 环境变量分支，七点 SIGKILL 恢复改用独立 `test-hooks` Release；FPK 审计拒绝测试开关标记。公开反代带 Cookie/Fetch Metadata 的无 Origin 写请求失败关闭，无 Cookie 的 JSON/Bearer API 保留兼容。入口记录读取异常显式失败，启动清扫仅删除受管状态文件的新旧临时命名。构建 registry 支持环境覆盖，README 只记录功能与修复。候选 `build/candidates/1.5.7-4-review-hardening/qwenpaw-1.5.7-4-x86.fpk`，SHA256 `0dc851798cbe8b22cca86bedee4c8c025d6d89fb03b62de67f27d7898c057630`。Rust 441+13、严格 Clippy/lint、前端 207 项、类型检查、七点 SIGKILL、管理 API、普通与 musl Release Gateway 各 25 项通过及 2 项环境条件跳过、Chromium Gateway 12 项通过及 1 项条件跳过、FPK 审计通过。未做本版 fnOS 真机或真实手机验收。
 
 **1.5.7-3 入口与安装弹窗候选：** 配置页明确区分飞牛桌面入口与独立 Web 反代登录方式，内核回环端口不再作为用户入口呈现；已迁移状态改为静态说明。安装弹窗区分完成、当前和待执行步骤，明确后台行为与诊断日志关系，并压缩移动端日志高度。候选 `build/candidates/1.5.7-3-entry-install-ui/qwenpaw-1.5.7-3-x86.fpk`，SHA256 `bfdebf8107bb6636bf39282717d03f4406a3ee4306e1af80d402bfa0cc02eb5b`。前端 207 项、类型检查、生产构建、7 项 preflight、版本/审计一致性、Gateway Chromium 12 项通过及 1 项条件跳过、FPK 审计通过；已复核桌面、390px 移动视口与 Miuix 截图。未做真实手机设备验收，历史未覆盖的真机项目不因此解除。
