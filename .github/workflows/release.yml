@@ -246,8 +246,10 @@ jobs:
           echo "fpk_name=$FPK_NAME" >> "$GITHUB_OUTPUT"
           echo "fpk_sha256=$SHA1" >> "$GITHUB_OUTPUT"
 
-      # [5b] 真实 SIGKILL 崩溃注入。必须放在 release 二进制就绪之后
-      # (脚本读 supervisor/target/release/qwenpaw-supervisor)。
+      # [5b] 真实 SIGKILL 崩溃注入使用独立 test-hooks 构建；正式 FPK 不含测试开关。
+      - name: Build instrumented supervisor for crash injection
+        run: CARGO_TARGET_DIR="$PWD/supervisor/target/test-hooks" cargo build --locked --release --features test-hooks --bin qwenpaw-supervisor --manifest-path supervisor/Cargo.toml
+
       - name: Crash injection (7 real SIGKILL points)
         run: bash scripts/test-venv-recovery.sh
 

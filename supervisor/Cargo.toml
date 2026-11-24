@@ -3,6 +3,10 @@ name = "qwenpaw-supervisor"
 version = "1.5.7-rc.1"
 edition = "2021"
 
+[features]
+default = []
+test-hooks = []
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

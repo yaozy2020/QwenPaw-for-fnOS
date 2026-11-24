@@ -95,9 +95,10 @@ if [ -z "$NODE_BIN" ]; then
   exit 1
 fi
 if [ ! -x "$PROJ_DIR/web/node_modules/.bin/vite" ]; then
-  echo "  vite 未安装,执行 npm ci (npmmirror) ..."
+  echo "  vite 未安装,执行 npm ci ..."
+  NPM_REGISTRY="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}}"
   (cd "$PROJ_DIR/web" && env PATH="$(dirname "$NODE_BIN"):$PATH" \
-    npm ci --registry=https://registry.npmmirror.com --no-audit --no-fund 2>&1 | tail -20) || {
+    npm ci --registry="$NPM_REGISTRY" --no-audit --no-fund 2>&1 | tail -20) || {
     echo -e "${RED}ERROR: npm ci 失败${NC}"
     exit 1
   }

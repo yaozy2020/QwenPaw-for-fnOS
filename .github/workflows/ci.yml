@@ -149,6 +149,10 @@ jobs:
           file target/release/qwenpaw-supervisor
           sha256sum target/release/qwenpaw-supervisor
 
+      - name: Build instrumented supervisor for crash injection
+        working-directory: .
+        run: CARGO_TARGET_DIR="$PWD/supervisor/target/test-hooks" cargo build --locked --release --features test-hooks --bin qwenpaw-supervisor --manifest-path supervisor/Cargo.toml
+
       # 真实 SIGKILL 故障注入:逐个中断点杀进程,重启后验证自愈。
       # 单元测试只验证纯函数语义,这条才真正覆盖"断电/被 KILL"的磁盘状态。
       - name: Venv transaction crash-injection (7 real SIGKILL points)

@@ -23,8 +23,30 @@ fn browser_scheme(headers: &HeaderMap) -> Result<Option<super::OriginScheme>, ()
         .ok_or(())
 }
 
-pub(super) fn same_origin_write(headers: &HeaderMap) -> bool {
-    browser_scheme(headers).is_ok()
+fn stateless_api_write(headers: &HeaderMap) -> bool {
+    if headers.contains_key(header::COOKIE) || headers.contains_key("sec-fetch-site") {
+        return false;
+    }
+    let json = unique_header(headers, "content-type").is_ok_and(|value| {
+        value.is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        })
+    });
+    let bearer = unique_header(headers, "authorization").is_ok_and(|value| {
+        value.is_some_and(|value| value.len() > 7 && value[..7].eq_ignore_ascii_case("bearer "))
+    });
+    json || bearer
+}
+
+pub(super) fn same_origin_write(headers: &HeaderMap, public_access: bool) -> bool {
+    match browser_scheme(headers) {
+        Ok(Some(_)) => true,
+        Err(()) => false,
+        Ok(None) => !public_access || stateless_api_write(headers),
+    }
 }
 
 pub(super) async fn cache_policy(request: Request<Body>, next: axum::middleware::Next) -> Response {
@@ -119,5 +141,50 @@ mod tests {
                 "private, no-store"
             );
         }
+    }
+
+    #[test]
+    fn public_origin_less_writes_allow_only_stateless_api_clients() {
+        let headers = HeaderMap::new();
+        assert!(same_origin_write(&headers, false));
+        assert!(!same_origin_write(&headers, true));
+
+        let mut json = HeaderMap::new();
+        json.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        assert!(same_origin_write(&json, true));
+        json.insert(
+            header::COOKIE,
+            HeaderValue::from_static("qwenpaw_session=session"),
+        );
+        assert!(!same_origin_write(&json, true));
+
+        let mut bearer = HeaderMap::new();
+        bearer.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token"),
+        );
+        assert!(same_origin_write(&bearer, true));
+        bearer.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(!same_origin_write(&bearer, true));
+
+        let mut browser = HeaderMap::new();
+        browser.insert(header::HOST, HeaderValue::from_static("nas.example:19091"));
+        browser.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://nas.example:19091"),
+        );
+        browser.insert(
+            header::COOKIE,
+            HeaderValue::from_static("qwenpaw_session=session"),
+        );
+        assert!(same_origin_write(&browser, true));
+        browser.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://attacker.example"),
+        );
+        assert!(!same_origin_write(&browser, true));
     }
 }

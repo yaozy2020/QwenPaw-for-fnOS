@@ -655,6 +655,14 @@ for name, (binary, mode) in packaged_binaries.items():
            f"{name} 无 PT_INTERP，使用 musl 静态链接",
            f"{name} 含动态加载器 PT_INTERP 或 ELF 头无效，不是可移植静态产物")
     report(mode == 0o755, f"{name} 模式为 0755", f"{name} 模式不是 0755: {mode:04o}")
+    for marker in (
+        b"QWENPAW_ENABLE_CRASH_POINT",
+        b"QWENPAW_CRASH_POINT",
+        b"QWENPAW_TEST_GATEWAY_PEER_EXE",
+    ):
+        report(marker not in binary,
+               f"{name} 不包含测试开关 {marker.decode()}",
+               f"{name} 包含生产禁用的测试开关 {marker.decode()}")
     packaged_hashes[name] = hashlib.sha256(binary).hexdigest()
     if source_sha256 is not None:
         report(packaged_hashes[name] == source_sha256,

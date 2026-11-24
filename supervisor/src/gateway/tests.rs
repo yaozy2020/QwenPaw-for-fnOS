@@ -2102,11 +2102,36 @@ async fn public_tcp_proxy_requires_upstream_auth_for_protected_apis() {
         "unauthenticated preview reached upstream"
     );
 
+    let mut browser_login = HeaderMap::new();
+    browser_login.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    browser_login.insert(
+        header::COOKIE,
+        HeaderValue::from_static("qwenpaw_session=session"),
+    );
+    let rejected = tcp_web_request(
+        addr,
+        Method::POST,
+        "/api/auth/login",
+        browser_login,
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert!(captured.try_recv().is_err());
+
+    let mut api_login = HeaderMap::new();
+    api_login.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     let login = tcp_web_request(
         addr,
         Method::POST,
         "/api/auth/login",
-        HeaderMap::new(),
+        api_login,
         Body::from("{}"),
     )
     .await;

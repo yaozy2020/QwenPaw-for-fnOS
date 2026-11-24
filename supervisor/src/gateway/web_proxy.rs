@@ -153,7 +153,10 @@ async fn forward_impl(
     }
 
     let port = state.app.core.kernel.port();
-    let migrated = crate::entry_login::selected(&state.app.kernel.entry_record());
+    let migrated = match crate::entry_login::selected(&state.app.kernel.entry_record()) {
+        Ok(selected) => selected,
+        Err(_) => return unavailable(html_entry),
+    };
     let guest = request.extensions().get::<NativeVisitor>().is_some();
     let native_transport = guest && state.app.kernel.supports_native_proxy();
     if guest && migrated && !native_transport {

@@ -492,7 +492,10 @@ impl KernelManager {
         cmd.env("QWENPAW_FNOS_ENTRY_RECORD", self.entry_record());
         cmd.env("QWENPAW_FNOS_ENTRY_PARENT", std::process::id().to_string());
         let compatible = crate::entry_login::compatible(Path::new(&self.cfg.venv_dir));
-        if crate::entry_login::selected(&self.entry_record()) && !compatible {
+        if crate::entry_login::selected(&self.entry_record())
+            .map_err(|error| format!("无法确认入口登录记录: {error}"))?
+            && !compatible
+        {
             return Err("当前内核不支持已迁移的入口鉴权，拒绝回退启动".into());
         }
         cmd.stdout(std::process::Stdio::from(

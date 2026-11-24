@@ -64,7 +64,8 @@ fn trusted_gateway_peer(uid: u32, executable: Option<&Path>, test_exe: Option<&P
     executable == test_exe
 }
 
-// Explicit test fallback for non-root local fixtures; never enable it in production. Root peers return above without /proc reads.
+// Non-root local fixtures exist only in test binaries or the dedicated test-hooks build.
+#[cfg(any(test, feature = "test-hooks"))]
 fn test_peer_override() -> Option<PathBuf> {
     if std::env::var_os("QWENPAW_ENABLE_CRASH_POINT").as_deref() != Some(std::ffi::OsStr::new("1"))
     {
@@ -73,6 +74,11 @@ fn test_peer_override() -> Option<PathBuf> {
     std::env::var_os("QWENPAW_TEST_GATEWAY_PEER_EXE")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn test_peer_override() -> Option<PathBuf> {
+    None
 }
 
 pub(crate) fn socket_path_from_config(cfg: &Config) -> Result<Option<PathBuf>, String> {
@@ -451,7 +457,7 @@ async fn web_tcp_dispatch(
     if !matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
-    ) && !tcp_policy::same_origin_write(request.headers())
+    ) && !tcp_policy::same_origin_write(request.headers(), state.public_access)
     {
         return StatusCode::FORBIDDEN.into_response();
     }

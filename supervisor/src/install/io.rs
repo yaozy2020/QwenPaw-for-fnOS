@@ -243,12 +243,52 @@ pub(crate) fn atomic_write_0600(path: &str, content: &str) -> std::io::Result<()
     })
 }
 
-/// 清扫 var_dir 下的原子写/临时落盘残骸(`*.tmp` 与 `*.tmp.<pid>`)。
-///
-/// 这些文件只在"写入途中被 SIGKILL/断电"时才会留下。它们本身无害,但:
-/// 老实现用固定 tmp 名,残骸会让后续 create_new 直接失败;
-/// 长期累积也会把"目录里有陌生文件"变成常态,掩盖真正的事务残留。
-/// 只在启动恢复阶段调用(此时无人正在写),按 mtime 之外的保守规则一律视为残骸。
+fn managed_tmp_name(name: &str) -> bool {
+    const BASES: &[&str] = &[
+        "entry-login-default.v1",
+        "install.pid",
+        "kernel-uninstall.json",
+        "kernel.pid",
+        "pip-mirror",
+        "qwenpaw-log-level",
+        "qwenpaw-version",
+        "service_port",
+        "settings-transaction.json",
+        "shutdown-generation.json",
+        "supervisor-token",
+        "supervisor.pid",
+        "supervisor.pid.starttime",
+        "web-proxy-transaction.json",
+        "web_proxy_port",
+        "web_proxy_public",
+    ];
+    BASES.iter().any(|base| {
+        let Some(suffix) = name
+            .strip_prefix(base)
+            .and_then(|suffix| suffix.strip_prefix(".tmp"))
+        else {
+            return false;
+        };
+        if suffix.is_empty() {
+            return true;
+        }
+        let Some(suffix) = suffix.strip_prefix('.') else {
+            return false;
+        };
+        let mut segments = 0;
+        for segment in suffix.split('.') {
+            segments += 1;
+            if segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+                return false;
+            }
+        }
+        matches!(segments, 1 | 2)
+    })
+}
+
+/// 启动时清扫受管状态文件的原子写残骸，支持旧版 `*.tmp`、旧版
+/// `*.tmp.<pid>` 和当前 `*.tmp.<pid>.<seq>`。只清理普通文件；
+/// 目录交由事务恢复处理，名称相似的非受管文件保留。
 pub(crate) fn sweep_stale_tmp_files(var_dir: &str) -> usize {
     let mut removed = 0usize;
     let Ok(entries) = std::fs::read_dir(var_dir) else {
@@ -257,8 +297,7 @@ pub(crate) fn sweep_stale_tmp_files(var_dir: &str) -> usize {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let is_tmp = name.contains(".tmp");
-        if !is_tmp {
+        if !managed_tmp_name(name) {
             continue;
         }
         // 只清理普通文件;目录型残留由事务恢复各自处理,不在此处误删。

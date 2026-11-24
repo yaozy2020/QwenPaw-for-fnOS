@@ -1,10 +1,11 @@
 #!/bin/bash
 # venv 事务持久化与七个中断点 SIGKILL 故障注入自愈回归。
+# 默认读取独立 test-hooks Release 构建；正式 FPK 使用不含测试开关的普通 Release。
 # 仅使用临时 TRIM 根；受管内核及其健康端点由 qwenpaw-test-runtime 自身提供。
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${QWENPAW_TEST_SUP_BIN:-$ROOT/supervisor/target/release/qwenpaw-supervisor}"
+BIN="${QWENPAW_TEST_SUP_BIN:-$ROOT/supervisor/target/test-hooks/release/qwenpaw-supervisor}"
 HELPER="${QWENPAW_TEST_RUNTIME_BIN:-$ROOT/supervisor/target/release/qwenpaw-test-runtime}"
 
 absolute_path() {

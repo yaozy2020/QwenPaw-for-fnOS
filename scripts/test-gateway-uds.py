@@ -317,8 +317,6 @@ class Fixture:
             "SUPERVISOR_AUTOSTART": "0", "QWENPAW_WEB_PROXY_PORT": "off",
             "QWENPAW_PYTHON_BIN": str(self.helper),
             "QWENPAW_TEST_CONTROL": str(root), "QWENPAW_GATEWAY_SOCKET": str(self.gateway),
-            "QWENPAW_ENABLE_CRASH_POINT": "1",
-            "QWENPAW_TEST_GATEWAY_PEER_EXE": os.readlink("/proc/self/exe"),
         }
 
     def reserve_port(self):
@@ -700,10 +698,10 @@ class GatewayUDSTests(unittest.TestCase):
         cls.binary_sha = sha256(SUPERVISOR)
         cls.runtime_sha = sha256(RUNTIME)
         cls.brotli = BrotliCodec()
-        print("SCOPE=local release UDS blackbox, root-UID Gateway peer + non-root test-only fallback + strict readiness identity; NOT fnOS identity/session acceptance", flush=True)
+        print("SCOPE=local release UDS blackbox, isolated root-UID Gateway peer + strict readiness identity; NOT fnOS identity/session acceptance", flush=True)
         print(f"TEST_SUPERVISOR={SUPERVISOR}\nTEST_SUPERVISOR_SHA256={cls.binary_sha}", flush=True)
         print(f"TEST_RUNTIME_HELPER={RUNTIME}\nTEST_RUNTIME_HELPER_SHA256={cls.runtime_sha}", flush=True)
-        print(f"TEST_GATEWAY_PEER_UID={os.geteuid()} gid={os.getegid()} test_fallback_exe={os.readlink('/proc/self/exe')}", flush=True)
+        print(f"TEST_GATEWAY_PEER_UID={os.geteuid()} gid={os.getegid()}", flush=True)
         print(f"TEST_UID_MAP={Path('/proc/self/uid_map').read_text().strip()}", flush=True)
 
     @classmethod

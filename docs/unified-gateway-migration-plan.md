@@ -147,7 +147,7 @@ Rust supervisor：静态控制台 + 管理 HTTP/API + 会话/CSRF校验
 - 实际通过：两轮默认并行 Rust 262+13、严格 Clippy、release binaries 构建、Gateway UDS 黑盒 16、native API 15、index 22、管理边界、preflight 与 audit；`STRICT_CI=1 bash scripts/lint.sh` 全部通过，包括 120 次生命周期并发与配置回调。
 - `build.sh` 和 `audit-fpk` 均通过。新 G1 候选 `build/output/qwenpaw-1.1.1-1-x86.fpk` 大小 2,136,014 字节，SHA256 `e3aa519a5907f2dc7fa96a04d7aef9cf4ee5271832e42fda2c2c72695ecad1f9`；包内 supervisor SHA256 `28df3174eff0f4b8b3882bb331bd680843441a5d4803690b787b92665f5b0e75`，test-runtime SHA256 `6d8a192872e65442e78875cae86b2f2fafcd06b21cfd054dae8c4ed510a2b88c`。解包包内 supervisor 后 Gateway 16/16、`test-supervisor-api` 和七点 SIGKILL recovery 均通过。
 
-本地 G1 实现/源码/候选包回归已完成；fnOS 完整应用接入、桌面/前端切换与平台验收仍待后续阶段。不能把本地隔离 user namespace 的 root UID 夹具或显式 UDS 环境变量写成真实 fnOS 网关鉴权证据；生产二进制保留仅由 `QWENPAW_ENABLE_CRASH_POINT=1` 与绝对路径 `QWENPAW_TEST_GATEWAY_PEER_EXE` 同时启用的非 root 测试 fallback，生产部署不得设置这两个变量，root 管理 peer 不走该 fallback。
+本地 G1 实现/源码/候选包回归已完成；fnOS 完整应用接入、桌面/前端切换与平台验收仍待后续阶段。不能把本地隔离 user namespace 的 root UID 夹具或显式 UDS 环境变量写成真实 fnOS 网关鉴权证据；G1 历史生产二进制曾保留仅由 `QWENPAW_ENABLE_CRASH_POINT=1` 与绝对路径 `QWENPAW_TEST_GATEWAY_PEER_EXE` 同时启用的非 root 测试 fallback。该历史做法已于 1.5.7-4 退役：普通 Release 不再包含这些分支，故障注入使用独立 `test-hooks` 构建，root 管理 peer 不走 fallback。
 
 ### G2：前端协议切换与 fnOS 测试候选（本地候选完成；平台验收部分完成）
 

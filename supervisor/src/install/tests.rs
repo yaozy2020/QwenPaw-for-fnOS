@@ -2695,13 +2695,19 @@ if module == 'pip':
         std::fs::write(&keep, "2.1.0").unwrap();
         std::fs::write(dir.join("service_port.tmp"), "x").unwrap();
         std::fs::write(dir.join("service_port.tmp.4242"), "x").unwrap();
+        std::fs::write(dir.join("service_port.tmp.4242.9"), "x").unwrap();
+        std::fs::write(dir.join("notes.tmp.backup"), "keep").unwrap();
+        std::fs::write(dir.join("unrelated.tmp"), "keep").unwrap();
         std::fs::create_dir_all(dir.join("venv.tmpdir")).unwrap();
 
         let removed = sweep_stale_tmp_files(&root);
-        assert_eq!(removed, 2, "两个 tmp 普通文件都应被清理");
+        assert_eq!(removed, 3, "只清理受管文件的新旧临时命名");
         assert!(keep.exists(), "正式文件不得被清理");
         assert!(!dir.join("service_port.tmp").exists());
         assert!(!dir.join("service_port.tmp.4242").exists());
+        assert!(!dir.join("service_port.tmp.4242.9").exists());
+        assert!(dir.join("notes.tmp.backup").exists());
+        assert!(dir.join("unrelated.tmp").exists());
         assert!(
             dir.join("venv.tmpdir").exists(),
             "目录型残留交给事务恢复处理"

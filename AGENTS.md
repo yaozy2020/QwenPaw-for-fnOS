@@ -22,6 +22,8 @@ fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台�
 
 **当前独立反代契约**：只使用 QwenPaw 原生鉴权，不读写旧反代密码文件，不接受旧会话，不授予桌面绑定身份。下列旧版密码兼容说明仅作历史记录。
 
+**1.5.7-4 复核加固候选：** 普通 Release 与 FPK 编译排除崩溃注入和测试 peer 环境变量分支，七点 SIGKILL 恢复改用独立 `test-hooks` Release；FPK 审计拒绝测试开关标记。公开反代带 Cookie/Fetch Metadata 的无 Origin 写请求失败关闭，无 Cookie 的 JSON/Bearer API 保留兼容。入口记录读取异常显式失败，启动清扫仅删除受管状态文件的新旧临时命名。构建 registry 支持环境覆盖，README 只记录功能与修复。候选 `build/candidates/1.5.7-4-review-hardening/qwenpaw-1.5.7-4-x86.fpk`，SHA256 `0dc851798cbe8b22cca86bedee4c8c025d6d89fb03b62de67f27d7898c057630`。Rust 441+13、严格 Clippy/lint、前端 207 项、类型检查、七点 SIGKILL、管理 API、普通与 musl Release Gateway 各 25 项通过及 2 项环境条件跳过、Chromium Gateway 12 项通过及 1 项条件跳过、FPK 审计通过。未做本版 fnOS 真机或真实手机验收。
+
 **1.5.7-3 入口与安装弹窗候选：** 配置页明确区分飞牛桌面入口与独立 Web 反代登录方式，内核回环端口不再作为用户入口呈现；已迁移状态改为静态说明。安装弹窗区分完成、当前和待执行步骤，明确后台行为与诊断日志关系，并压缩移动端日志高度。候选 `build/candidates/1.5.7-3-entry-install-ui/qwenpaw-1.5.7-3-x86.fpk`，SHA256 `bfdebf8107bb6636bf39282717d03f4406a3ee4306e1af80d402bfa0cc02eb5b`。前端 207 项、类型检查、生产构建、7 项 preflight、版本/审计一致性、Gateway Chromium 12 项通过及 1 项条件跳过、FPK 审计通过；已复核桌面、390px 移动视口与 Miuix 截图。未做真实手机设备验收，历史未覆盖的真机项目不因此解除。
 
 **1.5.7-2 复核修复候选：** 修复独立反代静态缓存、长驻会话 CSRF 恢复、组合版本排序、日志断层、收养内核密码恢复提示与单页导航；统一五源、配置向导六档日志和安装卸载引导。候选 `build/candidates/1.5.7-2-review-fixes/qwenpaw-1.5.7-2-x86.fpk`，SHA256 `69be282f307bcd9c2b49ecc24c443ce9969b8918af555368c84174f9f7b88047`。前端 205 项、Rust 439+13、严格 Clippy/lint、52 个平台回调及 FPK 审计通过；最终包内 musl Gateway 25 项通过、2 项按环境条件跳过，包内平台回调首轮 51/52，超时项复跑通过。远程专用 fnOS 主机通过应用中心完成全新安装、五源与 Trace 配置界面、保留数据卸载/重装及合成数据完整删除；应用和外部标记核验符合预期，测试后应用已卸载。有效旧版升级、腾讯云真实下载、Critical 保存和真实内核安装未覆盖，不是上架放行。
@@ -159,9 +161,11 @@ bash build.sh
 
 `STRICT_CI=1` 下不允许因缺少 shellcheck、Node 或 Vite 而静默跳过门禁。优先使用 `npm ci` 和 Cargo `--locked`，不要无意更新锁文件。
 
-以下测试需要已构建的 release 监督者：
+以下测试需要已构建的 release 监督者。故障注入先构建独立测试二进制，普通 release 与 FPK 不启用 `test-hooks`：
 
 ```bash
+cargo build --locked --release --manifest-path supervisor/Cargo.toml
+CARGO_TARGET_DIR="$PWD/supervisor/target/test-hooks" cargo build --locked --release --features test-hooks --bin qwenpaw-supervisor --manifest-path supervisor/Cargo.toml
 bash scripts/test-venv-recovery.sh
 python3 scripts/test-supervisor-api.py
 ```
@@ -221,6 +225,7 @@ python3 scripts/test-supervisor-api.py
 - 外部输入不得拼接进 Shell；pip 等外部命令使用参数数组/argv 和严格白名单。
 - 所有删除必须限制在 fnOS `TRIM_*` 路径约束内，禁止硬编码 `/vol*` 全局删除。
 - Gateway 管理写操作须保留 CSRF 防护、方法约束和未知路由 404；上游代理请求不得错误套用管理系统 CSRF，须按当前代理契约透传所需授权与响应。
+- 正式 Release 与 FPK 不启用 `test-hooks`；崩溃注入和测试 peer override 只允许存在于 `cfg(test)` 或独立 `supervisor/target/test-hooks` 构建，FPK 审计拒绝对应环境变量标记。
 - `supervisor-token`、版本钉等敏感或事务文件保持既有权限与原子写语义。
 - 打包采用白名单 staging；构建失败不得复用陈旧二进制冒充新产物，FPK 必须通过内容和执行位审计。
 - fnOS 生命周期入口、Gateway 配置和构建脚本的可执行位属于发布契约；生产 CGI 已退役，不恢复 CGI/action 隐式回退。

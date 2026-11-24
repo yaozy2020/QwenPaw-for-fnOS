@@ -1,7 +1,9 @@
 use super::{
     atomic_write_0600, io::relocate_console_script_shebangs, run_with_timeout, InstallState,
 };
-use std::{io::Write, path::Path, sync::atomic::Ordering};
+#[cfg(any(test, feature = "test-hooks"))]
+use std::sync::atomic::Ordering;
+use std::{io::Write, path::Path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,8 +58,10 @@ pub enum CrashPoint {
     AfterSpawnBeforeCommit,
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 static TEST_CRASH_POINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
+#[cfg(any(test, feature = "test-hooks"))]
 #[allow(dead_code)]
 pub fn set_test_crash_point(cp: Option<CrashPoint>) {
     let val = match cp {
@@ -73,6 +77,7 @@ pub fn set_test_crash_point(cp: Option<CrashPoint>) {
     TEST_CRASH_POINT.store(val, Ordering::SeqCst);
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 pub(super) fn check_crash_point(point: CrashPoint) {
     let current_test = TEST_CRASH_POINT.load(Ordering::SeqCst);
     let matches_test = match point {
@@ -94,10 +99,8 @@ pub(super) fn check_crash_point(point: CrashPoint) {
         CrashPoint::AfterCommit => "after_commit",
         CrashPoint::AfterSpawnBeforeCommit => "after_spawn_before_commit",
     };
-    // 故障注入是测试设施,只应在 debug 构建与显式开启时生效。
-    // 若随生产二进制发行,任何能设置环境变量的人(同用户/子进程继承)
-    // 都能让监督者在安装中途 SIGKILL 自己 —— 那是可被外部触发的自毁开关。
-    // 生产需显式 QWENPAW_ENABLE_CRASH_POINT=1 才启用,默认关闭。
+    // 故障注入只编译进 cfg(test) 或独立 test-hooks 构建。
+    // 普通 Release 不包含环境变量分支，FPK 审计同时检查对应二进制标记。
     let crash_env_allowed = cfg!(debug_assertions)
         || std::env::var("QWENPAW_ENABLE_CRASH_POINT")
             .map(|v| v == "1")
@@ -116,6 +119,9 @@ pub(super) fn check_crash_point(point: CrashPoint) {
         std::process::exit(137);
     }
 }
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+pub(super) fn check_crash_point(_point: CrashPoint) {}
 
 pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()

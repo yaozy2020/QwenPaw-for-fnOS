@@ -166,8 +166,10 @@ pub(super) async fn web_proxy_port_get(
     };
     let (port, public) = manager.state().await;
     let mut data = json!({"success":true,"port":port,"public":public});
-    if crate::entry_login::selected(&state.kernel.entry_record()) {
-        data["entryLogin"] = json!(true);
+    match crate::entry_login::selected(&state.kernel.entry_record()) {
+        Ok(true) => data["entryLogin"] = json!(true),
+        Ok(false) => {}
+        Err(_) => return err_json(StatusCode::SERVICE_UNAVAILABLE, "无法确认入口登录状态"),
     }
     Json(data).into_response()
 }

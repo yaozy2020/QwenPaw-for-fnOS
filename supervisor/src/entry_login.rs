@@ -17,8 +17,12 @@ pub fn path(pid_file: &Path) -> PathBuf {
     pid_file.with_file_name(RECORD)
 }
 
-pub fn selected(path: &Path) -> bool {
-    !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind()==std::io::ErrorKind::NotFound)
+pub fn selected(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 pub async fn send(
@@ -117,8 +121,14 @@ pub async fn migrate(
     token: String,
 ) -> Result<(), (StatusCode, &'static str)> {
     let record = kernel.entry_record();
-    if selected(&record) {
-        return Err((StatusCode::CONFLICT, "已选择入口登录；不会覆盖迁移记录"));
+    match selected(&record) {
+        Ok(true) => {
+            return Err((StatusCode::CONFLICT, "已选择入口登录；不会覆盖迁移记录"));
+        }
+        Ok(false) => {}
+        Err(_) => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "无法确认迁移记录状态"));
+        }
     }
     let owner = prove_owner(kernel, token).await?;
     let data = serde_json::to_string(&owner)
@@ -177,4 +187,21 @@ async fn prove_owner(kernel: &KernelManager, token: String) -> Result<Record, Lo
     })
     .await
     .map_err(|_| (StatusCode::GATEWAY_TIMEOUT, "旧账号校验超时"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_distinguishes_missing_present_and_io_errors() {
+        let dir = crate::api::test_support::TestDir::new("entry-login-selected");
+        let record = dir.0.join("entry-login-default.v1");
+        assert!(!selected(&record).unwrap());
+        std::fs::write(&record, "record").unwrap();
+        assert!(selected(&record).unwrap());
+
+        let invalid = std::path::PathBuf::from("x".repeat(5000));
+        assert!(selected(&invalid).is_err());
+    }
 }

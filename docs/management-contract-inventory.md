@@ -1,8 +1,8 @@
 # 管理层现状契约盘点
 
-- 状态：按 1.5.7-3 工作树更新；本文记录源码契约，不能替代包内回归或飞牛真机验收。
+- 状态：按 1.5.7-4 工作树更新；本文记录源码契约，不能替代包内回归或飞牛真机验收。
 - 范围：fnOS 生命周期薄入口、Rust supervisor/管理核心、Gateway、私有控制 UDS、受管运行时及 Web 客户端。
-- 当前外壳工作树为 `1.5.7-3`。PR #8719 跟进至 `e2cda8ff`；随包 2.3.0.post1 适配在 Voice 修复上新增 Desktop 子进程前缀隔离、托管 env CLI 前缀和 PawApp 路由上下文解析，不包含独立 Data 插件的请求体修复。目标版本列表在面板内展开，选中、取消、键盘浏览都不发起安装或二次查源；下载源、降级确认和备份继续使用原流程。保留数据恢复安装时，仅当实际 var 根属主/属组正确且平台权限恰为 0770，才把该根收敛为 0750；不递归、不修改属主，其他权限与升级检查保持 fail closed。运行时长满 24 小时仅显示到分钟，不改变采样。概览在现有 SSE 上按需订阅 `watch=metrics`，每秒只发送 PID、启动时刻、CPU 和 RSS；安装/登录状态与控制操作仍取完整快照。已安装但版本未确认不视作首装。配置、授权与备份控件按首次访问挂载，此后保留；历史导航不可用时两个分区均加载。未访问授权分区时也要处理已完成的授权回调。Vue 管理面板与 DSH 的逐项对照见下文。`1.3.x` 的性能专项及其历史证据见 `performance-governance-1.3.md`。manifest 按官方 JS SDK 要求声明 `micro_app=true`。
+- 当前外壳工作树为 `1.5.7-4`。PR #8719 跟进至 `e2cda8ff`；随包 2.3.0.post1 适配在 Voice 修复上新增 Desktop 子进程前缀隔离、托管 env CLI 前缀和 PawApp 路由上下文解析，不包含独立 Data 插件的请求体修复。目标版本列表在面板内展开，选中、取消、键盘浏览都不发起安装或二次查源；下载源、降级确认和备份继续使用原流程。保留数据恢复安装时，仅当实际 var 根属主/属组正确且平台权限恰为 0770，才把该根收敛为 0750；不递归、不修改属主，其他权限与升级检查保持 fail closed。运行时长满 24 小时仅显示到分钟，不改变采样。概览在现有 SSE 上按需订阅 `watch=metrics`，每秒只发送 PID、启动时刻、CPU 和 RSS；安装/登录状态与控制操作仍取完整快照。已安装但版本未确认不视作首装。配置、授权与备份控件按首次访问挂载，此后保留；历史导航不可用时两个分区均加载。未访问授权分区时也要处理已完成的授权回调。Vue 管理面板与 DSH 的逐项对照见下文。`1.3.x` 的性能专项及其历史证据见 `performance-governance-1.3.md`。manifest 按官方 JS SDK 要求声明 `micro_app=true`。
 - 当前管理 Web 架构为 Gateway-only。G4 已实施：生产 CGI 文件、CGI 子命令、前端 action fallback、CGI 专属测试和 CI 门禁均已删除。下文按当前实现描述，不把历史 CGI 路径写作现状。
 
 ## 入口与共享管理核心
@@ -24,7 +24,9 @@
 - Gateway 总连接上限为 128；达到上限后为新连接等待最多 2 秒，有连接结束则继续服务，仍满员才返回 HTTP 503 与 `Retry-After: 1`。SSE 独立配额保持为 8。
 - **原生密码恢复（1.4.6）**：`POST /kernel/admin-password` 只接收新密码，沿用管理令牌、Gateway 管理员/CSRF 及操作互斥。内核通过现有的双方进程校验 UDS 确认已有账号和可选桌面绑定，使用原生哈希及签名密钥加密，原子替换凭据；不注销飞牛会话或解除旧反代保护。缺账号、不兼容或状态无法确认时不回退至清空注册。旧 `/kernel/reset-auth` 不再注册，历史重置 journal 仅启动恢复读取。若兼容内核是在 Supervisor 重启后被收养的实例，接口返回 `native_auth_adopted_restart_required`，要求先从概览重启内核以重建私有通道。
 - **管理 CSRF 过期恢复**：CSRF 仍有两小时服务端有效期，管理写请求不自动重放。已通过平台管理员及同源检查、Cookie 与提交值一致且签名有效但已过期的请求仍返回 403 且不执行操作，同时下发替换 Cookie 和 `csrf_refreshed`；前端提示重新执行操作。缺失、错误或不匹配的 CSRF 不轮换 Cookie。
-- **当前独立 Web 反代**：新装与升级均只使用 QwenPaw 原生认证。`proxy-password-default.v1` 等旧密码 verifier 文件不读取、不覆盖、不删除；不签发或接受旧反代会话。旧管理切换与密码登录接口已退役。桌面身份绑定和管理面鉴权不变。独立 TCP 入口仅对 `GET/HEAD` 且状态为 200 的既有哈希静态资产保留一年 `immutable` 缓存，其余响应继续 `private, no-store`；外部 HTTPS 反代仍须保留原始 `Host`（含端口）。
+- **当前独立 Web 反代**：新装与升级均只使用 QwenPaw 原生认证。`proxy-password-default.v1` 等旧密码 verifier 文件不读取、不覆盖、不删除；不签发或接受旧反代会话。旧管理切换与密码登录接口已退役。桌面身份绑定和管理面鉴权不变。独立 TCP 入口仅对 `GET/HEAD` 且状态为 200 的既有哈希静态资产保留一年 `immutable` 缓存，其余响应继续 `private, no-store`。公开入口的写请求须通过 Origin/Host 同源检查；无 Origin 时仅豁免不携带 Cookie 和 Fetch Metadata 的单一 `application/json` 或 Bearer API 请求，其他公开写请求拒绝，loopback 非浏览器兼容不变。外部 HTTPS 反代仍须保留原始 `Host`（含端口）。
+- **入口记录与启动清扫**：`entry_login::selected` 显式返回 IO 结果；只有 `NotFound` 表示未迁移，其他读取异常在状态、迁移、代理和内核启动路径失败关闭，不映射成业务 Conflict。启动临时文件清扫仅处理受管状态文件基名及旧 `*.tmp`、旧 `*.tmp.<pid>`、当前 `*.tmp.<pid>.<seq>` 三种精确后缀，名称相似的其他文件保留。
+- **生产测试开关**：普通 Release 与 FPK 不包含崩溃注入或测试 peer 环境变量分支；七点 SIGKILL 恢复使用 `CARGO_TARGET_DIR=supervisor/target/test-hooks` 下的独立 `--features test-hooks` Release。FPK 审计同时拒绝包内两份 Supervisor 出现相关环境变量标记。
 - 以下为早期版本契约，仅供历史审计；其中提到的反代密码配置、登录门禁及迁移例外均已退役，不代表当前兼容行为。与当前契约不一致时不得按历史条款执行。1.4 开发时：独立 TCP Web 反代（含 loopback）在转发页面和 API 前验证当前实例的反代会话。可信局域网 HTTP 和外部终止 TLS 的 HTTPS 共用此密码。登录提交必须带与 Host（含端口）一致的浏览器 Origin；HTTPS 保留 Secure 和 __Host- 会话 Cookie，HTTP 会话不使用这两个属性；两者都不转发给内核。默认实例由监督者指定，不接受请求指定实例；键不含端口。管理写操作 `POST /web-proxy/password` 沿用既有令牌和 Gateway 管理员/CSRF 边界，状态只报告是否已配置。飞牛 Gateway 不走这个密码门禁。未迁移实例保留受管内核原有认证，已迁移实例只接受下述两个入口。
 - 旧内核的会话校验不是 HTTP 健康探针。`2.3.0` 与 `2.3.0.post1` 的标准版 `/api/auth/verify` 正常返回 `200 {"valid":true,"username":"…"}`；关闭认证时也可能返回 200，但用户名为空。需要上游会话的反代路径仅在 200、JSON 结构正确、`valid` 为 true 且用户名非空白时转发。响应异常、没有主体或已撤销均不放行；此判定不把旧会话升级成反代会话。
 - **1.4.0-4 历史例外（取代此前“迁移后关闭内核 TCP/无密码拒绝访问”的约定）**：本机服务端口保持回环绑定，根路径进入原生 Console，`/api/` 由内核认证。独立反代默认无额外密码，未设或明确移除时使用原生认证，不复用迁移 owner 或本机白名单。已有密码继续生效；密码记录损坏时不放行。匹配适配的私有传输区分已核验身份和普通访客。不支持新适配的旧内核仍保留敏感 API 会话检查。飞牛入口不变。
@@ -87,4 +89,4 @@
 - 前端：`npm test --prefix web`、`npm run typecheck --prefix web`、`npm run test:e2e --prefix web`、`npm run test:e2e:gateway --prefix web`、`npm run test:e2e:gateway:webkit --prefix web`。
 - 门禁：`STRICT_CI=1 bash scripts/lint.sh`、`bash scripts/preflight.sh`、`python3 scripts/gen-audit.py --check`。
 
-`test-supervisor-api.py`、`test-venv-recovery.sh` 等依赖 release supervisor 的场景应先按脚本要求构建并隔离数据目录。CGI 专属测试入口已删除。运行本文件列出的命令不意味着已完成 fnOS 真机、手机 App 或生产发布验收。
+`test-supervisor-api.py` 使用普通 release supervisor；`test-venv-recovery.sh` 使用独立 `test-hooks` release。两者都应先按脚本要求构建并隔离数据目录。CGI 专属测试入口已删除。运行本文件列出的命令不意味着已完成 fnOS 真机、手机 App 或生产发布验收。

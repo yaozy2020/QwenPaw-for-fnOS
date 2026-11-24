@@ -3,9 +3,9 @@
 > ⚠️ 本文件由 `scripts/gen-audit.py` 自动生成，请勿手工编辑。
 > 数据源：manifest / cmd / wizard / app / supervisor Gateway testdata / .github / git tags。
 
-## 当前版本：v1.5.7-3
+## 当前版本：v1.5.7-4
 
-- **生成时间**：2026-11-24 23:28:19 +0800
+- **生成时间**：2026-11-25 00:22:46 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
