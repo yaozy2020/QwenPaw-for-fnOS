@@ -6,9 +6,18 @@ import { join } from 'node:path';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 export async function buildPanel(buildId = 'dev', { testHooks = false } = {}) {
+  const manifest = await readFile(join(root, '../manifest'), 'utf8');
+  const appVersion = manifest.match(/^\s*version\s*=\s*(\S+)\s*$/m)?.[1] ?? '';
+  if (!appVersion) throw new Error('Unable to extract version from manifest');
   const { output } = await build({
     root, configFile: false, envDir: false, publicDir: false, logLevel: 'warn', plugins: [vue()],
-    define: { __PANEL_TEST__: testHooks, __VUE_OPTIONS_API__: false, __VUE_PROD_DEVTOOLS__: false, __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false },
+    define: {
+      __APP_VERSION__: JSON.stringify(appVersion),
+      __PANEL_TEST__: testHooks,
+      __VUE_OPTIONS_API__: false,
+      __VUE_PROD_DEVTOOLS__: false,
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: false,
+    },
     build: {
       target: ['chrome111', 'edge111', 'firefox114', 'safari16.4'], write: false, cssCodeSplit: false, modulePreload: false,
       rolldownOptions: { input: join(root, 'src/main.ts'), output: { format: 'iife', entryFileNames: 'main.js', assetFileNames: 'main.[ext]' } },

@@ -1197,7 +1197,27 @@ html[data-theme="light"] .terminal-body { box-shadow: none; }
 .reset-password-dialog { max-width: 440px; }
 .reset-password-dialog form { display: grid; gap: var(--sp-4); text-align: start; }
 .reset-password-dialog::backdrop { overflow: hidden; }
+.about-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+}
 .about-header h2 { font-size: var(--fs-2xl); }
+.about-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--primary-border);
+  border-radius: var(--r-full);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.4;
+}
 .about-header p { margin-top: var(--sp-2); color: var(--text-sub); line-height: 1.7; }
 .about-links {
   display: grid;
@@ -1220,18 +1240,46 @@ html[data-theme="light"] .terminal-body { box-shadow: none; }
 .about-links a:hover { border-color: var(--primary-border); background: var(--card-hover); }
 .about-links span { color: var(--text-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .faq { margin-top: var(--sp-5); }
-.faq h3 { font-size: var(--fs-lg); }
+.faq h3 {
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-md);
+  color: var(--text-sub);
+}
 .faq details { border-bottom: 1px solid var(--divider); }
+.faq details:first-of-type { border-top: 1px solid var(--divider); }
 .faq summary {
   display: flex;
   align-items: center;
-  min-height: 44px;
-  gap: var(--sp-2);
+  justify-content: space-between;
+  min-height: 46px;
+  padding: 10px 0;
+  gap: var(--sp-3);
   color: var(--text-main);
   font-weight: 600;
+  line-height: 1.45;
+  list-style: none;
   cursor: pointer;
 }
-.faq details p { padding: 0 0 var(--sp-3); color: var(--text-sub); line-height: 1.7; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::after {
+  content: "";
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  margin-right: 4px;
+  margin-top: -2px;
+  border-right: 1.75px solid var(--text-muted);
+  border-bottom: 1.75px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+.faq details[open] > summary { color: var(--primary-text); }
+.faq details[open] > summary::after {
+  margin-top: 3px;
+  border-color: var(--primary-text);
+  transform: rotate(-135deg);
+}
+.faq details p { padding: 0 0 var(--sp-3); color: var(--text-sub); font-size: var(--fs-sm); line-height: 1.7; }
 .about-actions { display: flex; justify-content: flex-end; margin-top: var(--sp-4); }
 /* 升级终端弹窗 */
 #upgradeModal .modal-box {
@@ -2060,6 +2108,10 @@ html[data-ui-style="miuix"] .modal-actions button {
 html[data-ui-style="miuix"] .about-dialog {
   border-color: transparent;
   border-radius: var(--r-lg);
+}
+html[data-ui-style="miuix"] .about-links a {
+  border-color: transparent;
+  border-radius: var(--r-md);
 }
 html[data-ui-style="miuix"] #toast {
   border-color: transparent;

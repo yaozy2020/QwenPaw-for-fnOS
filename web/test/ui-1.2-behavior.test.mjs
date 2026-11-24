@@ -1143,7 +1143,8 @@ browserTest("about dialog exposes troubleshooting and official links with native
   const dialog = page.locator("#aboutDialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveJSProperty("open", true);
-  await expect(dialog.locator(".faq details")).toHaveCount(4);
+  await expect(dialog.locator("#aboutVersion")).toHaveText(/^当前版本 v\d+\.\d+\.\d+(?:-\d+)?$/);
+  await expect(dialog.locator(".faq details")).toHaveCount(7);
   await expect(dialog.locator(".about-links a").nth(0)).toHaveAttribute("href", "https://github.com/agentscope-ai/QwenPaw");
   await expect(dialog.locator(".about-links a").nth(1)).toHaveAttribute("href", "https://github.com/yaozy2020/QwenPaw-for-fnOS");
   for (const link of await dialog.locator(".about-links a").all()) {
