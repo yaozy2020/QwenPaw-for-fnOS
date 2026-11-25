@@ -3,8 +3,8 @@
 ## 当前状态
 
 - 当前草稿验收版本为 `1.6.0-1`，基于 `ce2d7bd` 的最新全绿 CI 建立；随包默认内核仍为官方 `2.3.0.post1`，适配上游 PR #8719。本版仅进入逐项验收，不因历史候选、安装成功或单项测试放行上架，也不自动合并或发布。
-- 草稿 PR：[yaozy2020/QwenPaw-for-fnOS#1](https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1)。当前候选 FPK 为 `qwenpaw-1.6.0-1-x86.fpk`，SHA256 `63f951d5b814cc75b87c332a796ad5139fc46f41c172fa4a570f49c245083726`，构建源码 `7f0a39f`。
-- 新应用简介已同步到 manifest、README、安装向导和双语关于页；207 项前端测试、类型检查及 FPK 审计通过。应用中心拒绝同版本覆盖后，采用保留数据卸载并安装精确新包；manifest 新文案、版本钉、镜像、Info 和默认内核健康均复核通过，原账号重新登录及设置深链无浏览器错误；`7f0a39f` 的 `rust` 与 `validate` CI 均通过。下方此前 `2d5080…` 包的真机记录保留为历史证据，不与新摘要混写。
+- 草稿 PR：[yaozy2020/QwenPaw-for-fnOS#1](https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1)。当前候选 FPK 为 `qwenpaw-1.6.0-1-x86.fpk`，SHA256 `ac3f8845e11ed7007f07df1115d5bceec77f24dd96609d82ea9c83af2f00662a`，构建源码 `32e2d99`（关于页移除整段功能介绍，保留版本、链接和 FAQ）。
+- 新应用简介已同步到 manifest、README、安装向导和双语关于页；按后续要求移除关于页整段介绍并清理双语文案。207 项前端测试、类型检查及 FPK 审计通过，真实 fnOS 保留数据重装后确认无介绍段落，保留版本、2 个项目链接和 7 条 FAQ。应用中心拒绝同版本覆盖后，采用保留数据卸载并安装精确新包；manifest 新文案、版本钉、镜像、Info 和默认内核健康均复核通过，原账号重新登录及设置深链无浏览器错误；`7f0a39f` 的 `rust` 与 `validate` CI 均通过。下方此前 `2d5080…` 包的真机记录保留为历史证据，不与新摘要混写。
 - 当前源码已通过 Rust 442+13 项、严格 Clippy、严格 lint（含前端 207 项、120 次生命周期并发调用和配置事务）、管理 API 与断连恢复、七点 SIGKILL 恢复、版本同步及审计报告一致性检查；PR 基线的 `rust` 与 `validate` 两项 CI 均通过。
 - 当前 FPK 对应 musl Supervisor 的 Gateway UDS 矩阵 25 项通过、2 项因隔离环境无法创建未映射外部属主而条件跳过；Chromium Gateway 12 项通过、1 项真实独立端口场景按环境条件跳过。跳过项不记作全量通过，须由真实平台权限与网络验收补足。
 - `npm audit` 为 0 vulnerabilities。`cargo audit` 加载 1567 条 RustSec 公告后无漏洞；`url 2.5.8` 已升级至 `2.5.9` 以修复 `RUSTSEC-2026-0592`，仅保留 `fxhash 0.2.1` / `RUSTSEC-2025-0057` 的停止维护允许警告，该公告无可用修复版本。
@@ -80,8 +80,8 @@ QwenPaw 本体不随 FPK 分发。首次使用时，需在控制台选择内核�
 
 | 物料 | 文件 / 状态 |
 |---|---|
-| 当前验收候选 FPK | `qwenpaw-1.6.0-1-x86.fpk`，34,142,476 字节；草稿 PR #1 验收期间不放行 |
-| SHA256 | `63f951d5b814cc75b87c332a796ad5139fc46f41c172fa4a570f49c245083726`；同目录 `.fpk.sha256` 已生成 |
+| 当前验收候选 FPK | `qwenpaw-1.6.0-1-x86.fpk`，34,141,757 字节；草稿 PR #1 验收期间不放行 |
+| SHA256 | `ac3f8845e11ed7007f07df1115d5bceec77f24dd96609d82ea9c83af2f00662a`；同目录 `.fpk.sha256` 已生成 |
 | 包图标 | `ICON.PNG`：64×64；`ICON_256.PNG`：256×256；已从最终 FPK 读取复核 |
 | 控制台入口图标 | `app/ui/images/console_64.png`、`console_256.png` |
 | 主 Web 入口图标 | `app/ui/images/icon_64.png`、`icon_256.png` |
@@ -91,7 +91,7 @@ QwenPaw 本体不随 FPK 分发。首次使用时，需在控制台选择内核�
 | 英文暗色配置 | `screenshots/configuration-en-dark-1280.png`，1280×844，已生成并复核 |
 | 版本选择细节 | `screenshots/release-picker-1280.png`、`release-picker-390.png`，已生成 |
 | 真实应用中心卡片 | `screenshots/fnos-appcenter-1440.png`，当前最终版本与新简介 |
-| 真实双语关于页 | `screenshots/fnos-about-zh-1440.png`、`fnos-about-en-1440.png`，来自当前新简介包 |
+| 真实精简关于页 | `screenshots/fnos-about-compact-1440.png`；已移除介绍段落，保留版本、2 个项目链接与 7 条 FAQ |
 | 真实桌面控制台 | `screenshots/fnos-overview-1440.png`、`fnos-configuration-en-dark-1440.png` |
 | 真实原生 Web | `screenshots/fnos-web-settings-1440.png`，默认 2.3.0.post1 深链 |
 | 真实目录授权 | `screenshots/fnos-authorization-1440.png`，只含本轮专用测试目录 |
