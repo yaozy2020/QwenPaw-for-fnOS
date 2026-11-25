@@ -22,7 +22,7 @@ fnOS 生命周期回调由薄入口转发至 Rust supervisor；管理控制台�
 
 **当前独立反代契约**：只使用 QwenPaw 原生鉴权，不读写旧反代密码文件，不接受旧会话，不授予桌面绑定身份。下列旧版密码兼容说明仅作历史记录。
 
-**1.6.0 正式版版本纠正：** manifest、README 和 FPK 统一使用无后缀 `1.6.0`；`scripts/verify-release-tag.py` 要求正式 tag 与 manifest 均为相同 `x.y.z`，`-N` 只保留给预发布/测试包。
+**1.6.0 正式版版本纠正：** manifest、README 和 FPK 统一使用无后缀 `1.6.0`；`scripts/verify-release-tag.py` 要求正式 tag 与 manifest 均为相同 `x.y.z`，`-N` 只保留给预发布/测试包。修正 PR #2，候选 `build/candidates/1.6.0-store/qwenpaw-1.6.0-x86.fpk`，SHA256 `d2cc562ccc9dbadebe78db27d8e43e03da25074f08dc9f9b24285ed18ddd8e4f`。
 
 **1.6.0-1 上架验收记录（已合并）：** 分支 `release/1.6.0`，PR https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1；PR 已合并；正式 v1.6.0 的无后缀版本纠正见上方记录。关于页精简包构建源 `32e2d99`，已移除整段介绍，真实 fnOS 保留数据重装后确认仅保留版本、2 个项目链接与 7 条 FAQ；此前新简介包已核对 manifest、原账号登录/深链及默认内核健康，源码提交两项 CI 全绿。基线提交 `3fdbd098fc7b3606a00beb0262a354702a17cc39`。候选 `build/candidates/1.6.0-1-store-review/qwenpaw-1.6.0-1-x86.fpk`，SHA256 `ac3f8845e11ed7007f07df1115d5bceec77f24dd96609d82ea9c83af2f00662a`。FPK 内容、musl 静态链接、载荷及生产测试标记审计通过；Rust 442+13、严格 Clippy/lint、前端 207 项、管理 API、七点 SIGKILL 恢复与 PR 基线两项 CI 通过。当前包同源 musl Gateway 25 项通过及 2 项环境条件跳过，Chromium Gateway 12 项通过及 1 项条件跳过。前端依赖审计无漏洞；Cargo 依赖审计无漏洞，仅 `fxhash 0.2.1` 停止维护且无修复版本的允许警告，`url` 已升至 `2.5.9`。真实 fnOS 1.2.1102 已从 1.5.7-2 应用中心升级到最终包，配置和 2.3.0.post1 保持，启停重启、原生注册登录/深链、目录授权解绑、备份入口、日志导出及主题双语通过；全新安装、保留/删除卸载、精确旧包回退并升回、2.3.0 与 2.2.2.post1 生产镜像安装/登录/重启及下载失败恢复均通过；公开访问原生登录、恢复本机监听及 Info/Trace 配置回调通过；禁用鉴权只采用自动化证据。真实手机、语音、长稳与送审材料继续验收，未以历史结果关闭。
 

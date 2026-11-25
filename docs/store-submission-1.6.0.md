@@ -2,8 +2,8 @@
 
 ## 当前状态
 
-- 当前草稿验收版本为 `1.6.0-1`，基于 `ce2d7bd` 的最新全绿 CI 建立；随包默认内核仍为官方 `2.3.0.post1`，适配上游 PR #8719。本版仅进入逐项验收，不因历史候选、安装成功或单项测试放行上架，也不自动合并或发布。
-- 草稿 PR：[yaozy2020/QwenPaw-for-fnOS#1](https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1)。当前候选 FPK 为 `qwenpaw-1.6.0-1-x86.fpk`，SHA256 `ac3f8845e11ed7007f07df1115d5bceec77f24dd96609d82ea9c83af2f00662a`，构建源码 `32e2d99`（关于页移除整段功能介绍，保留版本、链接和 FAQ）。
+- 当前正式版本为 `1.6.0`，随包默认内核为官方 `2.3.0.post1`，适配上游 PR #8719。原 PR #1 已合并；版本后缀纠正由 PR #2 处理，正式 tag、manifest、README 和 FPK 文件名统一不带测试构建号。
+- 当前纠正候选 FPK 为 `qwenpaw-1.6.0-x86.fpk`，SHA256 `d2cc562ccc9dbadebe78db27d8e43e03da25074f08dc9f9b24285ed18ddd8e4f`，构建源码 `1040da6`。既有 `1.6.0-1` 记录只作为测试历史。
 - 新应用简介已同步到 manifest、README、安装向导和双语关于页；按后续要求移除关于页整段介绍并清理双语文案。207 项前端测试、类型检查及 FPK 审计通过，真实 fnOS 保留数据重装后确认无介绍段落，保留版本、2 个项目链接和 7 条 FAQ。应用中心拒绝同版本覆盖后，采用保留数据卸载并安装精确新包；manifest 新文案、版本钉、镜像、Info 和默认内核健康均复核通过，原账号重新登录及设置深链无浏览器错误；`7f0a39f` 的 `rust` 与 `validate` CI 均通过。下方此前 `2d5080…` 包的真机记录保留为历史证据，不与新摘要混写。
 - 当前源码已通过 Rust 442+13 项、严格 Clippy、严格 lint（含前端 207 项、120 次生命周期并发调用和配置事务）、管理 API 与断连恢复、七点 SIGKILL 恢复、版本同步及审计报告一致性检查；PR 基线的 `rust` 与 `validate` 两项 CI 均通过。
 - 当前 FPK 对应 musl Supervisor 的 Gateway UDS 矩阵 25 项通过、2 项因隔离环境无法创建未映射外部属主而条件跳过；Chromium Gateway 12 项通过、1 项真实独立端口场景按环境条件跳过。跳过项不记作全量通过，须由真实平台权限与网络验收补足。
@@ -76,12 +76,12 @@ QwenPaw 本体不随 FPK 分发。首次使用时，需在控制台选择内核�
 
 ## 发布物料
 
-物料目录：`build/candidates/1.6.0-1-store-review/`（生成目录，不手工编辑包内文件）。早期筹备证据保留在 `build/candidates/1.5.4-store-prep/`、`build/candidates/1.5.4-mobile-title/` 和 `build/candidates/1.5.5-ios-long-chat/`。
+物料目录：`build/candidates/1.6.0-store/`（生成目录，不手工编辑包内文件）。早期筹备证据保留在 `build/candidates/1.5.4-store-prep/`、`build/candidates/1.5.4-mobile-title/` 和 `build/candidates/1.5.5-ios-long-chat/`。
 
 | 物料 | 文件 / 状态 |
 |---|---|
-| 当前验收候选 FPK | `qwenpaw-1.6.0-1-x86.fpk`，34,141,757 字节；草稿 PR #1 验收期间不放行 |
-| SHA256 | `ac3f8845e11ed7007f07df1115d5bceec77f24dd96609d82ea9c83af2f00662a`；同目录 `.fpk.sha256` 已生成 |
+| 当前正式纠正候选 FPK | `qwenpaw-1.6.0-x86.fpk`，34,142,441 字节；通过版本纠正门禁后发布 |
+| SHA256 | `d2cc562ccc9dbadebe78db27d8e43e03da25074f08dc9f9b24285ed18ddd8e4f`；同目录 `.fpk.sha256` 已生成 |
 | 包图标 | `ICON.PNG`：64×64；`ICON_256.PNG`：256×256；已从最终 FPK 读取复核 |
 | 控制台入口图标 | `app/ui/images/console_64.png`、`console_256.png` |
 | 主 Web 入口图标 | `app/ui/images/icon_64.png`、`icon_256.png` |
