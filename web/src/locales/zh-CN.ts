@@ -459,7 +459,6 @@ export const zhCN = {
 
   "about.title": "关于 QwenPaw",
   "about.versionBadge": "当前版本 v{version}",
-  "about.desc": "QwenPaw for fnOS 是面向飞牛 NAS 的第三方部署外壳（与上游团队无隶属关系），提供内核事务安装与版本管理、进程与资源监控、独立 Web 反代、飞牛目录授权及日志筛选导出；QwenPaw 本体不随包内置，由所选 PyPI 镜像按需下载安装。",
   "about.linksAria": "项目地址",
   "about.upstreamTitle": "上游 QwenPaw 项目",
   "about.wrapperTitle": "QwenPaw for fnOS 项目",

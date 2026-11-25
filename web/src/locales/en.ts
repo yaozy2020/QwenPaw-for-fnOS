@@ -461,7 +461,6 @@ export const en: Record<MessageKey, string> = {
 
   "about.title": "About QwenPaw",
   "about.versionBadge": "Version v{version}",
-  "about.desc": "QwenPaw for fnOS is a third-party deployment wrapper for fnOS (unaffiliated with the upstream team), providing transactional kernel installation and version management, process and resource monitoring, standalone Web proxy, fnOS folder authorization, and log filtering/export; QwenPaw itself is not bundled and is installed on demand from the selected PyPI mirror.",
   "about.linksAria": "Project links",
   "about.upstreamTitle": "Upstream QwenPaw Repository",
   "about.wrapperTitle": "QwenPaw for fnOS Repository",
