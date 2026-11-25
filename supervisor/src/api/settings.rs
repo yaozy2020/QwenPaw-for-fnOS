@@ -323,7 +323,11 @@ mod tests {
     }
 
     impl SlowAuthServer {
-        fn start(listener: std::net::TcpListener) -> Self {
+        fn start(
+            listener: std::net::TcpListener,
+            auth_started: std::sync::mpsc::Sender<()>,
+            release_auth: std::sync::mpsc::Receiver<()>,
+        ) -> Self {
             listener.set_nonblocking(true).unwrap();
             let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let thread_shutdown = Arc::clone(&shutdown);
@@ -337,7 +341,8 @@ mod tests {
                             let size = stream.read(&mut request).unwrap_or_default();
                             let auth_probe = request[..size].starts_with(b"GET /api/auth/status ");
                             if auth_probe {
-                                std::thread::sleep(Duration::from_millis(500));
+                                auth_started.send(()).unwrap();
+                                release_auth.recv_timeout(Duration::from_secs(10)).unwrap();
                             }
                             let body: &[u8] = if request[..size].starts_with(b"GET /api/version ") {
                                 br#"{"version":"2.3.0"}"#
@@ -410,8 +415,13 @@ mod tests {
         let dir = TestDir::new("settings-slow-auth-snapshot");
         let port = crate::api::test_support::free_port();
         let state = dir.state(port);
-        let _server =
-            SlowAuthServer::start(crate::api::test_support::release_port_reservation(port));
+        let (auth_started_tx, auth_started_rx) = std::sync::mpsc::channel();
+        let (release_auth_tx, release_auth_rx) = std::sync::mpsc::channel();
+        let _server = SlowAuthServer::start(
+            crate::api::test_support::release_port_reservation(port),
+            auth_started_tx,
+            release_auth_rx,
+        );
         let _kernel = KernelGuard(Arc::clone(&state.kernel));
         install_python(&dir, &state, "import time\ntime.sleep(3600)\n");
         state.kernel.spawn().unwrap();
@@ -440,25 +450,21 @@ mod tests {
             ))
             .unwrap();
 
-        let started = std::time::Instant::now();
-        let response = settings(State(state.clone()), request).await;
-        let elapsed = started.elapsed();
+        let snapshot_state = state.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || crate::api::render_snapshot(&snapshot_state));
+        auth_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
 
+        let response = settings(State(state.clone()), request).await;
+        let snapshot_was_blocked = !snapshot.is_finished();
+        release_auth_tx.send(()).unwrap();
+        snapshot.await.unwrap();
+
+        assert!(snapshot_was_blocked, "snapshot must remain blocked on auth");
         assert_eq!(response.status(), StatusCode::OK);
         assert!(events.has_changed().unwrap());
-        assert!(
-            elapsed < Duration::from_millis(275),
-            "settings response waited for the slow auth probe in snapshot rendering: {elapsed:?}"
-        );
-        let render_started = std::time::Instant::now();
-        let snapshot_state = state.clone();
-        tokio::task::spawn_blocking(move || crate::api::render_snapshot(&snapshot_state))
-            .await
-            .unwrap();
-        assert!(
-            render_started.elapsed() >= Duration::from_millis(250),
-            "fixture must keep snapshot auth probing slow"
-        );
     }
 
     #[tokio::test]
