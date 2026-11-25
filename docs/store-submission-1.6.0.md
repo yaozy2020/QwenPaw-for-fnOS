@@ -3,6 +3,9 @@
 ## 当前状态
 
 - 当前草稿验收版本为 `1.6.0-1`，基于 `ce2d7bd` 的最新全绿 CI 建立；随包默认内核仍为官方 `2.3.0.post1`，适配上游 PR #8719。本版仅进入逐项验收，不因历史候选、安装成功或单项测试放行上架，也不自动合并或发布。
+- 草稿 PR：[yaozy2020/QwenPaw-for-fnOS#1](https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1)。当前候选 FPK 为 `qwenpaw-1.6.0-1-x86.fpk`，SHA256 `fe3a2a6ea60fa70ccd99c75f0dfbf1b81dce8eef6c7747930a0c1944244608d4`。
+- 当前源码已通过 Rust 442+13 项、严格 Clippy、严格 lint（含前端 207 项、120 次生命周期并发调用和配置事务）、版本同步及审计报告一致性检查；PR 基线的 `rust` 与 `validate` 两项 CI 均通过。
+- `npm audit` 为 0 vulnerabilities。`cargo audit` 加载 1567 条 RustSec 公告后无漏洞；`url 2.5.8` 已升级至 `2.5.9` 以修复 `RUSTSEC-2026-0592`，仅保留 `fxhash 0.2.1` / `RUSTSEC-2025-0057` 的停止维护允许警告，该公告无可用修复版本。
 - 三版本真实 wheel 验收结果见下文。历史候选不替代当前包记录。
 - 实际提交入口：[飞牛先锋开发者应用上架申请表](https://trim-nas.feishu.cn/share/base/form/shrcn9ewk59TfoFWVAPMPy6aWSc)。表单要求登录后提交，本筹备工作不代为上传或提交。
 - 官方[上架应用说明](https://developer.fnnas.com/docs/quick-started/publish-application/)要求准备最终 FPK、应用图标、真实界面截图，并在计划支持的系统与架构上测试。表单说明：root 权限应用不予上架；优先接入统一网关且不监听公网端口；文件接口须校验路径安全；版本采用 `x.y.z` 或数字后缀 `x.y.z-m`；审核通过后先进入一周内测，再开放公测。
@@ -71,12 +74,12 @@ QwenPaw 本体不随 FPK 分发。首次使用时，需在控制台选择内核�
 
 ## 发布物料
 
-物料目录：`build/candidates/1.5.5-ios-long-chat/`（生成目录，不手工编辑包内文件）。早期筹备证据保留在 `build/candidates/1.5.4-store-prep/` 和 `build/candidates/1.5.4-mobile-title/`。
+物料目录：`build/candidates/1.6.0-1-store-review/`（生成目录，不手工编辑包内文件）。早期筹备证据保留在 `build/candidates/1.5.4-store-prep/`、`build/candidates/1.5.4-mobile-title/` 和 `build/candidates/1.5.5-ios-long-chat/`。
 
 | 物料 | 文件 / 状态 |
 |---|---|
-| 筹备候选 FPK | `qwenpaw-1.5.5-x86.fpk`，34,070,534 字节；完成包级复验前不放行 |
-| SHA256 | `ec4be05988f73ac11d190f5c6909776b45dacfbe5dfe3a28854ddc3423677a11`；同目录 `.fpk.sha256` 已生成 |
+| 当前验收候选 FPK | `qwenpaw-1.6.0-1-x86.fpk`，34,142,133 字节；草稿 PR #1 验收期间不放行 |
+| SHA256 | `fe3a2a6ea60fa70ccd99c75f0dfbf1b81dce8eef6c7747930a0c1944244608d4`；同目录 `.fpk.sha256` 已生成 |
 | 包图标 | `ICON.PNG`：64×64；`ICON_256.PNG`：256×256；已从最终 FPK 读取复核 |
 | 控制台入口图标 | `app/ui/images/console_64.png`、`console_256.png` |
 | 主 Web 入口图标 | `app/ui/images/icon_64.png`、`icon_256.png` |
@@ -176,7 +179,7 @@ FPK：`build/validation/port8719.5JdCZl/fpk/qwenpaw-1.5.6-7-x86.fpk`，SHA256 `a
 
 必须在同一个最终 FPK 上记录结果，不能用 1.5.4 筹备包或历史包替代。
 
-- [ ] 版本已按用户要求在全部筹备和验证完成后推进 1.6，版本同步、Release 标签映射和审计一致性通过。
+- [x] 版本已按用户要求在全部筹备和验证完成后推进 1.6，版本同步、Release 标签映射和审计一致性通过。
 - [ ] 在声明支持的 fnOS 版本和 x86_64 测试设备上，通过应用中心手动安装最终 FPK。
 - [ ] 全新安装后依赖、向导、控制台与两个桌面入口可用；按实际网络安装匹配内核并完成启动、停止、重启。
 - [ ] 从上一候选升级后，用户数据、认证、配置、版本钉和入口保持；如发生运行环境重建，记录原因和实际内核版本。
