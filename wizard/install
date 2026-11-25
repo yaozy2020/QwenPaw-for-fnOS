@@ -4,7 +4,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "<strong>QwenPaw for fnOS</strong> 是面向飞牛 NAS 的第三方部署外壳，用于安装与管理 QwenPaw 内核。安装完成后，请打开飞牛桌面的「QwenPaw 控制台」，在「概览 → 部署版本」选择并安装内核。"
+                "helpText": "<strong>QwenPaw for fnOS</strong> 是面向飞牛 NAS 的第三方部署外壳，适配飞牛统一网关双入口、飞牛管理员入口登录与密码重置、飞牛目录授权及五源按需事务安装。安装完成后，请打开飞牛桌面的「QwenPaw 控制台」，在「概览 → 部署版本」选择并安装内核。"
             },
             {
                 "type": "tips",
