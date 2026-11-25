@@ -5,7 +5,7 @@ verify-release-tag.py — 校验 Release Tag 与 manifest 映射规则
 
 规则映射：
   v2.1.0-rc.2 -> manifest 2.1.0-N (N 单调递增) -> prerelease=true
-  v2.1.0      -> manifest 2.1.0-N (N 单调递增) -> prerelease=false
+  v2.1.0      -> manifest 2.1.0（正式版不带测试构建号） -> prerelease=false
 
 RC 序号不能直接当 FPK 构建号：那会让 rc.2 的构建号小于 rc.1 的 -7，
 触发 fnOS 的"版本倒退、拒绝覆盖升级"。构建号由 manifest 独立维护，必须单调递增。
@@ -172,14 +172,15 @@ def main():
         else:
             print(f"构建号单调性: {release_base} 域内上一个 rc {prev} → 本次 {rc_no}")
     else:
-        # 正式 tag 不携带构建号:fnOS 覆盖升级按版本串比较,2.1.0 相对
-        # 2.1.0-9 可能被判倒退 —— 项目约定 manifest 恒带构建号,偏离即拒绝
-        print(
-            f"ERROR: 正式版 manifest 必须携带构建号(如 {expected_manifest}-N),"
-            f"实际为 '{actual_manifest}'。无构建号版本在 fnOS 覆盖升级时可能被判倒退。",
-            file=sys.stderr,
-        )
-        return 1
+        # 正式版 tag 与 manifest 均为 x.y.z，不携带测试构建号。
+        if is_prerelease or actual_manifest != expected_manifest:
+            print(
+                f"ERROR: 正式版 manifest 必须是无后缀的 {expected_manifest},"
+                f"实际为 '{actual_manifest}'。",
+                file=sys.stderr,
+            )
+            return 1
+        print("正式版无构建号: tag 与 manifest 均为相同 x.y.z")
 
     if github_output_mode:
         import os

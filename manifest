@@ -1,5 +1,5 @@
 appname                    = qwenpaw
-version                    = 1.6.0-1
+version                    = 1.6.0
 display_name               = QwenPaw
 desc                       = `<p>QwenPaw for fnOS 是面向飞牛 NAS 的第三方部署外壳，与 QwenPaw 上游团队无隶属关系；内核按需从所选 PyPI 镜像下载安装。</p><p><strong>飞牛适配与核心亮点：</strong>接入飞牛统一网关双桌面入口与可选独立 Web 反代；支持飞牛管理员入口登录迁移与免旧密码重置 QwenPaw 密码；集成飞牛文件授权绑定工作区目录与唤起文件管理器；适配飞牛 App 全屏交互与动态标题；提供五源事务安装回滚、外壳与内核双轨升级、安装前数据备份、实时资源监控、日志高亮筛选导出，以及默认/Miuix 双风格、三态主题与中英双语控制台。</p>`
 platform                   = x86
@@ -15,4 +15,4 @@ micro_app                  = true
 checkport                  = false
 disable_authorization_path = false
 install_dep_apps           = nodejs_v24:python312
-changelog                  = "v1.6.0-1：上架验收版本，汇集 Gateway 安全加固、入口与安装弹窗优化、日志高亮与筛选导出、上游禁用鉴权兼容、双语 FAQ 和多语言/Miuix 样式整理。"
+changelog                  = "v1.6.0：汇集 Gateway 安全加固、入口与安装弹窗优化、日志高亮与筛选导出、上游禁用鉴权兼容、双语 FAQ 和多语言/Miuix 样式整理。"
