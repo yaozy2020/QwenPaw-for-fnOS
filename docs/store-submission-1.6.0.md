@@ -3,8 +3,9 @@
 ## 当前状态
 
 - 当前草稿验收版本为 `1.6.0-1`，基于 `ce2d7bd` 的最新全绿 CI 建立；随包默认内核仍为官方 `2.3.0.post1`，适配上游 PR #8719。本版仅进入逐项验收，不因历史候选、安装成功或单项测试放行上架，也不自动合并或发布。
-- 草稿 PR：[yaozy2020/QwenPaw-for-fnOS#1](https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1)。当前候选 FPK 为 `qwenpaw-1.6.0-1-x86.fpk`，SHA256 `fe3a2a6ea60fa70ccd99c75f0dfbf1b81dce8eef6c7747930a0c1944244608d4`。
-- 当前源码已通过 Rust 442+13 项、严格 Clippy、严格 lint（含前端 207 项、120 次生命周期并发调用和配置事务）、版本同步及审计报告一致性检查；PR 基线的 `rust` 与 `validate` 两项 CI 均通过。
+- 草稿 PR：[yaozy2020/QwenPaw-for-fnOS#1](https://github.com/yaozy2020/QwenPaw-for-fnOS/pull/1)。当前候选 FPK 为 `qwenpaw-1.6.0-1-x86.fpk`，SHA256 `2d5080e295ad57542eb9a1d8745d3f264a6b22e78bdc5b348942deeab80046fe`。
+- 当前源码已通过 Rust 442+13 项、严格 Clippy、严格 lint（含前端 207 项、120 次生命周期并发调用和配置事务）、管理 API 与断连恢复、七点 SIGKILL 恢复、版本同步及审计报告一致性检查；PR 基线的 `rust` 与 `validate` 两项 CI 均通过。
+- 当前 FPK 对应 musl Supervisor 的 Gateway UDS 矩阵 25 项通过、2 项因隔离环境无法创建未映射外部属主而条件跳过；Chromium Gateway 12 项通过、1 项真实独立端口场景按环境条件跳过。跳过项不记作全量通过，须由真实平台权限与网络验收补足。
 - `npm audit` 为 0 vulnerabilities。`cargo audit` 加载 1567 条 RustSec 公告后无漏洞；`url 2.5.8` 已升级至 `2.5.9` 以修复 `RUSTSEC-2026-0592`，仅保留 `fxhash 0.2.1` / `RUSTSEC-2025-0057` 的停止维护允许警告，该公告无可用修复版本。
 - 三版本真实 wheel 验收结果见下文。历史候选不替代当前包记录。
 - 实际提交入口：[飞牛先锋开发者应用上架申请表](https://trim-nas.feishu.cn/share/base/form/shrcn9ewk59TfoFWVAPMPy6aWSc)。表单要求登录后提交，本筹备工作不代为上传或提交。
@@ -78,8 +79,8 @@ QwenPaw 本体不随 FPK 分发。首次使用时，需在控制台选择内核�
 
 | 物料 | 文件 / 状态 |
 |---|---|
-| 当前验收候选 FPK | `qwenpaw-1.6.0-1-x86.fpk`，34,142,133 字节；草稿 PR #1 验收期间不放行 |
-| SHA256 | `fe3a2a6ea60fa70ccd99c75f0dfbf1b81dce8eef6c7747930a0c1944244608d4`；同目录 `.fpk.sha256` 已生成 |
+| 当前验收候选 FPK | `qwenpaw-1.6.0-1-x86.fpk`，34,141,354 字节；草稿 PR #1 验收期间不放行 |
+| SHA256 | `2d5080e295ad57542eb9a1d8745d3f264a6b22e78bdc5b348942deeab80046fe`；同目录 `.fpk.sha256` 已生成 |
 | 包图标 | `ICON.PNG`：64×64；`ICON_256.PNG`：256×256；已从最终 FPK 读取复核 |
 | 控制台入口图标 | `app/ui/images/console_64.png`、`console_256.png` |
 | 主 Web 入口图标 | `app/ui/images/icon_64.png`、`icon_256.png` |
