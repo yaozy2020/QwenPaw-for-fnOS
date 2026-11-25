@@ -461,7 +461,6 @@ export const en: Record<MessageKey, string> = {
 
   "about.title": "About QwenPaw",
   "about.versionBadge": "Version v{version}",
-  "about.desc": "QwenPaw for fnOS is a third-party deployment wrapper for fnOS (unaffiliated with the upstream team). Adapted for fnOS Gateway dual desktop entries, fnOS admin session login and administrator-assisted admin password reset without the current password, fnOS folder authorization and File Manager integration, and fnOS App interaction; also provides on-demand 5-mirror PyPI transactional install, dual-track upgrades, standalone Web proxy, live resource monitoring, log keyword highlighting/export, Default/Miuix styles, tri-state themes, and Chinese/English switching.",
   "about.linksAria": "Project links",
   "about.upstreamTitle": "Upstream QwenPaw Repository",
   "about.wrapperTitle": "QwenPaw for fnOS Repository",

@@ -33,7 +33,6 @@ defineExpose({ open });
           </svg>
         </button>
       </div>
-      <p>{{ t('about.desc') }}</p>
     </div>
     <div class="about-links" :aria-label="t('about.linksAria')">
       <a href="https://github.com/agentscope-ai/QwenPaw" target="_blank" rel="noopener noreferrer">
