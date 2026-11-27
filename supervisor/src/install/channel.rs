@@ -58,7 +58,13 @@ pub(super) fn is_safe_exact_version(v: &str) -> bool {
 }
 
 pub fn uv_bootstrap_args() -> Vec<String> {
-    ["install", "--upgrade", "--disable-pip-version-check", "uv"]
+    [
+        "install",
+        "--upgrade",
+        "--disable-pip-version-check",
+        "pip>=26.2.2",
+        "uv",
+    ]
         .iter()
         .map(|value| (*value).to_string())
         .collect()
