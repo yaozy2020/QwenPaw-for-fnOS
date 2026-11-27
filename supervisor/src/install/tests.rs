@@ -144,7 +144,13 @@ mod tests {
     fn uv_args_shape() {
         assert_eq!(
             uv_bootstrap_args(),
-            vec!["install", "--upgrade", "--disable-pip-version-check", "uv"]
+            vec![
+                "install",
+                "--upgrade",
+                "--disable-pip-version-check",
+                "pip>=26.2.2",
+                "uv"
+            ]
         );
         assert_eq!(
             uv_args(&InstallChannel::Latest),
@@ -1350,6 +1356,7 @@ if module == 'pip':
                         "install",
                         "--upgrade",
                         "--disable-pip-version-check",
+                        "pip>=26.2.2",
                         "uv"
                     ])
                 );
