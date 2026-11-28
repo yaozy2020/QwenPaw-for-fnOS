@@ -246,8 +246,9 @@ def render() -> str:
         a("| Workflow | 触发 |")
         a("|:---------|:-----|")
         wf_desc = {
-            "ci.yml": "PR 触发，跑 preflight + 前端构建验证",
-            "release.yml": "tag 或手动触发，fpkstudio 双构建并上传 GitHub Release",
+            "ci.yml": "PR、main 或手动触发完整门禁；validate/rust 通过后上传未签名候选 FPK",
+            "release.yml": "tag 或手动触发，官方最新版 fnpack 签名双构建并上传 GitHub Release",
+            "upstream.yml": "每日或手动核对 PyPI stable；仅为新版创建适配 Issue，不自动修改版本钉或发布",
         }
         for w in workflows:
             a(f"| `{w}` | {wf_desc.get(w, '-')} |")

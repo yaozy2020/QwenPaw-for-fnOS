@@ -1,0 +1,62 @@
+name: Upstream stable monitor
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-qwenpaw
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Check official PyPI stable feed
+        id: upstream
+        run: |
+          python3 -B scripts/check-upstream.py \
+            --project QwenPaw \
+            --feed https://pypi.org/pypi/qwenpaw/json \
+            --field info.version \
+            --current-file patches/verified-version \
+            --output upstream.json \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Preserve check report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qwenpaw-upstream-${{ github.run_id }}
+          path: upstream.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Open one adaptation issue per upstream version
+        if: steps.upstream.outputs.update_available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT: ${{ steps.upstream.outputs.current }}
+          LATEST: ${{ steps.upstream.outputs.latest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="适配 QwenPaw ${LATEST}"
+          existing=$(gh issue list --state open --limit 200 --json number,title | jq --arg title "$title" '[.[] | select(.title == $title)] | length')
+          if [ "$existing" != 0 ]; then
+            echo "Adaptation issue already exists"
+            exit 0
+          fi
+          gh issue create --title "$title" --body-file - <<EOF
+          PyPI stable 已从当前适配基线 ${CURRENT} 前进到 ${LATEST}。
+
+          这只是版本监测，不代表新版已经兼容。请核对对应上游源码提交，更新 patches/verified-version、匹配源码补丁和完整 Console 载荷，并保留旧版升级路径。CI 生成未签名候选 FPK；现有签名 Release 仍需按既定门禁单独触发。
+
+          监测记录：${RUN_URL}
+          EOF

@@ -47,11 +47,12 @@ fn run() -> io::Result<()> {
         return run_code_probe(&args[1], control.as_deref());
     }
     if args.len() >= 2 && args[0] == OsStr::new("-m") && args[1] == OsStr::new("pip") {
-        if args.len() == 6
+        if args.len() == 7
             && args[2] == OsStr::new("install")
             && args[3] == OsStr::new("--upgrade")
             && args[4] == OsStr::new("--disable-pip-version-check")
-            && args[5] == OsStr::new("uv")
+            && args[5] == OsStr::new("pip>=26.2.2")
+            && args[6] == OsStr::new("uv")
         {
             let python = env::current_exe()?;
             fs::copy(&python, python.with_file_name("uv"))?;

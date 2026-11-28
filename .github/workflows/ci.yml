@@ -31,7 +31,7 @@ jobs:
           for f in cmd/main cmd/install_init cmd/install_callback cmd/upgrade_init \
                    cmd/upgrade_callback cmd/uninstall_init cmd/uninstall_callback \
                    cmd/config_init cmd/config_callback build.sh scripts/lint.sh \
-                   scripts/preflight.sh scripts/audit-fpk.sh tools/fnpack; do
+                   scripts/preflight.sh scripts/audit-fpk.sh scripts/check-upstream.py; do
             mode=$(git ls-files -s "$f" | awk '{print $1}')
             if [ "$mode" != "100755" ]; then
               echo "::error::$f 的 git 模式是 ${mode:-缺失},应为 100755"
@@ -42,6 +42,12 @@ jobs:
 
       - name: Preflight (version SSOT + repo hygiene)
         run: bash scripts/preflight.sh
+
+      - name: Official fnpack resolver regressions
+        run: python3 -B scripts/test-fnpack-resolver.py
+
+      - name: Upstream monitor regressions
+        run: python3 -B scripts/test-check-upstream.py
 
       - name: FPK audit self-test
         run: bash scripts/audit-fpk.sh --self-test
@@ -166,3 +172,39 @@ jobs:
       - name: Gateway disconnected mutation recovery
         working-directory: .
         run: sudo -E env "PATH=$PATH" python3 scripts/test-gateway-uds.py GatewayUDSTests.test_disconnected_configuration_retains_gate_until_rollback
+
+  candidate:
+    needs: [validate, rust]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Install musl build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+      - name: Build and audit unsigned candidate FPK
+        env:
+          FPK_MODE: debug
+          FPK_OUT: ${{ runner.temp }}/qwenpaw-candidate
+          NPM_REGISTRY: ${{ vars.NPM_REGISTRY || 'https://registry.npmjs.org' }}
+        run: bash build.sh
+      - name: Upload candidate for manual fnOS acceptance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qwenpaw-candidate-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/qwenpaw-candidate/*.fpk
+            ${{ runner.temp }}/qwenpaw-candidate/*.fpk.sha256
+            ${{ runner.temp }}/qwenpaw-candidate/*.fpk.fnpack.json
+          if-no-files-found: error
+          retention-days: 14

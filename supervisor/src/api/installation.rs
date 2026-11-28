@@ -369,6 +369,7 @@ if pathlib.Path(sys.argv[0]).name == 'uv' and sys.argv[1:3] == ['pip', 'install'
                 "install",
                 "--upgrade",
                 "--disable-pip-version-check",
+                "pip>=26.2.2",
                 "uv"
             ])
         );

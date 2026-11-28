@@ -121,7 +121,7 @@ jobs:
       # [3] 文件权限检查
       - name: Verify git exec bits
         run: |
-          for f in cmd/main build.sh tools/fnpack; do
+          for f in cmd/main build.sh; do
             mode=$(git ls-files -s "$f" | awk '{print $1}')
             [ "$mode" = "100755" ] || { echo "::error::$f 应为 100755,实际 ${mode:-缺失}"; exit 1; }
           done
@@ -210,16 +210,24 @@ jobs:
       - name: Dual-build reproducible verification
         id: build
         env:
-          FNPACK_BIN: ${{ github.workspace }}/tools/fnpack
+          FPK_MODE: signed
+          FNPACK_KEY_PEM: ${{ secrets.FNPACK_KEY_PEM }}
+          FNPACK_CERT_PEM: ${{ secrets.FNPACK_CERT_PEM }}
+          VERSION: ${{ steps.verify.outputs.manifest_version }}
         run: |
+          : "${FNPACK_KEY_PEM:?缺少开发者私钥}" "${FNPACK_CERT_PEM:?缺少开发者证书}"
+          SIGN_DIR=$(mktemp -d "$RUNNER_TEMP/fnpack-sign.XXXXXXXX")
+          trap 'rm -rf -- "$SIGN_DIR"' EXIT
+          export FNPACK_KEY="$SIGN_DIR/developer.key" FNPACK_CERT="$SIGN_DIR/developer.crt"
+          (umask 077; printf '%s\n' "$FNPACK_KEY_PEM" > "$FNPACK_KEY"; printf '%s\n' "$FNPACK_CERT_PEM" > "$FNPACK_CERT")
+          unset FNPACK_KEY_PEM FNPACK_CERT_PEM
           DIR1="${RUNNER_TEMP}/build1"
           DIR2="${RUNNER_TEMP}/build2"
           mkdir -p "$DIR1" "$DIR2"
 
           echo "=== 第一次构建 ==="
           FPK_OUT="$DIR1" bash build.sh
-          FPK_FILE=$(ls "$DIR1"/qwenpaw*.fpk | head -n 1)
-          FPK_NAME=$(basename "$FPK_FILE")
+          FPK_NAME="qwenpaw-${VERSION}-x86.fpk"
           SHA1=$(sha256sum "$DIR1/$FPK_NAME" | awk '{print $1}')
 
           echo "=== 第二次构建(洁净 web 产物) ==="
@@ -229,7 +237,7 @@ jobs:
           # 让这两条路径真正重跑 —— 不是"同环境冒烟",而是对非确定性热点的复算。
           rm -rf web/dist web/node_modules/.cache
           npm ci --prefix web --registry="${NPM_REGISTRY:-https://registry.npmmirror.com}" --no-audit --no-fund
-          FPK_OUT="$DIR2" bash build.sh
+          FNPACK_EXPECTED="$DIR1/$FPK_NAME.fnpack.json" FPK_OUT="$DIR2" bash build.sh
           SHA2=$(sha256sum "$DIR2/$FPK_NAME" | awk '{print $1}')
 
           echo "Build 1 SHA256: $SHA1"
@@ -245,6 +253,7 @@ jobs:
           cp "$DIR1/$FPK_NAME.sha256" "${{ github.workspace }}/$FPK_NAME.sha256"
           echo "fpk_name=$FPK_NAME" >> "$GITHUB_OUTPUT"
           echo "fpk_sha256=$SHA1" >> "$GITHUB_OUTPUT"
+          jq -r '"fnpack_version=\(.version)\nfnpack_sha256=\(.sha256)"' "$DIR1/$FPK_NAME.fnpack.json" >> "$GITHUB_OUTPUT"
 
       # [5b] 真实 SIGKILL 崩溃注入使用独立 test-hooks 构建；正式 FPK 不含测试开关。
       - name: Build instrumented supervisor for crash injection
@@ -282,6 +291,8 @@ jobs:
         env:
           FPK_NAME_IN: ${{ steps.build.outputs.fpk_name }}
           SHA256_IN: ${{ steps.build.outputs.fpk_sha256 }}
+          FNPACK_VERSION: ${{ steps.build.outputs.fnpack_version }}
+          FNPACK_SHA256: ${{ steps.build.outputs.fnpack_sha256 }}
           VERSION_IN: ${{ steps.verify.outputs.manifest_version }}
           TAG_IN: ${{ steps.tag.outputs.tag }}
         run: |
@@ -296,6 +307,7 @@ jobs:
           ## 安装包校验
           - 安装包：\`${FPK_NAME}\`
           - SHA256：\`${SHA256}\`
+          - 官方 fnpack 版本 \`${FNPACK_VERSION}\`，工具 SHA-256 \`${FNPACK_SHA256}\`
 
           这是第三方打包的部署外壳，与 QwenPaw 上游团队无隶属关系。QwenPaw 本体不随包分发，安装时需要从所选 PyPI 镜像下载。
 

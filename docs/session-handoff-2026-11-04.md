@@ -1,5 +1,21 @@
 # 会话交接：QwenPaw-for-fnOS
 
+## PR 8719 合入后的内核适配
+
+2026-11-27 核对时，PR #8719 已同步上游 `main`，PR 仍开放，分支头为 `9d2544feb`。fnOS 外壳 `1.6.0` 随包提供的是官方 `2.3.0.post1` 的适配载荷，已移植的 PR 改动记录到 `286c6556`。FPK 从本仓库复制预构建载荷，PR 分支推进不会改变已安装实例或当前重打的包。[上游 PR](https://github.com/agentscope-ai/QwenPaw/pull/8719) · [出货版本](../patches/verified-version) · [打包脚本](../build.sh)
+
+**首次切换以官方发行的 wheel 为准。** PR 合入后，先核实目标 wheel 的确切版本，确认它同时包含子路径后端和配套 Console。对该版本直接使用官方实现，沿用 `2.3.0.post1` 的实例继续按原版本钉使用现有载荷。只替换旧内核的 Console 会导致前后端不匹配，例如新版 Console 从 `qwenpaw-base-path` 元标签取前缀，post1 后端只提供 `<base href>`。
+
+首次接入时验证以下三处：
+
+1. **挂载路径。** Supervisor 和 Gateway 目前都按 `.qwenpaw-base-path-patch` 标记判断内核是否支持子路径。接入官方 wheel 时，两处须识别同一项原生能力，使内核收到 `QWENPAW_BASE_PATH=/app/qwenpaw/web`，Gateway 只对需要兼容的旧内核改写路径。用桌面深链刷新、静态资源和 API 请求确认前缀只出现一次。[内核启动](../supervisor/src/kernel.rs) · [Gateway 转发](../supervisor/src/gateway/web_proxy.rs)
+2. **登录。** 飞牛桌面绑定依赖私有 Unix socket 和适配文件校验。用已有绑定重启，确认桌面能进入原账号，同时验证独立反代上的原生登录。[入口兼容检查](../supervisor/src/entry_login.rs)
+3. **升级与恢复。** 在隔离环境验证目标 wheel 安装、重启后的健康探测能读到目标版本，覆盖平台回环 `/api/version` 探测。验证安装失败时旧 venv、版本钉和服务能恢复。[安装事务](../supervisor/src/install/mod.rs) · [平台探测与恢复](../supervisor/src/platform.rs)
+
+后续官方版本沿用已验证的子路径接口时，复跑这些兼容回归即可。仅在上游接口或 fnOS 专用行为发生变化时修改对应适配，无需逐版重做 #8719 的移植。
+
+## 历史交接记录
+
 - `1.5.5` iOS 长会话修复候选：在 1.5.4 已验证的移动头部、动态标题与上架材料基础上，同步当前 Console 工作树已有的四项长会话缓解：iOS 关闭逐气泡导航测量与 `content-visibility:auto`、历史恢复补分页标记、收窄输入区 DOM 监听。目标回归 54 项、生产构建、包内 Gateway 2 项、FPK 审计及双构建字节一致性通过。候选 `build/candidates/1.5.5-ios-long-chat/qwenpaw-1.5.5-x86.fpk`，SHA256 `ec4be05988f73ac11d190f5c6909776b45dacfbe5dfe3a28854ddc3423677a11`。真机 iOS 私有属性分支与长会话滚动仍须实机验收，不推进或打包 1.6。
 
 - `1.5.4` 上架筹备（门禁未放行）：当前只使用 1.5.x，门禁全部通过前不得推进或打包 1.6；提前生成的 1.6 候选已作废删除。真机发现的上游聊天页移动头部挤压及控制台原生标题不随页面变化已修复，并通过源码、隔离复测和最终 1.5.4 FPK 包级验证。最终候选 `build/candidates/1.5.4-mobile-title/qwenpaw-1.5.4-x86.fpk`，SHA256 `a7c9841b431348138b01f310e30509562743c71df9286dd07efaae261182fbec`，双构建字节一致；未执行飞牛应用中心验收，不推进或打包 1.6。申请材料和逐项验证状态见 `store-submission-1.6.0.md`。不自动提交上架、部署、commit、push、tag 或发布，本地结果不替代最终 FPK 的飞牛应用中心真机验收。
