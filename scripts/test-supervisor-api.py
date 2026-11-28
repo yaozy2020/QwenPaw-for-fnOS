@@ -728,7 +728,7 @@ def main():
     print(f"TEST_SUPERVISOR_SHA256={binary_sha256}", flush=True)
     print(f"TEST_RUNTIME_HELPER_SHA256={runtime_sha256}", flush=True)
     print(f"TEST_BINARY_SHA256={binary_sha256}", flush=True)
-    with tempfile.TemporaryDirectory(prefix="qwenpaw-api-") as directory:
+    with tempfile.TemporaryDirectory(prefix="q-") as directory:
         fixtures = []
         try:
             cases = [

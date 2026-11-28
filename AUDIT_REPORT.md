@@ -5,7 +5,7 @@
 
 ## 当前版本：v1.6.0
 
-- **生成时间**：2026-11-25 21:48:01 +0800
+- **生成时间**：2026-11-28 17:38:57 +0800
 - **应用名**：qwenpaw
 - **显示名**：QwenPaw
 - **依赖**：nodejs_v24:python312
@@ -20,7 +20,7 @@
 | 向导清单 | 4 个 |
 | 上游 Python 文件 | 0 个，0 行 |
 | 上游 Plugins | 0 个 .py |
-| CI Workflow | 2 个 |
+| CI Workflow | 3 个 |
 
 ## 生命周期脚本清单
 
@@ -72,8 +72,9 @@
 
 | Workflow | 触发 |
 |:---------|:-----|
-| `ci.yml` | PR 触发，跑 preflight + 前端构建验证 |
-| `release.yml` | tag 或手动触发，fpkstudio 双构建并上传 GitHub Release |
+| `ci.yml` | PR、main 或手动触发完整门禁；validate/rust 通过后上传未签名候选 FPK |
+| `release.yml` | tag 或手动触发，官方最新版 fnpack 签名双构建并上传 GitHub Release |
+| `upstream.yml` | 每日或手动核对 PyPI stable；仅为新版创建适配 Issue，不自动修改版本钉或发布 |
 
 ## 最近发布记录
 

@@ -38,7 +38,7 @@
 ## 配置、安装与运行时
 
 - 配置入口统一进入 Rust 平台模块及 `ManagementCore`。`settings_transaction.rs` 对端口、日志级别及桌面入口维护可恢复事务。HTTP 和私有控制 UDS 共用运行时配置收尾：按事务返回的通知标记先清除认证状态展示缓存，再触发 SSE 状态刷新；空补丁不通知，需刷新的回滚不因返回错误而跳过通知。状态查询不应改写配置。配置向导无损回显并允许保存后端支持的全部六种日志级别（`critical/error/warning/info/debug/trace`）。镜像由 Rust 控制面持久化；向导与管理台共享 `aliyun/tsinghua/ustc/tencent/official` 五源，安装和升级向导的种子值仅在 `pip-mirror` 不存在时写入，保留数据重装及外壳升级继续沿用已有镜像。
-- 安装编排和持久化环境事务位于 `supervisor/src/install/`。安装使用独立 staging/rollback venv；健康检查、版本校验及提交决定遵循事务状态；未提交失败先停止新实例、恢复环境与 pin，再恢复旧服务。恢复不完整时保留证据并阻断写操作。
+- 安装编排和持久化环境事务位于 `supervisor/src/install/`。安装使用独立 staging/rollback venv；引导阶段通过当前下载源安装 `pip>=26.2.2` 与 `uv`，满足 QwenPaw 插件依赖安装器的安全下限，再用 `uv` 安装内核。健康检查、版本校验及提交决定遵循事务状态；未提交失败先停止新实例、恢复环境与 pin，再恢复旧服务。恢复不完整时保留证据并阻断写操作。
 - `supervisor/src/runtime.rs` 的 `RuntimeAdapter` 通过固定 argv 调用受管 Python/venv、pip、QwenPaw CLI，以及限定的 metadata/import 探针和 init。管理策略、JSON 业务、联网版本解析不由 Python 实现；QwenPaw 自身的 Python/Node 依赖仍是受管运行时要求。
 - `VenvTransaction::activate` 在激活暂存环境前，由 `supervisor/src/install/io.rs` 的 `relocate_console_script_shebangs` 将匹配的 console-script shebang 调整为活动 venv 路径。`scripts/test-runtime-venv-contract.py` 提供真实 venv 的 `sys.prefix`、import、shebang/执行及后续 pip 契约检查入口。
 - `supervisor/src/version_index.rs` 使用 Rust HTTP 与 HTML 解析实现 Simple Index 版本查询；TLS、网络可用性与 fnOS 实际镜像访问仍须按相应测试/平台环境验证。

@@ -16,7 +16,6 @@ if [ -z "$PROJ_DIR" ] || [ "$PROJ_DIR" = "/" ]; then
   echo "ERROR: 无法确定安全的项目目录" >&2
   exit 1
 fi
-STAGE="$PROJ_DIR/build/staging"
 VERSION=$(grep '^version' "$PROJ_DIR/manifest" | awk -F'=' '{print $2}' | tr -d ' ')
 # 版本号提取必须有失败保护:manifest 格式漂移(缩进/换行/键改名)会让这里静默得到
 # 空串,产出文件名变成 "qwenpaw--x86.fpk" 并一路带到 Release 里。
@@ -33,8 +32,28 @@ fi
 FPK_OUT="${FPK_OUT:-${PROJ_DIR}/build/output}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJ_DIR" log -1 --format=%ct 2>/dev/null || echo 0)}"
 export SOURCE_DATE_EPOCH
-mkdir -p "$FPK_OUT"
-OUTPUT="${FPK_OUT}/qwenpaw_v${VERSION}.fpk"
+mkdir -p "$FPK_OUT" || exit 1
+FPK_OUT="$(cd "$FPK_OUT" && pwd)" || exit 1
+FPK_NAME="qwenpaw-${VERSION}-x86.fpk"
+case "${FPK_MODE:-signed}" in
+  signed) FN_ARGS=() ;;
+  debug) FN_ARGS=(--nosign); FPK_NAME="${FPK_NAME%.fpk}-debug.fpk" ;;
+  *) echo 'ERROR: FPK_MODE 只接受 signed 或 debug' >&2; exit 1 ;;
+esac
+if [ -n "${FNPACK_KEY:-}${FNPACK_CERT:-}" ]; then
+  if [ "${FPK_MODE:-signed}" != signed ] || [ ! -r "${FNPACK_KEY:-}" ] || [ ! -r "${FNPACK_CERT:-}" ]; then
+    echo 'ERROR: 签名需要成对提供可读的 FNPACK_KEY 和 FNPACK_CERT 文件' >&2; exit 1
+  fi
+  FN_ARGS=(--key "$(realpath "$FNPACK_KEY")" --cert "$(realpath "$FNPACK_CERT")")
+fi
+OUTPUT="$FPK_OUT/$FPK_NAME"
+PACK_WORK="$(mktemp -d "$FPK_OUT/.fnpack.XXXXXXXX")" || exit 1
+trap 'rm -rf -- "$PACK_WORK"' EXIT
+STAGE="$PACK_WORK/staging"
+mkdir -p "$STAGE" "$PACK_WORK/tmp" || exit 1
+resolver=(python3 "$PROJ_DIR/tools/resolve-fnpack.py" "$PACK_WORK")
+if [ -n "${FNPACK_EXPECTED:-}" ]; then resolver+=("$FNPACK_EXPECTED"); fi
+"${resolver[@]}" || exit 1
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -113,9 +132,6 @@ export BUILD_ID
 
 # [2/4] staging 唯一权威白名单目录树与权限归一化
 echo "[2/4] staging 唯一权威白名单物化与权限归一化 ..."
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-
 # 顶层纯净白名单:清单/许可/图标 (mode 0644)
 cp "$PROJ_DIR/manifest" "$STAGE/manifest" || { echo "ERROR: 复制 manifest 失败"; exit 1; }
 cp "$PROJ_DIR/LICENSE" "$STAGE/LICENSE" || { echo "ERROR: 复制 LICENSE 失败"; exit 1; }
@@ -198,38 +214,30 @@ cp -R "$PROJ_DIR/patches/$PATCH_NAME" "$PATCH_STAGE" || { echo "ERROR: 复制兼
 find "$PATCH_STAGE" -type f -exec chmod 0644 {} + || exit 1
 
 # 统一所有目录为 0755 (P1-3 权限归一化)
-find "$STAGE" -type d -exec chmod 0755 {} +
+find "$STAGE" -type d -exec chmod 0755 {} + || exit 1
 
-# [3/4] 调用 fpkstudio 引擎基于 staging 封装 (单一真实物料链)
-echo "[3/4] fpkstudio 极速构建打包 (Unix Socket 引擎) ..."
-export FPK_OUT
-PACK_OUT="$(python3 "$PROJ_DIR/tools/fpkstudio-pack.py" "$STAGE")" || {
-  echo -e "${RED}ERROR: fpkstudio 构建打包失败${NC}"
-  exit 1
-}
-echo "$PACK_OUT"
-
-OUTPUT="$(echo "$PACK_OUT" | grep '^FPK_OUTPUT_PATH=' | cut -d'=' -f2-)"
-if [ -z "$OUTPUT" ] || [ ! -f "$OUTPUT" ]; then
-  echo -e "${RED}ERROR: 未找到产出的 fpk 文件${NC}"
+# fnpack 在当前目录生成 <appname>.fpk，部分错误也会返回 0。
+echo "[3/4] fnpack 构建 FPK (${FPK_MODE:-signed}) ..."
+(cd "$PACK_WORK" && TMPDIR="$PACK_WORK/tmp" ./fnpack build -d "$STAGE" "${FN_ARGS[@]}") || exit 1
+if [ ! -s "$PACK_WORK/qwenpaw.fpk" ]; then
+  echo 'ERROR: fnpack 未生成本次 FPK，请检查上面的打包或签名错误' >&2
   exit 1
 fi
+if [ "${FPK_MODE:-signed}" = debug ]; then
+  python3 "$PROJ_DIR/tools/normalize-fpk.py" "$PACK_WORK/qwenpaw.fpk" "$PACK_WORK/$FPK_NAME" || exit 1
+else
+  # 保留 fnpack 签名后的原始字节。
+  mv "$PACK_WORK/qwenpaw.fpk" "$PACK_WORK/$FPK_NAME" || exit 1
+fi
 
-# [3b/4] FPK 内容审计(白名单/执行位/构建残留) —— 失败即出包失败
 echo "[3b/4] FPK 内容审计 ..."
-bash "$PROJ_DIR/scripts/audit-fpk.sh" "$OUTPUT" || {
-  echo -e "${RED}ERROR: FPK 审计未通过,产物已拒绝(见上方审计输出)${NC}"
-  # 陈旧的 .sha256 一并清掉:留下会指向已被拒绝删除的产物,误导下游校验
-  rm -f "$OUTPUT" "$OUTPUT.sha256"
-  exit 1
-}
+bash "$PROJ_DIR/scripts/audit-fpk.sh" "$PACK_WORK/$FPK_NAME" || exit 1
 
-# [4/4] 计算 SHA256 与归档
-echo "[4/4] 计算签名与收尾 ..."
-# 以纯文件名写入 .sha256:sha256sum 会把传入路径原样写进输出,
-# 用绝对路径会让用户下载后 `sha256sum -c` 因该路径不存在而失败。
-( cd "$(dirname "$OUTPUT")" && sha256sum "$(basename "$OUTPUT")" ) > "${OUTPUT}.sha256"
-rm -rf "$STAGE"
+echo "[4/4] 生成 SHA256 与打包工具记录 ..."
+(cd "$PACK_WORK" && sha256sum "$FPK_NAME" > "$FPK_NAME.sha256") || exit 1
+mv "$PACK_WORK/$FPK_NAME" "$OUTPUT" &&
+  mv "$PACK_WORK/$FPK_NAME.sha256" "$OUTPUT.sha256" &&
+  mv "$PACK_WORK/fnpack.json" "$OUTPUT.fnpack.json" || exit 1
 
 echo ""
 echo -e "${GREEN}===== 纯净 Launcher 打包完成 =====${NC}"

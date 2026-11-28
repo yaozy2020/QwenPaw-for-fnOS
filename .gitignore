@@ -36,5 +36,5 @@ build/output/
 .mypy_cache/
 .ruff_cache/
 
-# fpkstudio 二进制 (大文件由构建环境按需获取)
+# 旧工作树保留的 fpkstudio 缓存
 tools/fpkstudio-bin/
